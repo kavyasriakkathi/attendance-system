@@ -1,0 +1,225 @@
+body {
+    margin: 0;
+    font-family: Arial, sans-serif;
+    background: #f4f7fb;
+    color: #333;
+}
+header {
+    background: #2f5d9f;
+    color: #fff;
+    padding: 16px 24px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+header .brand {
+    font-size: 1.2rem;
+    font-weight: 700;
+}
+nav a {
+    color: white;
+    text-decoration: none;
+    margin-left: 14px;
+    font-weight: 500;
+}
+nav a.logout {
+    background: #f56476;
+    padding: 8px 12px;
+    border-radius: 4px;
+}
+main {
+    padding: 24px;
+    max-width: 1200px;
+    margin: 0 auto;
+}
+.card {
+    background: white;
+    border-radius: 10px;
+    box-shadow: 0 1px 8px rgba(0, 0, 0, 0.08);
+    padding: 20px;
+    margin-bottom: 20px;
+}
+.grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 18px;
+}
+.stat-card p {
+    font-size: 2.2rem;
+    margin: 8px 0 0;
+    color: #2f5d9f;
+}
+form {
+    display: grid;
+    gap: 14px;
+}
+.form-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 14px;
+    align-items: end;
+}
+.form-row.compact {
+    align-items: center;
+}
+.form-row.wrap {
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+}
+label {
+    display: block;
+    font-weight: 600;
+    margin-bottom: 6px;
+}
+input[type="text"],
+input[type="password"],
+input[type="email"],
+input[type="date"],
+select {
+    width: 100%;
+    padding: 10px;
+    border: 1px solid #ccd5e2;
+    border-radius: 6px;
+    box-sizing: border-box;
+}
+button {
+    border: none;
+    background: #2f5d9f;
+    color: white;
+    padding: 12px 18px;
+    border-radius: 8px;
+    cursor: pointer;
+    font-weight: 700;
+}
+button:hover {
+    background: #234a7a;
+}
+.notice {
+    margin-bottom: 12px;
+    color: #2b4f8a;
+    font-weight: 600;
+}
+.button-row {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+.button-row .button {
+    display: inline-block;
+    text-decoration: none;
+    text-align: center;
+}
+.stats-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 16px;
+    margin-bottom: 20px;
+}
+.stat-box {
+    background: #f8f9fa;
+    padding: 16px;
+    border-radius: 8px;
+    text-align: center;
+    border: 1px solid #e1e8f1;
+}
+.stat-box h3 {
+    margin: 0 0 8px 0;
+    color: #2f5d9f;
+    font-size: 0.9rem;
+}
+.stat-box .percentage {
+    font-size: 2rem;
+    font-weight: bold;
+    color: #2f5d9f;
+    margin: 8px 0;
+}
+.stat-box .count {
+    font-size: 1.5rem;
+    font-weight: bold;
+    color: #666;
+    margin: 8px 0;
+}
+.percentage-cell {
+    font-weight: bold;
+    padding: 4px 8px;
+    border-radius: 4px;
+}
+.percentage-cell.good {
+    background: #e6f4ea;
+    color: #1a6a3f;
+}
+.percentage-cell.average {
+    background: #fef7e0;
+    color: #8a6d3b;
+}
+.percentage-cell.poor {
+    background: #fdecea;
+    color: #973838;
+}
+table {
+    width: 100%;
+    border-collapse: collapse;
+}
+thead {
+    background: #eef3fb;
+}
+th, td {
+    padding: 10px 12px;
+    border: 1px solid #e1e8f1;
+    text-align: left;
+}
+.flash-container {
+    margin-bottom: 18px;
+}
+.flash {
+    padding: 12px 16px;
+    border-radius: 8px;
+    margin-bottom: 10px;
+}
+.flash.success {
+    background: #e6f4ea;
+    color: #1a6a3f;
+}
+.flash.error {
+    background: #fdecea;
+    color: #973838;
+}
+.login-card {
+    max-width: 420px;
+    margin: 60px auto;
+}
+.login-card h1 {
+    margin-top: 0;
+}
+
+/* Date buttons for existing attendance dates */
+.date-buttons {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 12px;
+}
+
+.date-button {
+    display: inline-block;
+    background: #e8f4fd;
+    color: #2f5d9f;
+    padding: 8px 12px;
+    border-radius: 6px;
+    text-decoration: none;
+    font-size: 0.9rem;
+    border: 1px solid #c8e1f5;
+    transition: all 0.2s ease;
+}
+
+.date-button:hover {
+    background: #d1e7fa;
+    border-color: #a8d1f0;
+    color: #1e4a7a;
+}
+
+/* Small buttons for navigation */
+.button.small {
+    padding: 4px 8px;
+    font-size: 0.8rem;
+    margin-right: 4px;
+}

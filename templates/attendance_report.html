@@ -1,0 +1,150 @@
+{% extends "layout.html" %}
+{% block content %}
+<div class="card">
+    <h1>Attendance Report</h1>
+    <form method="post" class="form-row wrap">
+        <div>
+            <label>Branch</label>
+            <select name="branch_id" onchange="this.form.submit()">
+                <option value="">All branches</option>
+                {% for branch in branches %}
+                <option value="{{ branch.id }}" {% if filters.branch_id and branch.id|string == filters.branch_id|string %}selected{% endif %}>{{ branch.name }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div>
+            <label>Subject</label>
+            <select name="subject_id">
+                <option value="">All subjects</option>
+                {% for subject in subjects %}
+                <option value="{{ subject.id }}" {% if filters.subject_id and subject.id|string == filters.subject_id|string %}selected{% endif %}>{{ subject.name }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div>
+            <label>Student</label>
+            <select name="student_id">
+                <option value="">All students</option>
+                {% for student in students %}
+                <option value="{{ student.id }}" {% if filters.student_id and student.id|string == filters.student_id|string %}selected{% endif %}>{{ student.name }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div>
+            <label>From</label>
+            <input type="date" name="from_date" value="{{ filters.from_date or '' }}" />
+        </div>
+        <div>
+            <label>To</label>
+            <input type="date" name="to_date" value="{{ filters.to_date or '' }}" />
+        </div>
+        <button type="submit">Filter Report</button>
+    </form>
+</div>
+{% if stats %}
+<div class="card">
+    <h2>Attendance Statistics</h2>
+    <div class="stats-grid">
+        <div class="stat-box">
+            <h3>Overall Attendance</h3>
+            <p class="percentage">{{ stats.overall_percentage }}%</p>
+            <p>{{ stats.overall_present }}/{{ stats.overall_total }} classes</p>
+        </div>
+        <div class="stat-box">
+            <h3>Total Records</h3>
+            <p class="count">{{ stats.total_records }}</p>
+        </div>
+    </div>
+</div>
+{% if stats.student_stats %}
+<div class="card">
+    <h2>Student Attendance Percentages</h2>
+    <table>
+        <thead>
+            <tr>
+                <th>Student Name</th>
+                <th>Enrollment</th>
+                <th>Present/Total</th>
+                <th>Percentage</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for student in stats.student_stats %}
+            <tr>
+                <td>{{ student.name }}</td>
+                <td>{{ student.enrollment }}</td>
+                <td>{{ student.present }}/{{ student.total }}</td>
+                <td>
+                    <span class="percentage-cell {% if student.percentage >= 75 %}good{% elif student.percentage >= 60 %}average{% else %}poor{% endif %}">
+                        {{ student.percentage }}%
+                    </span>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+{% if stats.subject_stats %}
+<div class="card">
+    <h2>Subject Attendance Percentages</h2>
+    <table>
+        <thead>
+            <tr>
+                <th>Subject</th>
+                <th>Present/Total</th>
+                <th>Percentage</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for subject in stats.subject_stats %}
+            <tr>
+                <td>{{ subject.name }}</td>
+                <td>{{ subject.present }}/{{ subject.total }}</td>
+                <td>
+                    <span class="percentage-cell {% if subject.percentage >= 75 %}good{% elif subject.percentage >= 60 %}average{% else %}poor{% endif %}">
+                        {{ subject.percentage }}%
+                    </span>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+{% endif %}
+<div class="card">
+    <table>
+        <thead>
+            <tr>
+                <th>Date</th>
+                <th>Student</th>
+                <th>Enrollment</th>
+                <th>Branch</th>
+                <th>Subject</th>
+                <th>Status</th>
+                <th>Note</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% if records %}
+                {% for record in records %}
+                <tr>
+                    <td>{{ record.date }}</td>
+                    <td>{{ record.student_name }}</td>
+                    <td>{{ record.enrollment }}</td>
+                    <td>{{ record.branch_name }}</td>
+                    <td>{{ record.subject_name }}</td>
+                    <td>{{ record.status }}</td>
+                    <td>{{ record.note or '-' }}</td>
+                </tr>
+                {% endfor %}
+            {% else %}
+                <tr>
+                    <td colspan="7">No attendance records found.</td>
+                </tr>
+            {% endif %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}

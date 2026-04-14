@@ -1,0 +1,13 @@
+{% extends "layout.html" %}
+{% block content %}
+<div class="card">
+    <h1>Attendance Saved</h1>
+    <p>Attendance for <strong>{{ subject_name }}</strong> in branch <strong>{{ branch_name }}</strong> on <strong>{{ selected_date }}</strong> has been recorded.</p>
+    <p><strong>{{ attendance_count }}</strong> attendance entries were saved.</p>
+    <p>To verify, you can view the record in <strong>Reports</strong>.</p>
+    <div class="button-row">
+        <a class="button" href="{{ url_for('mark_attendance', branch_id=request.args.get('branch_id'), subject_id=request.args.get('subject_id'), date=request.args.get('date')) }}">Back to attendance</a>
+        <a class="button" href="{{ url_for('attendance_report', branch_id=request.args.get('branch_id'), subject_id=request.args.get('subject_id'), from_date=request.args.get('date'), to_date=request.args.get('date')) }}">View report</a>
+    </div>
+</div>
+{% endblock %}

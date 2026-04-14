@@ -1,0 +1,167 @@
+{% extends "layout.html" %}
+{% block head %}
+<script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const socket = io();
+
+    socket.on('connect', function() {
+        console.log('Connected to real-time attendance system');
+    });
+
+    socket.on('attendance_saved', function(data) {
+        // Show success notification
+        showNotification('Attendance saved successfully!', 'success');
+
+        // If we're on the same branch/subject, refresh the existing dates
+        const currentBranch = new URLSearchParams(window.location.search).get('branch_id');
+        const currentSubject = new URLSearchParams(window.location.search).get('subject_id');
+
+        if (currentBranch == data.branch_id && currentSubject == data.subject_id) {
+            // Refresh the page to show updated existing dates
+            setTimeout(() => {
+                window.location.reload();
+            }, 1000);
+        }
+    });
+
+    socket.on('status', function(data) {
+        console.log('Status:', data.message);
+    });
+
+    function showNotification(message, type) {
+        const existing = document.querySelector('.notification');
+        if (existing) existing.remove();
+
+        const notification = document.createElement('div');
+        notification.className = `notification ${type}`;
+        notification.style.cssText = `
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            padding: 15px 20px;
+            border-radius: 5px;
+            color: white;
+            font-weight: bold;
+            z-index: 1000;
+            animation: slideIn 0.3s ease-out;
+        `;
+
+        notification.style.backgroundColor = type === 'success' ? '#4CAF50' : '#f44336';
+        notification.textContent = message;
+        document.body.appendChild(notification);
+
+        setTimeout(() => {
+            notification.style.animation = 'slideOut 0.3s ease-in';
+            setTimeout(() => notification.remove(), 300);
+        }, 3000);
+    }
+});
+
+const style = document.createElement('style');
+style.textContent = `
+    @keyframes slideIn {
+        from { transform: translateX(100%); opacity: 0; }
+        to { transform: translateX(0); opacity: 1; }
+    }
+    @keyframes slideOut {
+        from { transform: translateX(0); opacity: 1; }
+        to { transform: translateX(100%); opacity: 0; }
+    }
+`;
+document.head.appendChild(style);
+</script>
+{% endblock %}
+{% block content %}
+<div class="card">
+    <h1>Mark Attendance</h1>
+    <p class="notice">Select a date to mark attendance for that day.</p>
+    <form method="get" class="form-row compact">
+        <div>
+            <label>Branch</label>
+            <select name="branch_id" required onchange="this.form.submit()">
+                <option value="">Choose branch</option>
+                {% for branch in branches %}
+                <option value="{{ branch.id }}" {% if branch_id and branch.id|string == branch_id|string %}selected{% endif %}>{{ branch.name }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        {% if branch_id %}
+        <div>
+            <label>Subject</label>
+            <select name="subject_id" required>
+                <option value="">Choose subject</option>
+                {% for subject in subjects %}
+                <option value="{{ subject.id }}" {% if subject_id and subject.id|string == subject_id|string %}selected{% endif %}>{{ subject.name }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        {% endif %}
+        <div>
+            <label>Date</label>
+            <input type="date" name="date" value="{{ selected_date }}" required />
+            {% if branch_id and subject_id %}
+            <div style="margin-top: 8px;">
+                <a href="{{ url_for('mark_attendance', branch_id=branch_id, subject_id=subject_id, date=prev_date) }}" class="button small">← Previous Day</a>
+                <a href="{{ url_for('mark_attendance', branch_id=branch_id, subject_id=subject_id, date=next_date) }}" class="button small">Next Day →</a>
+            </div>
+            {% endif %}
+        </div>
+        {% if branch_id %}
+        <button type="submit">Load Students</button>
+        {% endif %}
+    </form>
+
+    {% if existing_dates %}
+    <div class="card">
+        <h3>Existing Attendance Dates</h3>
+        <p>Quick select from dates that already have attendance records:</p>
+        <div class="date-buttons">
+            {% for date_info in existing_dates %}
+            <a href="{{ url_for('mark_attendance', branch_id=branch_id, subject_id=subject_id, date=date_info.date) }}" class="date-button">
+                {{ date_info.date }} ({{ date_info.count }} students)
+            </a>
+            {% endfor %}
+        </div>
+    </div>
+    {% endif %}
+{% if students %}
+<div class="card">
+    <form method="post">
+        <input type="hidden" name="branch_id" value="{{ branch_id }}" />
+        <input type="hidden" name="subject_id" value="{{ subject_id }}" />
+        <input type="hidden" name="date" value="{{ selected_date }}" />
+        <table>
+            <thead>
+                <tr>
+                    <th>Student</th>
+                    <th>Enrollment</th>
+                    <th>Status</th>
+                    <th>Note</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for student in students %}
+                <tr>
+                    <td>{{ student.name }}</td>
+                    <td>{{ student.enrollment }}</td>
+                    <td>
+                        <input type="hidden" name="student_id" value="{{ student.id }}" />
+                        <select name="status_{{ student.id }}">
+                            <option value="Present" {% if attendance_map[student.id|string] and attendance_map[student.id|string].status == 'Present' %}selected{% endif %}>Present</option>
+                            <option value="Absent" {% if attendance_map[student.id|string] and attendance_map[student.id|string].status == 'Absent' %}selected{% endif %}>Absent</option>
+                            <option value="Late" {% if attendance_map[student.id|string] and attendance_map[student.id|string].status == 'Late' %}selected{% endif %}>Late</option>
+                        </select>
+                    </td>
+                    <td>
+                        <input type="text" name="note_{{ student.id }}" value="{{ attendance_map[student.id|string].note if attendance_map[student.id|string] else '' }}" />
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        <button type="submit">Save Attendance</button>
+    </form>
+</div>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,52 @@
+{% extends "layout.html" %}
+{% block content %}
+<div class="card">
+    <h1>Students</h1>
+    <form method="post" class="form-row">
+        <div>
+            <label>Name</label>
+            <input type="text" name="name" required />
+        </div>
+        <div>
+            <label>Enrollment</label>
+            <input type="text" name="enrollment" required />
+        </div>
+        <div>
+            <label>Email</label>
+            <input type="email" name="email" />
+        </div>
+        <div>
+            <label>Branch</label>
+            <select name="branch_id" required>
+                <option value="">Choose branch</option>
+                {% for branch in branches %}
+                <option value="{{ branch.id }}">{{ branch.name }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <button type="submit">Add Student</button>
+    </form>
+</div>
+<div class="card">
+    <table>
+        <thead>
+            <tr>
+                <th>Name</th>
+                <th>Enrollment</th>
+                <th>Email</th>
+                <th>Branch</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for student in students %}
+            <tr>
+                <td>{{ student.name }}</td>
+                <td>{{ student.enrollment }}</td>
+                <td>{{ student.email or '-' }}</td>
+                <td>{{ student.branch_name }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}

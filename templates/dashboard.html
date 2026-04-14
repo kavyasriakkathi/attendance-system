@@ -1,0 +1,302 @@
+{% extends "layout.html" %}
+{% block head %}
+<script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const socket = io();
+
+    socket.on('connect', function() {
+        console.log('Connected to real-time server');
+        // Request initial stats
+        socket.emit('request_stats');
+    });
+
+    socket.on('stats_update', function(data) {
+        updateDashboardStats(data);
+    });
+
+    socket.on('attendance_saved', function(data) {
+        showNotification(data.message, 'success');
+        // Refresh stats after attendance is saved
+        socket.emit('request_stats');
+    });
+
+    socket.on('status', function(data) {
+        console.log('Status:', data.message);
+    });
+
+    socket.on('error', function(data) {
+        showNotification(data.message, 'error');
+    });
+
+    function updateDashboardStats(data) {
+        // Update overall percentage
+        const percentageElement = document.querySelector('.percentage');
+        if (percentageElement) {
+            percentageElement.textContent = data.overall_percentage + '%';
+        }
+
+        // Update attendance records count
+        const recordsElement = document.querySelector('.stat-card h2');
+        if (recordsElement && recordsElement.textContent === 'Attendance Records') {
+            const countElement = recordsElement.nextElementSibling;
+            if (countElement) {
+                countElement.textContent = data.total_records;
+            }
+        }
+    }
+
+    function showNotification(message, type) {
+        // Remove existing notifications
+        const existing = document.querySelector('.notification');
+        if (existing) existing.remove();
+
+        // Create new notification
+        const notification = document.createElement('div');
+        notification.className = `notification ${type}`;
+        notification.style.cssText = `
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            padding: 15px 20px;
+            border-radius: 5px;
+            color: white;
+            font-weight: bold;
+            z-index: 1000;
+            animation: slideIn 0.3s ease-out;
+        `;
+
+        if (type === 'success') {
+            notification.style.backgroundColor = '#4CAF50';
+        } else {
+            notification.style.backgroundColor = '#f44336';
+        }
+
+        notification.textContent = message;
+        document.body.appendChild(notification);
+
+        // Auto remove after 5 seconds
+        setTimeout(() => {
+            notification.style.animation = 'slideOut 0.3s ease-in';
+            setTimeout(() => notification.remove(), 300);
+        }, 5000);
+    }
+});
+
+// Add CSS animations
+const style = document.createElement('style');
+style.textContent = `
+    @keyframes slideIn {
+        from { transform: translateX(100%); opacity: 0; }
+        to { transform: translateX(0); opacity: 1; }
+    }
+    @keyframes slideOut {
+        from { transform: translateX(0); opacity: 1; }
+        to { transform: translateX(100%); opacity: 0; }
+    }
+`;
+document.head.appendChild(style);
+</script>
+{% endblock %}
+{% block content %}
+<div class="grid">
+    <div class="card stat-card">
+        <h2>Branches</h2>
+        <p>{{ branch_count }}</p>
+    </div>
+    <div class="card stat-card">
+        <h2>Subjects</h2>
+        <p>{{ subject_count }}</p>
+    </div>
+    <div class="card stat-card">
+        <h2>Students</h2>
+        <p>{{ student_count }}</p>
+    </div>
+    <div class="card stat-card">
+        <h2>Attendance Records</h2>
+        <p>{{ attendance_count }}</p>
+    </div>
+    <div class="card stat-card">
+        <h2>Overall Attendance</h2>
+        <p class="percentage">{{ overall_percentage }}%</p>
+    </div>
+</div>
+<div class="card">
+    <h1>Welcome, {{ session.username }}</h1>
+    <p>This system manages institute branches, subjects, student profiles, attendance marking, and reports.</p>
+    <div class="real-time-indicator">
+        <span class="status-dot"></span>
+        <span>Real-time updates active</span>
+    </div>
+</div>
+
+<div class="card">
+    <h2>Recent Activity</h2>
+    <div id="activity-feed">
+        <p class="loading">Loading recent activity...</p>
+    </div>
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const socket = io();
+    const activityFeed = document.getElementById('activity-feed');
+
+    socket.on('connect', function() {
+        console.log('Connected to real-time server');
+        socket.emit('request_stats');
+    });
+
+    socket.on('stats_update', function(data) {
+        updateDashboardStats(data);
+        updateActivityFeed(data.recent_activity);
+    });
+
+    socket.on('attendance_saved', function(data) {
+        showNotification(data.message, 'success');
+        // Add to activity feed
+        addActivityItem({
+            date: new Date().toISOString().split('T')[0],
+            student: 'Multiple students',
+            subject: 'Updated',
+            status: 'Saved',
+            branch: 'Real-time'
+        });
+        // Refresh stats
+        socket.emit('request_stats');
+    });
+
+    function updateActivityFeed(activities) {
+        if (!activities || activities.length === 0) {
+            activityFeed.innerHTML = '<p>No recent activity</p>';
+            return;
+        }
+
+        activityFeed.innerHTML = '';
+        activities.forEach(activity => {
+            addActivityItem(activity);
+        });
+    }
+
+    function addActivityItem(activity) {
+        const item = document.createElement('div');
+        item.className = 'activity-item';
+        item.innerHTML = `
+            <div class="activity-time">${activity.date}</div>
+            <div class="activity-details">
+                <strong>${activity.student}</strong> marked as <span class="status-${activity.status.toLowerCase()}">${activity.status}</span>
+                in <strong>${activity.subject}</strong> (${activity.branch})
+            </div>
+        `;
+        activityFeed.insertBefore(item, activityFeed.firstChild);
+
+        // Keep only last 10 items
+        while (activityFeed.children.length > 10) {
+            activityFeed.removeChild(activityFeed.lastChild);
+        }
+    }
+
+    function updateDashboardStats(data) {
+        const percentageElement = document.querySelector('.percentage');
+        if (percentageElement) {
+            percentageElement.textContent = data.overall_percentage + '%';
+        }
+
+        const recordsElements = document.querySelectorAll('.stat-card h2');
+        recordsElements.forEach(element => {
+            if (element.textContent === 'Attendance Records') {
+                const countElement = element.nextElementSibling;
+                if (countElement) {
+                    countElement.textContent = data.total_records;
+                }
+            }
+        });
+    }
+
+    function showNotification(message, type) {
+        const existing = document.querySelector('.notification');
+        if (existing) existing.remove();
+
+        const notification = document.createElement('div');
+        notification.className = `notification ${type}`;
+        notification.style.cssText = `
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            padding: 15px 20px;
+            border-radius: 5px;
+            color: white;
+            font-weight: bold;
+            z-index: 1000;
+            animation: slideIn 0.3s ease-out;
+        `;
+
+        notification.style.backgroundColor = type === 'success' ? '#4CAF50' : '#f44336';
+        notification.textContent = message;
+        document.body.appendChild(notification);
+
+        setTimeout(() => {
+            notification.style.animation = 'slideOut 0.3s ease-in';
+            setTimeout(() => notification.remove(), 300);
+        }, 5000);
+    }
+});
+
+const style = document.createElement('style');
+style.textContent = `
+    .real-time-indicator {
+        display: flex;
+        align-items: center;
+        margin-top: 10px;
+        padding: 8px 12px;
+        background: #e8f5e8;
+        border-radius: 4px;
+        font-size: 0.9rem;
+    }
+    .status-dot {
+        width: 8px;
+        height: 8px;
+        background: #4CAF50;
+        border-radius: 50%;
+        margin-right: 8px;
+        animation: pulse 2s infinite;
+    }
+    .activity-item {
+        padding: 10px;
+        border-bottom: 1px solid #eee;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+    }
+    .activity-item:last-child {
+        border-bottom: none;
+    }
+    .activity-time {
+        font-size: 0.8rem;
+        color: #666;
+        min-width: 80px;
+    }
+    .activity-details {
+        flex: 1;
+    }
+    .status-present { color: #4CAF50; font-weight: bold; }
+    .status-absent { color: #f44336; font-weight: bold; }
+    .status-late { color: #ff9800; font-weight: bold; }
+    .loading { color: #666; font-style: italic; }
+    @keyframes pulse {
+        0% { opacity: 1; }
+        50% { opacity: 0.5; }
+        100% { opacity: 1; }
+    }
+    @keyframes slideIn {
+        from { transform: translateX(100%); opacity: 0; }
+        to { transform: translateX(0); opacity: 1; }
+    }
+    @keyframes slideOut {
+        from { transform: translateX(0); opacity: 1; }
+        to { transform: translateX(100%); opacity: 0; }
+    }
+`;
+document.head.appendChild(style);
+</script>
+{% endblock %}

@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Institute Attendance</title>
+    <link rel="stylesheet" href="/static/style.css" />
+    {% block head %}{% endblock %}
+</head>
+<body>
+    <header>
+        <div class="brand">Institute Attendance System</div>
+        {% if session.username %}
+        <nav>
+            <a href="{{ url_for('dashboard') }}">Dashboard</a>
+            <a href="{{ url_for('branches') }}">Branches</a>
+            <a href="{{ url_for('subjects') }}">Subjects</a>
+            <a href="{{ url_for('students') }}">Students</a>
+            <a href="{{ url_for('mark_attendance') }}">Mark Attendance</a>
+            <a href="{{ url_for('attendance_report') }}">Reports</a>
+            <a class="logout" href="{{ url_for('logout') }}">Logout</a>
+        </nav>
+        {% endif %}
+    </header>
+    <main>
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                <div class="flash-container">
+                    {% for category, message in messages %}
+                        <div class="flash {{ category }}">{{ message }}</div>
+                    {% endfor %}
+                </div>
+            {% endif %}
+        {% endwith %}
+        {% block content %}{% endblock %}
+    </main>
+</body>
+</html>

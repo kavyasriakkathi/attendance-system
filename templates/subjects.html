@@ -1,0 +1,40 @@
+{% extends "layout.html" %}
+{% block content %}
+<div class="card">
+    <h1>Subjects</h1>
+    <form method="post" class="form-row">
+        <div>
+            <label>Name</label>
+            <input type="text" name="name" required />
+        </div>
+        <div>
+            <label>Branch</label>
+            <select name="branch_id" required>
+                <option value="">Choose branch</option>
+                {% for branch in branches %}
+                <option value="{{ branch.id }}">{{ branch.name }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <button type="submit">Add Subject</button>
+    </form>
+</div>
+<div class="card">
+    <table>
+        <thead>
+            <tr>
+                <th>Subject</th>
+                <th>Branch</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for subject in subjects %}
+            <tr>
+                <td>{{ subject.name }}</td>
+                <td>{{ subject.branch_name }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}
