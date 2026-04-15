@@ -71,6 +71,21 @@ def init_db():
             ("admin", generate_password_hash("admin123"), "admin"),
         )
     db.commit()
+    admin = db.execute("SELECT id FROM users WHERE username = ?", ("admin",)).fetchone()
+if not admin:
+    db.execute(
+        "INSERT INTO users (username, password, role) VALUES (?, ?, ?)",
+        ("admin", generate_password_hash("admin123"), "admin"),
+    )
+
+teacher = db.execute("SELECT id FROM users WHERE username = ?", ("teacher",)).fetchone()
+if not teacher:
+    db.execute(
+        "INSERT INTO users (username, password, role) VALUES (?, ?, ?)",
+        ("teacher", generate_password_hash("teacher123"), "teacher"),
+    )
+
+    db.commit
     db.close()
 
 
