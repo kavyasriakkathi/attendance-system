@@ -28,6 +28,7 @@
     </form>
 </div>
 <div class="card">
+    <input type="text" id="searchInput" placeholder="Search student by name or enrollment" class="form-control mb-3">
     <table>
         <thead>
             <tr>
@@ -48,5 +49,21 @@
             {% endfor %}
         </tbody>
     </table>
+    <script>
+document.getElementById("searchInput").addEventListener("keyup", function() {
+    let filter = this.value.toLowerCase();
+    let rows = document.querySelectorAll("table tbody tr");
+
+    rows.forEach(function(row) {
+        let text = row.textContent.toLowerCase();
+
+        if (text.includes(filter)) {
+            row.style.display = "";
+        } else {
+            row.style.display = "none";
+        }
+    });
+});
+</script>
 </div>
 {% endblock %}
