@@ -293,7 +293,7 @@ def mark_attendance():
                 'date': selected_date,
                 'count': attendance_count,
                 'message': f'Attendance saved for {attendance_count} students on {selected_date}'
-            }, broadcast=True)
+            })
 
             db.close()
             return redirect(
