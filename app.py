@@ -70,31 +70,22 @@ def init_db():
             "INSERT INTO users (username, password, role) VALUES (?, ?, ?)",
             ("admin", generate_password_hash("admin123"), "admin"),
         )
+        teacher = db.execute("SELECT id FROM users WHERE username = ?", ("teacher1",)).fetchone()
+    if not teacher:
+    db.execute(
+        "INSERT INTO users (username, password, role) VALUES (?, ?, ?)",
+        ("teacher1", generate_password_hash("1234"), "teacher"),
+    )
     db.commit()
-    admin = db.execute("SELECT id FROM users WHERE username = ?", ("admin",)).fetchone()
-if not admin:
-    db.execute(
-        "INSERT INTO users (username, password, role) VALUES (?, ?, ?)",
-        ("admin", generate_password_hash("admin123"), "admin"),
-    )
-
-teacher = db.execute("SELECT id FROM users WHERE username = ?", ("teacher",)).fetchone()
-if not teacher:
-    db.execute(
-        "INSERT INTO users (username, password, role) VALUES (?, ?, ?)",
-        ("teacher", generate_password_hash("teacher123"), "teacher"),
-    )
-
-    db.commit
     db.close()
 
 
 def setup_database():
     init_db()
-
+   
 
 # Flask 3.0 removed before_first_request, so initialize the DB on import.
-setup_database()
+
 
 
 def login_required(view):
