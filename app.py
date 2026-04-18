@@ -12,43 +12,44 @@ app.config["DATABASE"] = "attendance.db"
 
 # Initialize SocketIO
 socketio = SocketIO(app, cors_allowed_origins="*")
-
-
 def get_db():
     conn = sqlite3.connect(app.config["DATABASE"])
     conn.row_factory = sqlite3.Row
     return conn
-
-
 def init_db():
     db = get_db()
-    db.executescript(
-        """
+
+    # ✅ Create tables
+    db.executescript("""
     CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY,
         username TEXT UNIQUE NOT NULL,
         password TEXT NOT NULL,
-        role TEXT NOT NULL
+        role TEXT NOT NULL,
+        student_id INTEGER,
+        FOREIGN KEY(student_id) REFERENCES students(id)
     );
+
     CREATE TABLE IF NOT EXISTS branches (
         id INTEGER PRIMARY KEY,
         name TEXT UNIQUE NOT NULL,
         location TEXT
     );
+
     CREATE TABLE IF NOT EXISTS subjects (
         id INTEGER PRIMARY KEY,
         name TEXT NOT NULL,
-        branch_id INTEGER NOT NULL,
-        FOREIGN KEY(branch_id) REFERENCES branches(id)
+        branch_id INTEGER NOT NULL
     );
+
     CREATE TABLE IF NOT EXISTS students (
         id INTEGER PRIMARY KEY,
         name TEXT NOT NULL,
         enrollment TEXT UNIQUE NOT NULL,
         branch_id INTEGER NOT NULL,
-        email TEXT,
-        FOREIGN KEY(branch_id) REFERENCES branches(id)
+        email TEXT
     );
+
     CREATE TABLE IF NOT EXISTS attendance (
         id INTEGER PRIMARY KEY,
         student_id INTEGER NOT NULL,
@@ -56,47 +57,44 @@ def init_db():
         subject_id INTEGER NOT NULL,
         date TEXT NOT NULL,
         status TEXT NOT NULL,
-        note TEXT,
-        FOREIGN KEY(student_id) REFERENCES students(id),
-        FOREIGN KEY(branch_id) REFERENCES branches(id),
-        FOREIGN KEY(subject_id) REFERENCES subjects(id)
+        note TEXT
     );
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_attendance_student_subject_date ON attendance(student_id, subject_id, date);
-    """
-    )
-    admin = db.execute("SELECT id FROM users WHERE username = ?", ("admin",)).fetchone()
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_attendance_student_subject_date
+    ON attendance(student_id, subject_id, date);
+    """)
+
+    # ✅ Admin check
+    admin = db.execute(
+        "SELECT id FROM users WHERE username = ?", ("admin",)
+    ).fetchone()
+
     if not admin:
         db.execute(
             "INSERT INTO users (username, password, role) VALUES (?, ?, ?)",
             ("admin", generate_password_hash("admin123"), "admin"),
         )
-        teacher = db.execute("SELECT id FROM users WHERE username = ?", ("teacher1",)).fetchone()
+
+    # ✅ Teacher check
+    teacher = db.execute(
+        "SELECT id FROM users WHERE username = ?", ("teacher1",)
+    ).fetchone()
+
     if not teacher:
-    db.execute(
-        "INSERT INTO users (username, password, role) VALUES (?, ?, ?)",
-        ("teacher1", generate_password_hash("1234"), "teacher"),
-    )
+        db.execute(
+            "INSERT INTO users (username, password, role) VALUES (?, ?, ?)",
+            ("teacher1", generate_password_hash("1234"), "teacher"),
+        )
+
     db.commit()
     db.close()
-
-
-def setup_database():
-    init_db()
-   
-
-# Flask 3.0 removed before_first_request, so initialize the DB on import.
-
-
-
 def login_required(view):
     @wraps(view)
     def wrapped_view(**kwargs):
         if not session.get("user_id"):
             return redirect(url_for("login"))
         return view(**kwargs)
-
     return wrapped_view
-
 
 @app.route("/login", methods=["GET", "POST"])
 def login():
@@ -117,36 +115,75 @@ def login():
         flash("Invalid username or password.", "error")
 
     return render_template("login.html")
+@app.route("/student-login", methods=["GET", "POST"])
+def student_login():
+    if request.method == "POST":
+        username = request.form["username"]
+        password = request.form["password"]
+
+        db = get_db()
+        user = db.execute(
+            "SELECT * FROM users WHERE username = ? AND role = 'student'",
+            (username,)
+        ).fetchone()
+        db.close()
+
+        if user and check_password_hash(user["password"], password):
+            session["user_id"] = user["student_id"]   # IMPORTANT
+            session["role"] = "student"
+            return redirect(url_for("student_dashboard"))
+
+        flash("Invalid student login")
+
+    return render_template("student_login.html")
 
 
 @app.route("/logout")
 def logout():
     session.clear()
     return redirect(url_for("login"))
+@app.route("/student-dashboard")
+@login_required
+def student_dashboard():
+    return "Welcome Student Dashboard"
 
 
 @app.route("/")
 @login_required
 def dashboard():
     db = get_db()
-    branch_count = db.execute("SELECT COUNT(*) AS count FROM branches").fetchone()["count"]
-    student_count = db.execute("SELECT COUNT(*) AS count FROM students").fetchone()["count"]
-    subject_count = db.execute("SELECT COUNT(*) AS count FROM subjects").fetchone()["count"]
-    attendance_count = db.execute("SELECT COUNT(*) AS count FROM attendance").fetchone()["count"]
 
-    # Calculate overall attendance percentage
+    branch_count = db.execute("SELECT COUNT(*) FROM branches").fetchone()[0]
+    student_count = db.execute("SELECT COUNT(*) FROM students").fetchone()[0]
+    subject_count = db.execute("SELECT COUNT(*) FROM subjects").fetchone()[0]
+    attendance_count = db.execute("SELECT COUNT(*) FROM attendance").fetchone()[0]
+
     attendance_stats = db.execute("""
         SELECT
-            COUNT(CASE WHEN status = 'Present' THEN 1 END) as present_count,
+            COUNT(CASE WHEN status='Present' THEN 1 END) as present_count,
             COUNT(*) as total_count
         FROM attendance
     """).fetchone()
 
     overall_percentage = 0
     if attendance_stats["total_count"] > 0:
-        overall_percentage = round((attendance_stats["present_count"] / attendance_stats["total_count"]) * 100, 1)
+        overall_percentage = round(
+            (attendance_stats["present_count"] / attendance_stats["total_count"]) * 100, 1
+        )
+
+    subject_data = db.execute("""
+        SELECT subjects.name AS name,
+        ROUND(
+            COUNT(CASE WHEN attendance.status='Present' THEN 1 END)*100.0 / COUNT(*),
+            1
+        ) AS percentage
+        FROM attendance
+        JOIN subjects ON attendance.subject_id = subjects.id
+        GROUP BY subjects.id
+    """).fetchall()
 
     db.close()
+
     return render_template(
         "dashboard.html",
         branch_count=branch_count,
@@ -154,9 +191,8 @@ def dashboard():
         subject_count=subject_count,
         attendance_count=attendance_count,
         overall_percentage=overall_percentage,
+        subject_data=subject_data
     )
-
-
 @app.route("/branches", methods=["GET", "POST"])
 @login_required
 def branches():
@@ -220,6 +256,14 @@ def students():
                     "INSERT INTO students (name, enrollment, email, branch_id) VALUES (?, ?, ?, ?)",
                     (name, enrollment, email, branch_id),
                 )
+                student = db.execute(
+                    "SELECT id FROM students WHERE enrollment = ?", (enrollment,)
+                ).fetchone()
+
+                db.execute(
+    "INSERT INTO users (username, password, role, student_id) VALUES (?, ?, ?, ?)",
+    (enrollment, generate_password_hash("1234"), "student", student["id"]),
+)
                 db.commit()
                 flash("Student added successfully.", "success")
             except sqlite3.IntegrityError:
@@ -532,6 +576,8 @@ def handle_request_stats():
     finally:
         db.close()
 
+# Initialize DB when app starts
+init_db()
 
 if __name__ == "__main__":
-    socketio.run(app, host="0.0.0.0", port=10000)
+    app.run(debug=True)
