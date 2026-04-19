@@ -1,0 +1,25 @@
+{% extends "layout.html" %}
+
+{% block content %}
+<div class="card">
+    <h1>System Settings</h1>
+    <p>Update the low attendance threshold used for email alerts.</p>
+
+    <form method="POST" class="settings-form">
+        <div class="form-group">
+            <label for="threshold">Low Attendance Threshold (%)</label>
+            <input type="number" id="threshold" name="threshold" min="0" max="100" value="{{ threshold }}" required>
+        </div>
+        <button type="submit" class="button">Save Threshold</button>
+    </form>
+
+    <div class="setting-summary">
+        <h2>Current threshold</h2>
+        <p>The system will send low attendance alerts when a student's attendance falls below <strong>{{ threshold }}%</strong>.</p>
+    </div>
+
+    <div class="button-row">
+        <a class="button" href="{{ url_for('dashboard') }}">Back to dashboard</a>
+    </div>
+</div>
+{% endblock %}

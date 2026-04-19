@@ -1,6 +1,9 @@
 import os
 from datetime import date, timedelta
 import sqlite3
+import smtplib
+import ssl
+from email.message import EmailMessage
 
 from flask import Flask, abort, redirect, render_template, request, session, url_for, flash
 from functools import wraps
@@ -14,6 +17,13 @@ app = Flask(__name__)
 app.config.from_mapping(
     SECRET_KEY=os.environ.get("SECRET_KEY", "dev-key-change-in-production"),
     DATABASE=os.environ.get("DATABASE_URL", "attendance.db"),
+    MAIL_SERVER=os.environ.get("MAIL_SERVER", "smtp.gmail.com"),
+    MAIL_PORT=int(os.environ.get("MAIL_PORT", 587)),
+    MAIL_USERNAME=os.environ.get("MAIL_USERNAME"),
+    MAIL_PASSWORD=os.environ.get("MAIL_PASSWORD"),
+    MAIL_USE_TLS=os.environ.get("MAIL_USE_TLS", "True").lower() in ("true", "1", "yes"),
+    MAIL_FROM=os.environ.get("MAIL_FROM", os.environ.get("MAIL_USERNAME")),
+    LOW_ATTENDANCE_THRESHOLD=int(os.environ.get("LOW_ATTENDANCE_THRESHOLD", 75)),
 )
 
 def get_db():
@@ -30,6 +40,117 @@ def get_db():
 
 def get_placeholder():
     return "%s" if app.config["DATABASE"].startswith("postgresql") else "?"
+
+
+def get_setting(db, key, default=None):
+    placeholder = get_placeholder()
+    row = db.execute(
+        f"SELECT value FROM settings WHERE key = {placeholder}",
+        (key,),
+    ).fetchone()
+    if row:
+        try:
+            return int(row["value"])
+        except ValueError:
+            return row["value"]
+    return default
+
+
+def set_setting(db, key, value):
+    placeholder = get_placeholder()
+    existing = db.execute(
+        f"SELECT id FROM settings WHERE key = {placeholder}",
+        (key,),
+    ).fetchone()
+    if existing:
+        db.execute(
+            f"UPDATE settings SET value = {placeholder} WHERE key = {placeholder}",
+            (value, key),
+        )
+    else:
+        db.execute(
+            f"INSERT INTO settings (key, value) VALUES ({placeholder}, {placeholder})",
+            (key, value),
+        )
+
+
+def send_email(subject, recipient, body):
+    if not app.config["MAIL_USERNAME"] or not app.config["MAIL_PASSWORD"]:
+        print("Email not sent: mail credentials not configured.")
+        return
+
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = app.config["MAIL_FROM"]
+    msg["To"] = recipient
+    msg.set_content(body)
+
+    try:
+        if app.config["MAIL_USE_TLS"]:
+            context = ssl.create_default_context()
+            with smtplib.SMTP(app.config["MAIL_SERVER"], app.config["MAIL_PORT"]) as server:
+                server.starttls(context=context)
+                server.login(app.config["MAIL_USERNAME"], app.config["MAIL_PASSWORD"])
+                server.send_message(msg)
+        else:
+            context = ssl.create_default_context()
+            with smtplib.SMTP_SSL(app.config["MAIL_SERVER"], app.config["MAIL_PORT"], context=context) as server:
+                server.login(app.config["MAIL_USERNAME"], app.config["MAIL_PASSWORD"])
+                server.send_message(msg)
+        print(f"Low attendance email sent to {recipient}")
+    except Exception as e:
+        print(f"Failed to send email to {recipient}: {e}")
+
+
+def notify_low_attendance(db, student_ids):
+    if not student_ids:
+        return []
+
+    placeholder = get_placeholder()
+    threshold = get_setting(db, "low_attendance_threshold", app.config["LOW_ATTENDANCE_THRESHOLD"])
+    query = f"""
+        SELECT
+            students.id AS student_id,
+            students.name AS student_name,
+            students.email AS email,
+            ROUND(
+                100.0 * SUM(CASE WHEN attendance.status = 'Present' THEN 1 ELSE 0 END) / COUNT(attendance.id),
+                1
+            ) AS percentage
+        FROM students
+        JOIN attendance ON attendance.student_id = students.id
+        WHERE students.id IN ({', '.join([placeholder] * len(student_ids))})
+        GROUP BY students.id
+        HAVING COUNT(attendance.id) > 0
+    """
+    rows = db.execute(query, tuple(student_ids)).fetchall()
+    emailed_students = []
+
+    for row in rows:
+        if not row["email"]:
+            continue
+        if row["percentage"] < threshold:
+            body = (
+                f"Hello {row['student_name']},\n\n"
+                f"Your current attendance is {row['percentage']}%, which is below the minimum required threshold of {threshold}% for this course.\n"
+                "Please attend classes regularly and check your attendance dashboard for details.\n\n"
+                "If you have any questions, contact your instructor.\n\n"
+                "Best regards,\n"
+                "Attendance Management Team"
+            )
+            send_email(
+                subject=f"Low Attendance Alert: {row['percentage']}%",
+                recipient=row["email"],
+                body=body,
+            )
+            emailed_students.append({
+                "name": row["student_name"],
+                "email": row["email"],
+                "percentage": row["percentage"],
+            })
+
+    return emailed_students
+
 
 def init_db():
     db = get_db()
@@ -83,6 +204,13 @@ def init_db():
         );
         """)
         db.execute("""
+        CREATE TABLE IF NOT EXISTS settings (
+            id SERIAL PRIMARY KEY,
+            key TEXT UNIQUE NOT NULL,
+            value TEXT NOT NULL
+        );
+        """)
+        db.execute("""
         CREATE UNIQUE INDEX IF NOT EXISTS idx_attendance_student_subject_date
         ON attendance(student_id, subject_id, date);
         """)
@@ -128,6 +256,12 @@ def init_db():
             note TEXT
         );
 
+        CREATE TABLE IF NOT EXISTS settings (
+            id INTEGER PRIMARY KEY,
+            key TEXT UNIQUE NOT NULL,
+            value TEXT NOT NULL
+        );
+
         CREATE UNIQUE INDEX IF NOT EXISTS idx_attendance_student_subject_date
         ON attendance(student_id, subject_id, date);
         """)
@@ -152,6 +286,13 @@ def init_db():
         db.execute(
             f"INSERT INTO users (username, password, role) VALUES ({placeholder}, {placeholder}, {placeholder})",
             ("teacher1", generate_password_hash("1234"), "teacher"),
+        )
+
+    # ✅ Default low attendance threshold setting
+    if not db.execute(f"SELECT id FROM settings WHERE key = {placeholder}", ("low_attendance_threshold",)).fetchone():
+        db.execute(
+            f"INSERT INTO settings (key, value) VALUES ({placeholder}, {placeholder})",
+            ("low_attendance_threshold", str(app.config["LOW_ATTENDANCE_THRESHOLD"])),
         )
 
     db.commit()
@@ -246,6 +387,37 @@ def dashboard():
         overall_percentage=overall_percentage,
         subject_data=subject_data
     )
+
+@app.route("/settings", methods=["GET", "POST"])
+@login_required
+def settings():
+    if session.get("role") != "admin":
+        return redirect(url_for("dashboard"))
+
+    db = get_db()
+    placeholder = get_placeholder()
+    threshold = get_setting(db, "low_attendance_threshold", app.config["LOW_ATTENDANCE_THRESHOLD"])
+
+    if request.method == "POST":
+        new_threshold = request.form.get("threshold", "").strip()
+        if new_threshold.isdigit():
+            new_threshold = int(new_threshold)
+            if 0 <= new_threshold <= 100:
+                set_setting(db, "low_attendance_threshold", str(new_threshold))
+                db.commit()
+                app.config["LOW_ATTENDANCE_THRESHOLD"] = new_threshold
+                threshold = new_threshold
+                flash("Low attendance threshold updated successfully.", "success")
+            else:
+                flash("Threshold must be between 0 and 100.", "error")
+        else:
+            flash("Please enter a valid number for the threshold.", "error")
+
+    settings = db.execute(f"SELECT key, value FROM settings ORDER BY key").fetchall()
+    db.close()
+
+    return render_template("settings.html", threshold=threshold, settings=settings)
+
 @app.route("/branches", methods=["GET", "POST"])
 @login_required
 def branches():
@@ -343,8 +515,8 @@ def students():
 @app.route("/student_login", methods=["GET", "POST"])
 def student_login():
     if request.method == "POST":
-        username = request.form["username"].strip()
-        password = request.form["password"].strip()
+        username = request.form.get("username", "").strip()
+        password = request.form.get("password", "").strip()
 
         db = get_db()
         placeholder = get_placeholder()
@@ -356,7 +528,7 @@ def student_login():
             session["user_id"] = user["id"]
             session["username"] = user["username"]
             session["role"] = user["role"]
-            session["student_id"] = user["student_id"]
+            session["student_id"] = user.get("student_id") if isinstance(user, dict) else user["student_id"]
             return redirect(url_for("student_dashboard"))
 
         flash("Invalid student login credentials.", "error")
@@ -515,6 +687,7 @@ def mark_attendance():
         student_ids = request.form.getlist("student_id")
 
         if branch_id and subject_id and student_ids:
+            saved_student_ids = []
             for student_id in student_ids:
                 status = request.form.get(f"status_{student_id}", "Absent")
                 note = request.form.get(f"note_{student_id}", "")
@@ -532,7 +705,12 @@ def mark_attendance():
                         f"INSERT INTO attendance (student_id, branch_id, subject_id, date, status, note) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})",
                         (student_id, branch_id, subject_id, selected_date, status, note),
                     )
+                if student_id.isdigit():
+                    saved_student_ids.append(int(student_id))
             db.commit()
+
+            emailed_students = notify_low_attendance(db, saved_student_ids)
+            session["attendance_email_summary"] = emailed_students
 
             # Emit real-time update (disabled for Render)
             # socketio.emit('attendance_saved', {
@@ -595,12 +773,15 @@ def attendance_success():
     ).fetchone()["count"]
     db.close()
 
+    email_summary = session.pop("attendance_email_summary", [])
+
     return render_template(
         "attendance_success.html",
         branch_name=branch["name"] if branch else "",
         subject_name=subject["name"] if subject else "",
         selected_date=selected_date,
         attendance_count=attendance_count,
+        email_summary=email_summary,
     )
 
 
