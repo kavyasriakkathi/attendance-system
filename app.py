@@ -1,20 +1,12 @@
 import os
-import eventlet
-eventlet.monkey_patch()
 from datetime import date, timedelta
 import sqlite3
 
 from flask import Flask, abort, redirect, render_template, request, session, url_for, flash
-from flask_socketio import SocketIO, emit, join_room
-from functools import wraps
-from werkzeug.security import check_password_hash, generate_password_hash
+# from flask_socketio import SocketIO, emit, join_room
 
-app = Flask(__name__)
-app.secret_key = os.environ.get("SECRET_KEY", "change_this_secret_key")
-app.config["DATABASE"] = os.environ.get("DATABASE_URL", "attendance.db")
-
-# Initialize SocketIO
-socketio = SocketIO(app, cors_allowed_origins="*")
+# # Initialize SocketIO
+# socketio = SocketIO(app, cors_allowed_origins="*")
 
 def get_db():
     if app.config["DATABASE"].startswith("postgresql"):
@@ -499,15 +491,14 @@ def mark_attendance():
                     )
             db.commit()
 
-            # Emit real-time update
-            attendance_count = len(student_ids)
-            socketio.emit('attendance_saved', {
-                'branch_id': branch_id,
-                'subject_id': subject_id,
-                'date': selected_date,
-                'count': attendance_count,
-                'message': f'Attendance saved for {attendance_count} students on {selected_date}'
-            })
+            # Emit real-time update (disabled for Render)
+            # socketio.emit('attendance_saved', {
+            #     'branch_id': branch_id,
+            #     'subject_id': subject_id,
+            #     'date': selected_date,
+            #     'count': attendance_count,
+            #     'message': f'Attendance saved for {attendance_count} students on {selected_date}'
+            # })
 
             db.close()
             return redirect(
@@ -678,70 +669,74 @@ def attendance_report():
     )
 
 
-# SocketIO Event Handlers for Real-time Updates
-@socketio.on('connect')
-def handle_connect():
-    print('Client connected')
-    emit('status', {'message': 'Connected to real-time attendance system'})
+# # SocketIO Event Handlers for Real-time Updates (disabled for Render)
+# @socketio.on('connect')
+# def handle_connect():
+#     print('Client connected')
+#     emit('status', {'message': 'Connected to real-time attendance system'})
 
-@socketio.on('disconnect')
-def handle_disconnect():
-    print('Client disconnected')
+# @socketio.on('disconnect')
+# def handle_disconnect():
+#     print('Client disconnected')
 
-@socketio.on('join_room')
-def handle_join_room(data):
-    """Join a room for real-time updates"""
-    room = data.get('room', 'general')
-    join_room(room)
-    emit('status', {'message': f'Joined room: {room}'})
+# @socketio.on('join_room')
+# def handle_join_room(data):
+#     """Join a room for real-time updates"""
+#     room = data.get('room', 'general')
+#     join_room(room)
+#     emit('status', {'message': f'Joined room: {room}'})
 
-@socketio.on('request_stats')
-def handle_request_stats():
-    """Send current attendance statistics to client"""
-    db = get_db()
-    try:
-        # Get overall attendance stats
-        total_records = db.execute("SELECT COUNT(*) FROM attendance").fetchone()[0]
-        present_count = db.execute("SELECT COUNT(*) FROM attendance WHERE status = 'Present'").fetchone()[0]
-        overall_percentage = (present_count / total_records * 100) if total_records > 0 else 0
+# @socketio.on('request_stats')
+# def handle_request_stats():
+#     """Send current attendance statistics to client"""
+#     db = get_db()
+#     try:
+#         # Get overall attendance stats
+#         total_records = db.execute("SELECT COUNT(*) FROM attendance").fetchone()[0]
+#         present_count = db.execute("SELECT COUNT(*) FROM attendance WHERE status = 'Present'").fetchone()[0]
+#         overall_percentage = (present_count / total_records * 100) if total_records > 0 else 0
 
-        # Get today's attendance
-        today = date.today().isoformat()
-        today_count = db.execute("SELECT COUNT(*) FROM attendance WHERE date = ?", (today,)).fetchone()[0]
+#         # Get today's attendance
+#         today = date.today().isoformat()
+#         today_count = db.execute("SELECT COUNT(*) FROM attendance WHERE date = ?", (today,)).fetchone()[0]
 
-        # Get recent activity (last 5 attendance records)
-        recent_activity = db.execute("""
-            SELECT attendance.date, students.name as student_name, subjects.name as subject_name,
-                   attendance.status, branches.name as branch_name
-            FROM attendance
-            JOIN students ON attendance.student_id = students.id
-            JOIN subjects ON attendance.subject_id = subjects.id
-            JOIN branches ON attendance.branch_id = branches.id
-            ORDER BY attendance.id DESC LIMIT 5
-        """).fetchall()
+#         # Get recent activity (last 5 attendance records)
+#         recent_activity = db.execute("""
+#             SELECT attendance.date, students.name as student_name, subjects.name as subject_name,
+#                    attendance.status, branches.name as branch_name
+#             FROM attendance
+#             JOIN students ON attendance.student_id = students.id
+#             JOIN subjects ON attendance.subject_id = subjects.id
+#             JOIN branches ON attendance.branch_id = branches.id
+#             ORDER BY attendance.id DESC LIMIT 5
+#         """).fetchall()
 
-        stats_data = {
-            'overall_percentage': round(overall_percentage, 1),
-            'total_records': total_records,
-            'today_count': today_count,
-            'recent_activity': [{
-                'date': activity['date'],
-                'student': activity['student_name'],
-                'subject': activity['subject_name'],
-                'status': activity['status'],
-                'branch': activity['branch_name']
-            } for activity in recent_activity]
-        }
+#         stats_data = {
+#             'overall_percentage': round(overall_percentage, 1),
+#             'total_records': total_records,
+#             'today_count': today_count,
+#             'recent_activity': [{
+#                 'date': activity['date'],
+#                 'student': activity['student_name'],
+#                 'subject': activity['subject_name'],
+#                 'status': activity['status'],
+#                 'branch': activity['branch_name']
+#             } for activity in recent_activity]
+#         }
 
-        emit('stats_update', stats_data)
-    except Exception as e:
-        print(f"Error getting stats: {e}")
-        emit('error', {'message': 'Failed to load statistics'})
-    finally:
-        db.close()
+#         emit('stats_update', stats_data)
+#     except Exception as e:
+#         print(f"Error getting stats: {e}")
+#         emit('error', {'message': 'Failed to load statistics'})
+#     finally:
+#         db.close()
 
 # Initialize DB when app starts
-init_db()
+with app.app_context():
+    try:
+        init_db()
+    except Exception as e:
+        print(f"Database initialization failed: {e}")
 
 if __name__ == "__main__":
     socketio.run(app, host="0.0.0.0", port=10000)
