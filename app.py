@@ -1,3 +1,4 @@
+import os
 import eventlet
 eventlet.monkey_patch()
 from datetime import date, timedelta
@@ -9,82 +10,147 @@ from functools import wraps
 from werkzeug.security import check_password_hash, generate_password_hash
 
 app = Flask(__name__)
-app.secret_key = "change_this_secret_key"
-app.config["DATABASE"] = "attendance.db"
+app.secret_key = os.environ.get("SECRET_KEY", "change_this_secret_key")
+app.config["DATABASE"] = os.environ.get("DATABASE_URL", "attendance.db")
 
 # Initialize SocketIO
 socketio = SocketIO(app, cors_allowed_origins="*")
+
 def get_db():
-    conn = sqlite3.connect(app.config["DATABASE"])
-    conn.row_factory = sqlite3.Row
-    return conn
+    if app.config["DATABASE"].startswith("postgresql"):
+        import psycopg2
+        from psycopg2.extras import RealDictCursor
+        conn = psycopg2.connect(app.config["DATABASE"])
+        conn.cursor_factory = RealDictCursor
+        return conn
+    else:
+        conn = sqlite3.connect(app.config["DATABASE"])
+        conn.row_factory = sqlite3.Row
+        return conn
+
+def get_placeholder():
+    return "%s" if app.config["DATABASE"].startswith("postgresql") else "?"
+
 def init_db():
     db = get_db()
+    placeholder = get_placeholder()
 
     # ✅ Create tables
-    db.executescript("""
-    CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY,
-        username TEXT UNIQUE NOT NULL,
-        password TEXT NOT NULL,
-        role TEXT NOT NULL,
-        student_id INTEGER,
-        FOREIGN KEY(student_id) REFERENCES students(id)
-    );
+    if app.config["DATABASE"].startswith("postgresql"):
+        # PostgreSQL specific
+        db.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id SERIAL PRIMARY KEY,
+            username TEXT UNIQUE NOT NULL,
+            password TEXT NOT NULL,
+            role TEXT NOT NULL,
+            student_id INTEGER,
+            FOREIGN KEY(student_id) REFERENCES students(id)
+        );
+        """)
+        db.execute("""
+        CREATE TABLE IF NOT EXISTS branches (
+            id SERIAL PRIMARY KEY,
+            name TEXT UNIQUE NOT NULL,
+            location TEXT
+        );
+        """)
+        db.execute("""
+        CREATE TABLE IF NOT EXISTS subjects (
+            id SERIAL PRIMARY KEY,
+            name TEXT NOT NULL,
+            branch_id INTEGER NOT NULL
+        );
+        """)
+        db.execute("""
+        CREATE TABLE IF NOT EXISTS students (
+            id SERIAL PRIMARY KEY,
+            name TEXT NOT NULL,
+            enrollment TEXT UNIQUE NOT NULL,
+            branch_id INTEGER NOT NULL,
+            email TEXT
+        );
+        """)
+        db.execute("""
+        CREATE TABLE IF NOT EXISTS attendance (
+            id SERIAL PRIMARY KEY,
+            student_id INTEGER NOT NULL,
+            branch_id INTEGER NOT NULL,
+            subject_id INTEGER NOT NULL,
+            date TEXT NOT NULL,
+            status TEXT NOT NULL,
+            note TEXT
+        );
+        """)
+        db.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_attendance_student_subject_date
+        ON attendance(student_id, subject_id, date);
+        """)
+    else:
+        # SQLite
+        db.executescript("""
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY,
+            username TEXT UNIQUE NOT NULL,
+            password TEXT NOT NULL,
+            role TEXT NOT NULL,
+            student_id INTEGER,
+            FOREIGN KEY(student_id) REFERENCES students(id)
+        );
 
-    CREATE TABLE IF NOT EXISTS branches (
-        id INTEGER PRIMARY KEY,
-        name TEXT UNIQUE NOT NULL,
-        location TEXT
-    );
+        CREATE TABLE IF NOT EXISTS branches (
+            id INTEGER PRIMARY KEY,
+            name TEXT UNIQUE NOT NULL,
+            location TEXT
+        );
 
-    CREATE TABLE IF NOT EXISTS subjects (
-        id INTEGER PRIMARY KEY,
-        name TEXT NOT NULL,
-        branch_id INTEGER NOT NULL
-    );
+        CREATE TABLE IF NOT EXISTS subjects (
+            id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
+            branch_id INTEGER NOT NULL
+        );
 
-    CREATE TABLE IF NOT EXISTS students (
-        id INTEGER PRIMARY KEY,
-        name TEXT NOT NULL,
-        enrollment TEXT UNIQUE NOT NULL,
-        branch_id INTEGER NOT NULL,
-        email TEXT
-    );
+        CREATE TABLE IF NOT EXISTS students (
+            id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
+            enrollment TEXT UNIQUE NOT NULL,
+            branch_id INTEGER NOT NULL,
+            email TEXT
+        );
 
-    CREATE TABLE IF NOT EXISTS attendance (
-        id INTEGER PRIMARY KEY,
-        student_id INTEGER NOT NULL,
-        branch_id INTEGER NOT NULL,
-        subject_id INTEGER NOT NULL,
-        date TEXT NOT NULL,
-        status TEXT NOT NULL,
-        note TEXT
-    );
+        CREATE TABLE IF NOT EXISTS attendance (
+            id INTEGER PRIMARY KEY,
+            student_id INTEGER NOT NULL,
+            branch_id INTEGER NOT NULL,
+            subject_id INTEGER NOT NULL,
+            date TEXT NOT NULL,
+            status TEXT NOT NULL,
+            note TEXT
+        );
 
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_attendance_student_subject_date
-    ON attendance(student_id, subject_id, date);
-    """)
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_attendance_student_subject_date
+        ON attendance(student_id, subject_id, date);
+        """)
 
     # ✅ Admin check
     admin = db.execute(
-        "SELECT id FROM users WHERE username = ?", ("admin",)
+        f"SELECT id FROM users WHERE username = {placeholder}", ("admin",)
     ).fetchone()
 
     if not admin:
         db.execute(
-            "INSERT INTO users (username, password, role) VALUES (?, ?, ?)",
+            f"INSERT INTO users (username, password, role) VALUES ({placeholder}, {placeholder}, {placeholder})",
             ("admin", generate_password_hash("admin123"), "admin"),
         )
 
     # ✅ Teacher check
     teacher = db.execute(
-        "SELECT id FROM users WHERE username = ?", ("teacher1",)
+        f"SELECT id FROM users WHERE username = {placeholder}", ("teacher1",)
     ).fetchone()
 
     if not teacher:
         db.execute(
-            "INSERT INTO users (username, password, role) VALUES (?, ?, ?)",
+            f"INSERT INTO users (username, password, role) VALUES ({placeholder}, {placeholder}, {placeholder})",
             ("teacher1", generate_password_hash("1234"), "teacher"),
         )
 
@@ -225,7 +291,8 @@ def subjects():
 @login_required
 def students():
     db = get_db()
-    branches = db.execute("SELECT * FROM branches ORDER BY name").fetchall()
+    placeholder = get_placeholder()
+    branches = db.execute(f"SELECT * FROM branches ORDER BY name").fetchall()
     if request.method == "POST":
         name = request.form["name"].strip()
         enrollment = request.form["enrollment"].strip()
@@ -233,26 +300,33 @@ def students():
         branch_id = request.form.get("branch_id")
         if name and enrollment and branch_id:
             try:
-                cursor = db.execute(
-                    "INSERT INTO students (name, enrollment, email, branch_id) VALUES (?, ?, ?, ?)",
-                    (name, enrollment, email, branch_id),
-                )
-
-                student_id = cursor.lastrowid
+                if app.config["DATABASE"].startswith("postgresql"):
+                    cursor = db.execute(
+                        f"INSERT INTO students (name, enrollment, email, branch_id) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}) RETURNING id",
+                        (name, enrollment, email, branch_id),
+                    )
+                    student_id = cursor.fetchone()[0]
+                else:
+                    cursor = db.execute(
+                        f"INSERT INTO students (name, enrollment, email, branch_id) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder})",
+                        (name, enrollment, email, branch_id),
+                    )
+                    student_id = cursor.lastrowid
 
                 db.execute(
-                    "INSERT INTO users (username, password, role, student_id) VALUES (?, ?, ?, ?)",
+                    f"INSERT INTO users (username, password, role, student_id) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder})",
                     (enrollment, generate_password_hash(enrollment[-4:]), "student", student_id),
                 )
                 db.commit()
                 flash("Student added successfully.", "success")
-            except sqlite3.IntegrityError:
-                flash("Enrollment number already exists.", "error")
+            except Exception as e:
+                print("DB ERROR:", e)
+                flash("Enrollment or username already exists.", "error")
         else:
             flash("Student name, enrollment and branch are required.", "error")
 
     students = db.execute(
-        "SELECT students.*, branches.name AS branch_name FROM students JOIN branches ON students.branch_id = branches.id ORDER BY students.name"
+        f"SELECT students.*, branches.name AS branch_name FROM students JOIN branches ON students.branch_id = branches.id ORDER BY students.name"
     ).fetchall()
     db.close()
     return render_template("students.html", students=students, branches=branches)
