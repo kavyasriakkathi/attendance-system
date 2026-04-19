@@ -3,10 +3,18 @@ from datetime import date, timedelta
 import sqlite3
 
 from flask import Flask, abort, redirect, render_template, request, session, url_for, flash
+from functools import wraps
+from werkzeug.security import check_password_hash, generate_password_hash
 # from flask_socketio import SocketIO, emit, join_room
 
 # # Initialize SocketIO
 # socketio = SocketIO(app, cors_allowed_origins="*")
+
+app = Flask(__name__)
+app.config.from_mapping(
+    SECRET_KEY=os.environ.get("SECRET_KEY", "dev-key-change-in-production"),
+    DATABASE=os.environ.get("DATABASE_URL", "attendance.db"),
+)
 
 def get_db():
     if app.config["DATABASE"].startswith("postgresql"):
@@ -162,7 +170,8 @@ def login():
         password = request.form["password"].strip()
 
         db = get_db()
-        user = db.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
+        placeholder = get_placeholder()
+        user = db.execute(f"SELECT * FROM users WHERE username = {placeholder}", (username,)).fetchone()
         db.close()
 
         if user and check_password_hash(user["password"], password):
@@ -236,20 +245,21 @@ def dashboard():
 @login_required
 def branches():
     db = get_db()
+    placeholder = get_placeholder()
     if request.method == "POST":
         name = request.form["name"].strip()
         location = request.form["location"].strip()
         if name:
             try:
-                db.execute("INSERT INTO branches (name, location) VALUES (?, ?)", (name, location))
+                db.execute(f"INSERT INTO branches (name, location) VALUES ({placeholder}, {placeholder})", (name, location))
                 db.commit()
                 flash("Branch added successfully.", "success")
-            except sqlite3.IntegrityError:
+            except Exception:
                 flash("Branch name already exists.", "error")
         else:
             flash("Branch name is required.", "error")
 
-    branches = db.execute("SELECT * FROM branches ORDER BY name").fetchall()
+    branches = db.execute(f"SELECT * FROM branches ORDER BY name").fetchall()
     db.close()
     return render_template("branches.html", branches=branches)
 
@@ -258,13 +268,14 @@ def branches():
 @login_required
 def subjects():
     db = get_db()
-    branches = db.execute("SELECT * FROM branches ORDER BY name").fetchall()
+    placeholder = get_placeholder()
+    branches = db.execute(f"SELECT * FROM branches ORDER BY name").fetchall()
     if request.method == "POST":
         name = request.form["name"].strip()
         branch_id = request.form.get("branch_id")
         if name and branch_id:
             db.execute(
-                "INSERT INTO subjects (name, branch_id) VALUES (?, ?)",
+                f"INSERT INTO subjects (name, branch_id) VALUES ({placeholder}, {placeholder})",
                 (name, branch_id),
             )
             db.commit()
@@ -273,7 +284,7 @@ def subjects():
             flash("Subject name and branch are required.", "error")
 
     subjects = db.execute(
-        "SELECT subjects.*, branches.name AS branch_name FROM subjects JOIN branches ON subjects.branch_id = branches.id ORDER BY subjects.name"
+        f"SELECT subjects.*, branches.name AS branch_name FROM subjects JOIN branches ON subjects.branch_id = branches.id ORDER BY subjects.name"
     ).fetchall()
     db.close()
     return render_template("subjects.html", subjects=subjects, branches=branches)
@@ -331,7 +342,8 @@ def student_login():
         password = request.form["password"].strip()
 
         db = get_db()
-        user = db.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
+        placeholder = get_placeholder()
+        user = db.execute(f"SELECT * FROM users WHERE username = {placeholder}", (username,)).fetchone()
         db.close()
 
         if user and user["role"] == "student" and check_password_hash(user["password"], password):
@@ -358,12 +370,13 @@ def student_dashboard():
         return redirect(url_for("student_login"))
 
     db = get_db()
+    placeholder = get_placeholder()
     student = db.execute(
-        """
+        f"""
         SELECT students.*, branches.name AS branch_name
         FROM students
         JOIN branches ON students.branch_id = branches.id
-        WHERE students.id = ?
+        WHERE students.id = {placeholder}
         """,
         (student_id,),
     ).fetchone()
@@ -373,11 +386,11 @@ def student_dashboard():
         abort(404)
 
     attendance_records = db.execute(
-        "SELECT attendance.date, attendance.status, subjects.name AS subject_name "
-        "FROM attendance "
-        "JOIN subjects ON attendance.subject_id = subjects.id "
-        "WHERE attendance.student_id = ? "
-        "ORDER BY attendance.date DESC",
+        f"SELECT attendance.date, attendance.status, subjects.name AS subject_name "
+        f"FROM attendance "
+        f"JOIN subjects ON attendance.subject_id = subjects.id "
+        f"WHERE attendance.student_id = {placeholder} "
+        f"ORDER BY attendance.date DESC",
         (student_id,),
     ).fetchall()
 
@@ -398,12 +411,13 @@ def student_dashboard():
 @login_required
 def student_dashboard_by_id(student_id):
     db = get_db()
+    placeholder = get_placeholder()
     student = db.execute(
-        """
+        f"""
         SELECT students.*, branches.name AS branch_name
         FROM students
         JOIN branches ON students.branch_id = branches.id
-        WHERE students.id = ?
+        WHERE students.id = {placeholder}
         """,
         (student_id,),
     ).fetchone()
@@ -413,11 +427,11 @@ def student_dashboard_by_id(student_id):
         abort(404)
 
     attendance_records = db.execute(
-        "SELECT attendance.date, attendance.status, subjects.name AS subject_name "
-        "FROM attendance "
-        "JOIN subjects ON attendance.subject_id = subjects.id "
-        "WHERE attendance.student_id = ? "
-        "ORDER BY attendance.date DESC",
+        f"SELECT attendance.date, attendance.status, subjects.name AS subject_name "
+        f"FROM attendance "
+        f"JOIN subjects ON attendance.subject_id = subjects.id "
+        f"WHERE attendance.student_id = {placeholder} "
+        f"ORDER BY attendance.date DESC",
         (student_id,),
     ).fetchall()
 
@@ -438,7 +452,8 @@ def student_dashboard_by_id(student_id):
 @login_required
 def mark_attendance():
     db = get_db()
-    branches = db.execute("SELECT * FROM branches ORDER BY name").fetchall()
+    placeholder = get_placeholder()
+    branches = db.execute(f"SELECT * FROM branches ORDER BY name").fetchall()
     branch_id = request.args.get("branch_id") or ""
     subject_id = request.args.get("subject_id") or ""
     selected_date = request.args.get("date") or date.today().isoformat()
@@ -453,15 +468,15 @@ def mark_attendance():
 
     if branch_id:
         subjects = db.execute(
-            "SELECT * FROM subjects WHERE branch_id = ? ORDER BY name", (branch_id,)
+            f"SELECT * FROM subjects WHERE branch_id = {placeholder} ORDER BY name", (branch_id,)
         ).fetchall()
     if branch_id and subject_id:
         students = db.execute(
-            "SELECT * FROM students WHERE branch_id = ? ORDER BY name", (branch_id,)
+            f"SELECT * FROM students WHERE branch_id = {placeholder} ORDER BY name", (branch_id,)
         ).fetchall()
         # Get existing attendance dates for this branch/subject
         existing_dates = db.execute(
-            "SELECT date, COUNT(*) as count FROM attendance WHERE branch_id = ? AND subject_id = ? GROUP BY date ORDER BY date DESC",
+            f"SELECT date, COUNT(*) as count FROM attendance WHERE branch_id = {placeholder} AND subject_id = {placeholder} GROUP BY date ORDER BY date DESC",
             (branch_id, subject_id)
         ).fetchall()
 
@@ -476,17 +491,17 @@ def mark_attendance():
                 status = request.form.get(f"status_{student_id}", "Absent")
                 note = request.form.get(f"note_{student_id}", "")
                 existing = db.execute(
-                    "SELECT id FROM attendance WHERE student_id = ? AND subject_id = ? AND date = ?",
+                    f"SELECT id FROM attendance WHERE student_id = {placeholder} AND subject_id = {placeholder} AND date = {placeholder}",
                     (student_id, subject_id, selected_date),
                 ).fetchone()
                 if existing:
                     db.execute(
-                        "UPDATE attendance SET status = ?, note = ? WHERE id = ?",
+                        f"UPDATE attendance SET status = {placeholder}, note = {placeholder} WHERE id = {placeholder}",
                         (status, note, existing["id"]),
                     )
                 else:
                     db.execute(
-                        "INSERT INTO attendance (student_id, branch_id, subject_id, date, status, note) VALUES (?, ?, ?, ?, ?, ?)",
+                        f"INSERT INTO attendance (student_id, branch_id, subject_id, date, status, note) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})",
                         (student_id, branch_id, subject_id, selected_date, status, note),
                     )
             db.commit()
@@ -515,7 +530,7 @@ def mark_attendance():
     attendance_map = {}
     if branch_id and subject_id:
         rows = db.execute(
-            "SELECT student_id, status, note FROM attendance WHERE subject_id = ? AND date = ?",
+            f"SELECT student_id, status, note FROM attendance WHERE subject_id = {placeholder} AND date = {placeholder}",
             (subject_id, selected_date),
         ).fetchall()
         attendance_map = {str(row["student_id"]): row for row in rows}
@@ -543,10 +558,11 @@ def attendance_success():
     subject_id = request.args.get("subject_id") or ""
     selected_date = request.args.get("date") or date.today().isoformat()
     db = get_db()
-    branch = db.execute("SELECT name FROM branches WHERE id = ?", (branch_id,)).fetchone()
-    subject = db.execute("SELECT name FROM subjects WHERE id = ?", (subject_id,)).fetchone()
+    placeholder = get_placeholder()
+    branch = db.execute(f"SELECT name FROM branches WHERE id = {placeholder}", (branch_id,)).fetchone()
+    subject = db.execute(f"SELECT name FROM subjects WHERE id = {placeholder}", (subject_id,)).fetchone()
     attendance_count = db.execute(
-        "SELECT COUNT(*) AS count FROM attendance WHERE branch_id = ? AND subject_id = ? AND date = ?",
+        f"SELECT COUNT(*) AS count FROM attendance WHERE branch_id = {placeholder} AND subject_id = {placeholder} AND date = {placeholder}",
         (branch_id, subject_id, selected_date),
     ).fetchone()["count"]
     db.close()
@@ -564,7 +580,8 @@ def attendance_success():
 @login_required
 def attendance_report():
     db = get_db()
-    branches = db.execute("SELECT * FROM branches ORDER BY name").fetchall()
+    placeholder = get_placeholder()
+    branches = db.execute(f"SELECT * FROM branches ORDER BY name").fetchall()
     subjects = []
     records = []
     filters = {
@@ -577,27 +594,27 @@ def attendance_report():
 
     if filters["branch_id"]:
         subjects = db.execute(
-            "SELECT * FROM subjects WHERE branch_id = ? ORDER BY name", (filters["branch_id"],)
+            f"SELECT * FROM subjects WHERE branch_id = {placeholder} ORDER BY name", (filters["branch_id"],)
         ).fetchall()
 
-    query = "SELECT attendance.*, students.name AS student_name, students.enrollment, branches.name AS branch_name, subjects.name AS subject_name FROM attendance JOIN students ON attendance.student_id = students.id JOIN branches ON attendance.branch_id = branches.id JOIN subjects ON attendance.subject_id = subjects.id"
+    query = f"SELECT attendance.*, students.name AS student_name, students.enrollment, branches.name AS branch_name, subjects.name AS subject_name FROM attendance JOIN students ON attendance.student_id = students.id JOIN branches ON attendance.branch_id = branches.id JOIN subjects ON attendance.subject_id = subjects.id"
     clauses = []
     params = []
 
     if filters["branch_id"]:
-        clauses.append("attendance.branch_id = ?")
+        clauses.append(f"attendance.branch_id = {placeholder}")
         params.append(filters["branch_id"])
     if filters["subject_id"]:
-        clauses.append("attendance.subject_id = ?")
+        clauses.append(f"attendance.subject_id = {placeholder}")
         params.append(filters["subject_id"])
     if filters["student_id"]:
-        clauses.append("attendance.student_id = ?")
+        clauses.append(f"attendance.student_id = {placeholder}")
         params.append(filters["student_id"])
     if filters["from_date"]:
-        clauses.append("attendance.date >= ?")
+        clauses.append(f"attendance.date >= {placeholder}")
         params.append(filters["from_date"])
     if filters["to_date"]:
-        clauses.append("attendance.date <= ?")
+        clauses.append(f"attendance.date <= {placeholder}")
         params.append(filters["to_date"])
 
     if clauses:
@@ -608,7 +625,7 @@ def attendance_report():
     students = []
     if filters["branch_id"]:
         students = db.execute(
-            "SELECT * FROM students WHERE branch_id = ? ORDER BY name", (filters["branch_id"],)
+            f"SELECT * FROM students WHERE branch_id = {placeholder} ORDER BY name", (filters["branch_id"],)
         ).fetchall()
 
     # Calculate attendance percentages
