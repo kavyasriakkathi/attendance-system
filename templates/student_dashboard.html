@@ -1,0 +1,36 @@
+{% extends "layout.html" %}
+
+{% block content %}
+<div class="card">
+    <h1>Student Dashboard</h1>
+
+    <p><strong>Name:</strong> {{ student.name }}</p>
+    <p><strong>Enrollment:</strong> {{ student.enrollment }}</p>
+    <p><strong>Branch:</strong> {{ student.branch_name }}</p>
+    <p><strong>Email:</strong> {{ student.email }}</p>
+    <p><strong>Attendance Percentage:</strong> {{ percentage }}%</p>
+</div>
+
+<div class="card">
+    <h2>Attendance Records</h2>
+
+    <table>
+        <thead>
+            <tr>
+                <th>Date</th>
+                <th>Subject</th>
+                <th>Status</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for record in attendance_records %}
+            <tr>
+                <td>{{ record.date }}</td>
+                <td>{{ record.subject_name }}</td>
+                <td>{{ record.status }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}

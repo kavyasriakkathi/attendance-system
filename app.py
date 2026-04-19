@@ -1,7 +1,9 @@
+import eventlet
+eventlet.monkey_patch()
 from datetime import date, timedelta
 import sqlite3
 
-from flask import Flask, redirect, render_template, request, session, url_for, flash
+from flask import Flask, abort, redirect, render_template, request, session, url_for, flash
 from flask_socketio import SocketIO, emit, join_room
 from functools import wraps
 from werkzeug.security import check_password_hash, generate_password_hash
@@ -95,18 +97,22 @@ def login_required(view):
             return redirect(url_for("login"))
         return view(**kwargs)
     return wrapped_view
-
 @app.route("/login", methods=["GET", "POST"])
 def login():
     if request.method == "POST":
         username = request.form["username"].strip()
-        password = request.form["password"]
+        password = request.form["password"].strip()
 
         db = get_db()
         user = db.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
         db.close()
 
         if user and check_password_hash(user["password"], password):
+            if user["role"] == "student":
+                flash("Please use the student login page.", "error")
+                return redirect(url_for("student_login"))
+
+            session.clear()
             session["user_id"] = user["id"]
             session["username"] = user["username"]
             session["role"] = user["role"]
@@ -115,37 +121,12 @@ def login():
         flash("Invalid username or password.", "error")
 
     return render_template("login.html")
-@app.route("/student-login", methods=["GET", "POST"])
-def student_login():
-    if request.method == "POST":
-        username = request.form["username"]
-        password = request.form["password"]
-
-        db = get_db()
-        user = db.execute(
-            "SELECT * FROM users WHERE username = ? AND role = 'student'",
-            (username,)
-        ).fetchone()
-        db.close()
-
-        if user and check_password_hash(user["password"], password):
-            session["user_id"] = user["student_id"]   # IMPORTANT
-            session["role"] = "student"
-            return redirect(url_for("student_dashboard"))
-
-        flash("Invalid student login")
-
-    return render_template("student_login.html")
 
 
 @app.route("/logout")
 def logout():
     session.clear()
     return redirect(url_for("login"))
-@app.route("/student-dashboard")
-@login_required
-def student_dashboard():
-    return "Welcome Student Dashboard"
 
 
 @app.route("/")
@@ -252,18 +233,17 @@ def students():
         branch_id = request.form.get("branch_id")
         if name and enrollment and branch_id:
             try:
-                db.execute(
+                cursor = db.execute(
                     "INSERT INTO students (name, enrollment, email, branch_id) VALUES (?, ?, ?, ?)",
                     (name, enrollment, email, branch_id),
                 )
-                student = db.execute(
-                    "SELECT id FROM students WHERE enrollment = ?", (enrollment,)
-                ).fetchone()
+
+                student_id = cursor.lastrowid
 
                 db.execute(
-    "INSERT INTO users (username, password, role, student_id) VALUES (?, ?, ?, ?)",
-    (enrollment, generate_password_hash("1234"), "student", student["id"]),
-)
+                    "INSERT INTO users (username, password, role, student_id) VALUES (?, ?, ?, ?)",
+                    (enrollment, generate_password_hash(enrollment[-4:]), "student", student_id),
+                )
                 db.commit()
                 flash("Student added successfully.", "success")
             except sqlite3.IntegrityError:
@@ -276,6 +256,116 @@ def students():
     ).fetchall()
     db.close()
     return render_template("students.html", students=students, branches=branches)
+
+
+@app.route("/student_login", methods=["GET", "POST"])
+def student_login():
+    if request.method == "POST":
+        username = request.form["username"].strip()
+        password = request.form["password"].strip()
+
+        db = get_db()
+        user = db.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
+        db.close()
+
+        if user and user["role"] == "student" and check_password_hash(user["password"], password):
+            session.clear()
+            session["user_id"] = user["id"]
+            session["username"] = user["username"]
+            session["role"] = user["role"]
+            session["student_id"] = user["student_id"]
+            return redirect(url_for("student_dashboard"))
+
+        flash("Invalid student login credentials.", "error")
+
+    return render_template("student_login.html")
+
+
+@app.route("/student_dashboard")
+@login_required
+def student_dashboard():
+    if session.get("role") != "student":
+        return redirect(url_for("dashboard"))
+
+    student_id = session.get("student_id")
+    if not student_id:
+        return redirect(url_for("student_login"))
+
+    db = get_db()
+    student = db.execute(
+        """
+        SELECT students.*, branches.name AS branch_name
+        FROM students
+        JOIN branches ON students.branch_id = branches.id
+        WHERE students.id = ?
+        """,
+        (student_id,),
+    ).fetchone()
+
+    if not student:
+        db.close()
+        abort(404)
+
+    attendance_records = db.execute(
+        "SELECT attendance.date, attendance.status, subjects.name AS subject_name "
+        "FROM attendance "
+        "JOIN subjects ON attendance.subject_id = subjects.id "
+        "WHERE attendance.student_id = ? "
+        "ORDER BY attendance.date DESC",
+        (student_id,),
+    ).fetchall()
+
+    total = len(attendance_records)
+    present = len([a for a in attendance_records if a["status"] == "Present"])
+    percentage = round((present / total) * 100, 1) if total > 0 else 0
+
+    db.close()
+    return render_template(
+        "student_dashboard.html",
+        student=student,
+        attendance_records=attendance_records,
+        percentage=percentage,
+    )
+
+
+@app.route("/student_dashboard/<int:student_id>")
+@login_required
+def student_dashboard_by_id(student_id):
+    db = get_db()
+    student = db.execute(
+        """
+        SELECT students.*, branches.name AS branch_name
+        FROM students
+        JOIN branches ON students.branch_id = branches.id
+        WHERE students.id = ?
+        """,
+        (student_id,),
+    ).fetchone()
+
+    if not student:
+        db.close()
+        abort(404)
+
+    attendance_records = db.execute(
+        "SELECT attendance.date, attendance.status, subjects.name AS subject_name "
+        "FROM attendance "
+        "JOIN subjects ON attendance.subject_id = subjects.id "
+        "WHERE attendance.student_id = ? "
+        "ORDER BY attendance.date DESC",
+        (student_id,),
+    ).fetchall()
+
+    total = len(attendance_records)
+    present = len([a for a in attendance_records if a["status"] == "Present"])
+    percentage = round((present / total) * 100, 1) if total > 0 else 0
+
+    db.close()
+    return render_template(
+        "student_dashboard.html",
+        student=student,
+        attendance_records=attendance_records,
+        percentage=percentage,
+    )
 
 
 @app.route("/attendance", methods=["GET", "POST"])
@@ -580,4 +670,4 @@ def handle_request_stats():
 init_db()
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    socketio.run(app, host="0.0.0.0", port=10000)

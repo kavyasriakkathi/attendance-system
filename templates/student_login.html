@@ -1,7 +1,24 @@
-<h2>Student Login</h2>
+{% extends "layout.html" %}
 
-<form method="POST">
-    <input type="text" name="username" placeholder="Enrollment Number"><br><br>
-    <input type="password" name="password" placeholder="Password"><br><br>
-    <button type="submit">Login</button>
-</form>
+{% block content %}
+<div class="card">
+    <h1>Student Login</h1>
+
+    <form method="post">
+        <div>
+            <label>Enrollment Number</label>
+            <input type="text" name="username" required>
+        </div>
+
+        <div>
+            <label>Password</label>
+            <input type="password" name="password" required>
+        </div>
+
+        <button type="submit">Login</button>
+    </form>
+    <p>
+        <a href="{{ url_for('login') }}">Back to admin login</a>
+    </p>
+</div>
+{% endblock %}

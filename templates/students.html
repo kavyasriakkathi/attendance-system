@@ -36,6 +36,7 @@
                 <th>Enrollment</th>
                 <th>Email</th>
                 <th>Branch</th>
+                <th>Action</th>
             </tr>
         </thead>
         <tbody>
@@ -45,6 +46,7 @@
                 <td>{{ student.enrollment }}</td>
                 <td>{{ student.email or '-' }}</td>
                 <td>{{ student.branch_name }}</td>
+                <td><a href="{{ url_for('student_dashboard_by_id', student_id=student.id) }}">View</a></td>
             </tr>
             {% endfor %}
         </tbody>
