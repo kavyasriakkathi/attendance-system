@@ -364,6 +364,29 @@ def student_login():
     return render_template("student_login.html")
 
 
+@app.route("/teacher_login", methods=["GET", "POST"])
+def teacher_login():
+    if request.method == "POST":
+        username = request.form["username"].strip()
+        password = request.form["password"].strip()
+
+        db = get_db()
+        placeholder = get_placeholder()
+        user = db.execute(f"SELECT * FROM users WHERE username = {placeholder}", (username,)).fetchone()
+        db.close()
+
+        if user and user["role"] == "teacher" and check_password_hash(user["password"], password):
+            session.clear()
+            session["user_id"] = user["id"]
+            session["username"] = user["username"]
+            session["role"] = user["role"]
+            return redirect(url_for("dashboard"))
+
+        flash("Invalid teacher login credentials.", "error")
+
+    return render_template("teacher_login.html")
+
+
 @app.route("/student_dashboard")
 @login_required
 def student_dashboard():

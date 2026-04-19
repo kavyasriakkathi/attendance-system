@@ -5,13 +5,85 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Attendance Management System</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <style>
+        .container {
+            max-width: 800px;
+            margin: 2rem auto;
+            padding: 2rem;
+            text-align: center;
+        }
+
+        h1 {
+            color: #333;
+            margin-bottom: 2rem;
+            font-size: 2.5rem;
+        }
+
+        .login-options {
+            display: flex;
+            justify-content: center;
+            gap: 2rem;
+            flex-wrap: wrap;
+        }
+
+        .btn {
+            padding: 1rem 2rem;
+            border: none;
+            border-radius: 8px;
+            font-size: 1.2rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            text-decoration: none;
+            display: inline-block;
+            min-width: 200px;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(102, 126, 234, 0.4);
+        }
+
+        .btn-secondary {
+            background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+            color: white;
+        }
+
+        .btn-secondary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(245, 87, 108, 0.4);
+        }
+
+        .btn-teacher {
+            background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
+            color: white;
+        }
+
+        .btn-teacher:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(79, 172, 254, 0.4);
+        }
+
+        .welcome-text {
+            margin-bottom: 2rem;
+            color: #666;
+            font-size: 1.1rem;
+        }
+    </style>
 </head>
 <body>
     <div class="container">
-        <h1>Attendance Management System</h1>
+        <h1>🎓 Attendance Management System</h1>
+        <p class="welcome-text">Choose your login portal to access the system</p>
         <div class="login-options">
-            <a href="{{ url_for('login') }}" class="btn btn-primary">Admin Login</a>
-            <a href="{{ url_for('student_login') }}" class="btn btn-secondary">Student Login</a>
+            <a href="{{ url_for('login') }}" class="btn btn-primary">Admin Login 👑</a>
+            <a href="{{ url_for('teacher_login') }}" class="btn btn-teacher">Teacher Login 👨‍🏫</a>
+            <a href="{{ url_for('student_login') }}" class="btn btn-secondary">Student Login 👨‍🎓</a>
         </div>
     </div>
 </body>
