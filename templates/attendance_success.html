@@ -4,6 +4,19 @@
     <h1>Attendance Saved</h1>
     <p>Attendance for <strong>{{ subject_name }}</strong> in branch <strong>{{ branch_name }}</strong> on <strong>{{ selected_date }}</strong> has been recorded.</p>
     <p><strong>{{ attendance_count }}</strong> attendance entries were saved.</p>
+    {% if email_summary %}
+        <div class="notification-summary">
+            <h2>Low Attendance Alerts Sent</h2>
+            <p>The following students were emailed because their attendance is below the threshold:</p>
+            <ul>
+                {% for student in email_summary %}
+                    <li>{{ student.name }} &ndash; {{ student.email }} ({{ student.percentage }}%)</li>
+                {% endfor %}
+            </ul>
+        </div>
+    {% else %}
+        <p>No low-attendance emails were sent.</p>
+    {% endif %}
     <p>To verify, you can view the record in <strong>Reports</strong>.</p>
     <div class="button-row">
         <a class="button" href="{{ url_for('mark_attendance', branch_id=request.args.get('branch_id'), subject_id=request.args.get('subject_id'), date=request.args.get('date')) }}">Back to attendance</a>
