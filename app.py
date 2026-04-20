@@ -382,7 +382,36 @@ def dashboard():
         GROUP BY subjects.id
     """).fetchall()
 
-    db.close()
+    branch_data = db.execute("""
+        SELECT
+            branches.name AS branch_name,
+            branches.location AS location,
+            COUNT(DISTINCT students.id) AS student_count,
+            COUNT(DISTINCT subjects.id) AS subject_count,
+            COUNT(attendance.id) AS attendance_count,
+            ROUND(
+                COUNT(CASE WHEN attendance.status='Present' THEN 1 END)*100.0 / COUNT(attendance.id),
+                1
+            ) AS attendance_percentage
+        FROM branches
+        LEFT JOIN students ON branches.id = students.branch_id
+        LEFT JOIN subjects ON branches.id = subjects.branch_id
+        LEFT JOIN attendance ON branches.id = attendance.branch_id
+        GROUP BY branches.id, branches.name, branches.location
+        ORDER BY branches.name
+    """).fetchall()
+    database_info = {
+        "storage": "PostgreSQL" if app.config["DATABASE"].startswith("postgresql") else "SQLite",
+        "path": app.config["DATABASE"],
+    }
+    mail_info = {
+        "configured": bool(app.config["MAIL_USERNAME"] and app.config["MAIL_PASSWORD"]),
+        "server": app.config["MAIL_SERVER"],
+        "port": app.config["MAIL_PORT"],
+        "username": app.config["MAIL_USERNAME"],
+        "tls": app.config["MAIL_USE_TLS"],
+        "render_env": bool(os.environ.get("RENDER") or os.environ.get("RENDER_INTERNAL_HOSTNAME")),
+    }
 
     return render_template(
         "dashboard.html",
@@ -391,7 +420,10 @@ def dashboard():
         subject_count=subject_count,
         attendance_count=attendance_count,
         overall_percentage=overall_percentage,
-        subject_data=subject_data
+        subject_data=subject_data,
+        branch_data=branch_data,
+        database_info=database_info,
+        mail_info=mail_info,
     )
 
 @app.route("/settings", methods=["GET", "POST"])
@@ -422,7 +454,21 @@ def settings():
     settings = db.execute(f"SELECT key, value FROM settings ORDER BY key").fetchall()
     db.close()
 
-    return render_template("settings.html", threshold=threshold, settings=settings)
+    mail_info = {
+        "configured": bool(app.config["MAIL_USERNAME"] and app.config["MAIL_PASSWORD"]),
+        "server": app.config["MAIL_SERVER"],
+        "port": app.config["MAIL_PORT"],
+        "username": app.config["MAIL_USERNAME"],
+        "tls": app.config["MAIL_USE_TLS"],
+        "render_env": bool(os.environ.get("RENDER") or os.environ.get("RENDER_INTERNAL_HOSTNAME")),
+    }
+
+    return render_template(
+        "settings.html",
+        threshold=threshold,
+        settings=settings,
+        mail_info=mail_info,
+    )
 
 @app.route("/branches", methods=["GET", "POST"])
 @login_required
