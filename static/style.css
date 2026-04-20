@@ -223,3 +223,60 @@ th, td {
     font-size: 0.8rem;
     margin-right: 4px;
 }
+
+/* Branch grid styles */
+.branch-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    gap: 16px;
+    margin-top: 16px;
+}
+
+.branch-card {
+    background: #f8f9fa;
+    border: 1px solid #e1e8f1;
+    border-radius: 8px;
+    padding: 16px;
+    transition: box-shadow 0.2s ease;
+}
+
+.branch-card:hover {
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+}
+
+.branch-card h3 {
+    margin: 0 0 4px 0;
+    color: #2f5d9f;
+    font-size: 1.1rem;
+}
+
+.branch-location {
+    margin: 0 0 12px 0;
+    color: #666;
+    font-size: 0.9rem;
+    font-style: italic;
+}
+
+.branch-stats {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+}
+
+.stat-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 4px 0;
+}
+
+.stat-label {
+    font-weight: 500;
+    color: #555;
+    font-size: 0.9rem;
+}
+
+.stat-value {
+    font-weight: bold;
+    color: #2f5d9f;
+}

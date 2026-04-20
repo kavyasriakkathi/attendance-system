@@ -5,6 +5,13 @@
     <h1>System Settings</h1>
     <p>Update the low attendance threshold used for email alerts.</p>
 
+    {% if not mail_info.configured %}
+    <div class="alert warning" style="background: #fff4e5; border: 1px solid #ffcc80; padding: 16px; margin-bottom: 20px;">
+        <strong>Warning:</strong> Low-attendance email alerts are disabled because mail credentials are not configured.
+        Set <code>MAIL_USERNAME</code> and <code>MAIL_PASSWORD</code> in your environment.
+    </div>
+    {% endif %}
+
     <form method="POST" class="settings-form">
         <div class="form-group">
             <label for="threshold">Low Attendance Threshold (%)</label>

@@ -99,6 +99,12 @@ document.head.appendChild(style);
 </script>
 {% endblock %}
 {% block content %}
+{% if not mail_info.configured %}
+<div class="card" style="background: #fff4e5; border: 1px solid #ffcc80; color: #663c00; margin-bottom: 16px;">
+    <h2 style="margin-top: 0;">Mail configuration required</h2>
+    <p>Low-attendance email alerts are disabled because mail credentials are not configured. Set <code>MAIL_USERNAME</code> and <code>MAIL_PASSWORD</code> in your environment.</p>
+</div>
+{% endif %}
 <div class="grid">
     <div class="card stat-card">
         <h2>Branches</h2>
@@ -121,6 +127,37 @@ document.head.appendChild(style);
         <p class="percentage">{{ overall_percentage }}%</p>
     </div>
 </div>
+
+<div class="card">
+    <h2>Department-wise Overview</h2>
+    <div class="branch-grid">
+        {% for branch in branch_data %}
+        <div class="branch-card">
+            <h3>{{ branch.branch_name }}</h3>
+            <p class="branch-location">{{ branch.location or 'No location specified' }}</p>
+            <div class="branch-stats">
+                <div class="stat-item">
+                    <span class="stat-label">Students:</span>
+                    <span class="stat-value">{{ branch.student_count }}</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">Subjects:</span>
+                    <span class="stat-value">{{ branch.subject_count }}</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">Attendance:</span>
+                    <span class="stat-value">{{ branch.attendance_count }}</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">Avg %:</span>
+                    <span class="stat-value">{{ branch.attendance_percentage or 0 }}%</span>
+                </div>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+</div>
+
 <div class="card">
     <h1>Welcome, {{ session.username }}</h1>
     <p>This system manages institute branches, subjects, student profiles, attendance marking, and reports.</p>
@@ -128,6 +165,17 @@ document.head.appendChild(style);
         <span class="status-dot"></span>
         <span>Real-time updates active</span>
     </div>
+</div>
+
+<div class="card" style="background: #f9fafb; border: 1px solid #d1d5db;">
+    <h2>Debug Info</h2>
+    <p><strong>Storage:</strong> {{ database_info.storage }}</p>
+    <p><strong>Database path / URL:</strong> <code style="word-break: break-all;">{{ database_info.path }}</code></p>
+    <hr>
+    <p><strong>Mail configured:</strong> {{ 'Yes' if mail_info.configured else 'No' }}</p>
+    <p><strong>Mail server:</strong> {{ mail_info.server }} : {{ mail_info.port }}</p>
+    <p><strong>Mail username:</strong> {{ mail_info.username if mail_info.username else 'Not configured' }}</p>
+    <p><strong>Mail TLS:</strong> {{ 'Enabled' if mail_info.tls else 'Disabled' }}</p>
 </div>
 
 <div class="card">
