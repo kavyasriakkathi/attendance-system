@@ -186,18 +186,29 @@ document.head.appendChild(style);
                         if (data.scan_url) {
                             navigator.clipboard.writeText(data.scan_url)
                                 .then(() => {
+                                    copyStatus.textContent = 'Link copied!';
+                                    copyStatus.style.color = '#4CAF50';
                                     copyStatus.style.display = 'inline';
                                     setTimeout(() => copyStatus.style.display = 'none', 3000);
                                 })
                                 .catch(() => {
-                                    alert('Unable to copy URL automatically. Please copy it manually: ' + data.scan_url);
+                                    copyStatus.textContent = 'Unable to copy automatically. Copy manually.';
+                                    copyStatus.style.color = '#f44336';
+                                    copyStatus.style.display = 'inline';
+                                    setTimeout(() => copyStatus.style.display = 'none', 4000);
                                 });
                         } else {
-                            alert('Failed to get scan URL.');
+                            copyStatus.textContent = 'Failed to get scan URL.';
+                            copyStatus.style.color = '#f44336';
+                            copyStatus.style.display = 'inline';
+                            setTimeout(() => copyStatus.style.display = 'none', 4000);
                         }
                     })
                     .catch(() => {
-                        alert('Failed to generate scan URL.');
+                        copyStatus.textContent = 'Failed to generate scan URL.';
+                        copyStatus.style.color = '#f44336';
+                        copyStatus.style.display = 'inline';
+                        setTimeout(() => copyStatus.style.display = 'none', 4000);
                     });
             });
         }
