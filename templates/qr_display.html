@@ -1,0 +1,143 @@
+{% extends "layout.html" %}
+{% block head %}
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<style>
+    .qr-container {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        margin: 40px auto;
+        padding: 40px;
+        background: white;
+        border-radius: 15px;
+        box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+        max-width: 500px;
+        text-align: center;
+    }
+    #qrcode {
+        margin: 20px 0;
+        padding: 20px;
+        background: white;
+        border-radius: 10px;
+        border: 2px solid #f0f0f0;
+    }
+    .qr-info {
+        font-size: 1.2em;
+        color: #333;
+        margin-bottom: 20px;
+    }
+    .timer {
+        color: #666;
+        font-size: 0.9em;
+        margin-top: 20px;
+        width: 100%;
+    }
+    .progress-bar {
+        width: 100%;
+        height: 4px;
+        background: #f0f0f0;
+        border-radius: 2px;
+        margin-top: 10px;
+        overflow: hidden;
+    }
+    .progress-fill {
+        height: 100%;
+        background: #4CAF50;
+        width: 100%;
+        transition: width 1s linear, background-color 1s;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="qr-container">
+    <h2>Scan to Mark Attendance</h2>
+    <div class="qr-info">
+        <strong>{{ branch_name }}</strong><br>
+        {{ subject_name }}<br>
+        <small>{{ date }}</small>
+    </div>
+    
+    <div id="qrcode"></div>
+    
+    <div class="timer">
+        QR Code refreshes in <span id="countdown">300</span> seconds
+        <div class="progress-bar">
+            <div id="progress" class="progress-fill"></div>
+        </div>
+    </div>
+    
+    <div style="margin-top: 20px;">
+        <a href="{{ url_for('mark_attendance', branch_id=branch_id, subject_id=subject_id, date=date) }}" class="button">Back to Attendance</a>
+    </div>
+</div>
+
+<script>
+    const branchId = "{{ branch_id }}";
+    const subjectId = "{{ subject_id }}";
+    const dateStr = "{{ date }}";
+    
+    let qr = null;
+    let countdownInterval;
+    const REFRESH_INTERVAL = 300; // 5 minutes in seconds
+    
+    function generateQR() {
+        fetch(`/api/generate_qr_token?branch_id=${branchId}&subject_id=${subjectId}&date=${dateStr}`)
+            .then(response => response.json())
+            .then(data => {
+                const qrContainer = document.getElementById("qrcode");
+                qrContainer.innerHTML = ""; // Clear existing QR
+                
+                qr = new QRCode(qrContainer, {
+                    text: data.scan_url,
+                    width: 250,
+                    height: 250,
+                    colorDark : "#000000",
+                    colorLight : "#ffffff",
+                    correctLevel : QRCode.CorrectLevel.H
+                });
+                
+                startTimer();
+            })
+            .catch(error => {
+                console.error("Error generating QR token:", error);
+                document.getElementById("qrcode").innerHTML = "<p style='color:red'>Failed to generate QR code. Please try again.</p>";
+            });
+    }
+    
+    function startTimer() {
+        let timeLeft = REFRESH_INTERVAL;
+        const countdownEl = document.getElementById("countdown");
+        const progressEl = document.getElementById("progress");
+        
+        clearInterval(countdownInterval);
+        
+        countdownInterval = setInterval(() => {
+            timeLeft--;
+            countdownEl.textContent = timeLeft;
+            
+            // Update progress bar
+            const percentage = (timeLeft / REFRESH_INTERVAL) * 100;
+            progressEl.style.width = percentage + "%";
+            
+            // Change color as time runs out
+            if (timeLeft < 60) {
+                progressEl.style.backgroundColor = "#f44336"; // Red
+            } else if (timeLeft < 120) {
+                progressEl.style.backgroundColor = "#ff9800"; // Orange
+            } else {
+                progressEl.style.backgroundColor = "#4CAF50"; // Green
+            }
+            
+            if (timeLeft <= 0) {
+                clearInterval(countdownInterval);
+                generateQR(); // Refresh QR code
+            }
+        }, 1000);
+    }
+    
+    // Initialize
+    document.addEventListener("DOMContentLoaded", generateQR);
+</script>
+{% endblock %}

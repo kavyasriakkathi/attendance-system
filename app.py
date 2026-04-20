@@ -12,6 +12,8 @@ from email.message import EmailMessage
 from flask import Flask, abort, redirect, render_template, request, session, url_for, flash
 from functools import wraps
 from werkzeug.security import check_password_hash, generate_password_hash
+from itsdangerous import URLSafeTimedSerializer, SignatureExpired, BadSignature
+from flask import jsonify
 # from flask_socketio import SocketIO, emit, join_room
 
 # # Initialize SocketIO
@@ -521,6 +523,7 @@ def student_login():
     if request.method == "POST":
         username = request.form.get("username", "").strip()
         password = request.form.get("password", "").strip()
+        next_url = request.form.get("next") or request.args.get("next")
 
         db = get_db()
         placeholder = get_placeholder()
@@ -533,6 +536,9 @@ def student_login():
             session["username"] = user["username"]
             session["role"] = user["role"]
             session["student_id"] = user.get("student_id") if isinstance(user, dict) else user["student_id"]
+            
+            if next_url and next_url.startswith("/"):
+                return redirect(next_url)
             return redirect(url_for("student_dashboard"))
 
         flash("Invalid student login credentials.", "error")
@@ -788,6 +794,107 @@ def attendance_success():
         email_summary=email_summary,
     )
 
+@app.route("/api/generate_qr_token", methods=["GET"])
+@login_required
+def generate_qr_token():
+    branch_id = request.args.get("branch_id")
+    subject_id = request.args.get("subject_id")
+    date_str = request.args.get("date")
+
+    if not branch_id or not subject_id or not date_str:
+        return abort(400, "Missing parameters")
+
+    s = URLSafeTimedSerializer(app.config["SECRET_KEY"])
+    token = s.dumps({"branch_id": branch_id, "subject_id": subject_id, "date": date_str})
+    
+    return jsonify({"token": token, "scan_url": url_for("scan_qr", token=token, _external=True)})
+
+@app.route("/generate_qr")
+@login_required
+def generate_qr():
+    branch_id = request.args.get("branch_id")
+    subject_id = request.args.get("subject_id")
+    date_str = request.args.get("date")
+    
+    if not branch_id or not subject_id or not date_str:
+        flash("Missing parameters for QR generation", "error")
+        return redirect(url_for("mark_attendance"))
+        
+    db = get_db()
+    placeholder = get_placeholder()
+    branch = db.execute(f"SELECT name FROM branches WHERE id = {placeholder}", (branch_id,)).fetchone()
+    subject = db.execute(f"SELECT name FROM subjects WHERE id = {placeholder}", (subject_id,)).fetchone()
+    db.close()
+    
+    return render_template(
+        "qr_display.html",
+        branch_id=branch_id,
+        subject_id=subject_id,
+        date=date_str,
+        branch_name=branch["name"] if branch else "",
+        subject_name=subject["name"] if subject else "",
+    )
+
+@app.route("/scan_qr")
+def scan_qr():
+    token = request.args.get("token")
+    if not token:
+        flash("Invalid or missing QR token.", "error")
+        return redirect(url_for("index"))
+
+    # Enforce student login
+    if session.get("role") != "student":
+        flash("You must be logged in as a student to scan QR codes.", "error")
+        return redirect(url_for("student_login", next=request.url))
+
+    s = URLSafeTimedSerializer(app.config["SECRET_KEY"])
+    try:
+        # Token valid for 5 minutes (300 seconds)
+        data = s.loads(token, max_age=300)
+    except SignatureExpired:
+        flash("This QR code has expired. Please ask the teacher to generate a new one.", "error")
+        return redirect(url_for("student_dashboard"))
+    except BadSignature:
+        flash("Invalid QR code.", "error")
+        return redirect(url_for("student_dashboard"))
+
+    branch_id = data.get("branch_id")
+    subject_id = data.get("subject_id")
+    date_str = data.get("date")
+    student_id = session.get("student_id")
+
+    db = get_db()
+    placeholder = get_placeholder()
+    
+    # Check if student belongs to this branch
+    student = db.execute(f"SELECT branch_id FROM students WHERE id = {placeholder}", (student_id,)).fetchone()
+    if not student or str(student["branch_id"]) != str(branch_id):
+        db.close()
+        flash("You are not enrolled in this branch.", "error")
+        return redirect(url_for("student_dashboard"))
+
+    # Mark attendance as present
+    existing = db.execute(
+        f"SELECT id FROM attendance WHERE student_id = {placeholder} AND subject_id = {placeholder} AND date = {placeholder}",
+        (student_id, subject_id, date_str),
+    ).fetchone()
+
+    if existing:
+        db.execute(
+            f"UPDATE attendance SET status = 'Present', note = 'QR Scan' WHERE id = {placeholder}",
+            (existing["id"],),
+        )
+    else:
+        db.execute(
+            f"INSERT INTO attendance (student_id, branch_id, subject_id, date, status, note) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, 'Present', 'QR Scan')",
+            (student_id, branch_id, subject_id, date_str),
+        )
+    
+    db.commit()
+    db.close()
+
+    flash("Attendance successfully marked via QR Code!", "success")
+    return redirect(url_for("student_dashboard"))
 
 @app.route("/reports", methods=["GET", "POST"])
 @login_required
@@ -969,4 +1076,4 @@ with app.app_context():
         print(f"Database initialization failed: {e}")
 
 if __name__ == "__main__":
-    socketio.run(app, host="0.0.0.0", port=10000)
+    app.run(host="0.0.0.0", port=10000, debug=True)

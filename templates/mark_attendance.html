@@ -160,7 +160,10 @@ document.head.appendChild(style);
                 {% endfor %}
             </tbody>
         </table>
-        <button type="submit">Save Attendance</button>
+        <div style="display: flex; gap: 10px;">
+            <button type="submit">Save Attendance</button>
+            <a href="{{ url_for('generate_qr', branch_id=branch_id, subject_id=subject_id, date=selected_date) }}" class="button" style="background-color: #2196F3; text-decoration: none; display: inline-flex; align-items: center; justify-content: center;">Generate QR Code</a>
+        </div>
     </form>
 </div>
 {% endif %}

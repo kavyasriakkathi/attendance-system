@@ -1,0 +1,17 @@
+{% extends "layout.html" %}
+
+{% block content %}
+<div class="card">
+    <h1>Attendance Scan</h1>
+    <p><strong>Branch:</strong> {{ branch_name }}</p>
+    <p><strong>Subject:</strong> {{ subject_name }}</p>
+    <p><strong>Date:</strong> {{ date }}</p>
+    <div class="notice" style="margin-top: 20px;">
+        {{ message }}
+    </div>
+    <div style="margin-top: 25px; display: flex; gap: 10px; flex-wrap: wrap;">
+        <a href="{{ url_for('student_dashboard') }}" class="button">Go to Dashboard</a>
+        <a href="{{ url_for('student_login') }}" class="button">Log out / Switch student</a>
+    </div>
+</div>
+{% endblock %}

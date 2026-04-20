@@ -5,6 +5,10 @@
     <h1>Student Login</h1>
 
     <form method="post">
+        {% if next %}
+        <input type="hidden" name="next" value="{{ next }}">
+        {% endif %}
+
         <div>
             <label>Enrollment Number</label>
             <input type="text" name="username" required>
