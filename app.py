@@ -81,9 +81,9 @@ def set_setting(db, key, value):
 
 
 def send_email(subject, recipient, body):
-    if not app.config["MAIL_USERNAME"] or not app.config["MAIL_PASSWORD"]:
+    if not app.config["MAIL_USERNAME"] or not app.config["MAIL_PASSWORD"] or app.config["MAIL_USERNAME"] == "your_email@gmail.com":
         print("Email not sent: mail credentials not configured.")
-        return
+        return False
 
     msg = EmailMessage()
     msg["Subject"] = subject
@@ -104,8 +104,10 @@ def send_email(subject, recipient, body):
                 server.login(app.config["MAIL_USERNAME"], app.config["MAIL_PASSWORD"])
                 server.send_message(msg)
         print(f"Low attendance email sent to {recipient}")
+        return True
     except Exception as e:
         print(f"Failed to send email to {recipient}: {e}")
+        return False
 
 
 def notify_low_attendance(db, student_ids):
@@ -144,16 +146,17 @@ def notify_low_attendance(db, student_ids):
                 "Best regards,\n"
                 "Attendance Management Team"
             )
-            send_email(
+            success = send_email(
                 subject=f"Low Attendance Alert: {row['percentage']}%",
                 recipient=row["email"],
                 body=body,
             )
-            emailed_students.append({
-                "name": row["student_name"],
-                "email": row["email"],
-                "percentage": row["percentage"],
-            })
+            if success:
+                emailed_students.append({
+                    "name": row["student_name"],
+                    "email": row["email"],
+                    "percentage": row["percentage"],
+                })
 
     return emailed_students
 
