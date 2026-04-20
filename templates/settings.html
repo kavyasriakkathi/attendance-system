@@ -10,6 +10,10 @@
         <strong>Warning:</strong> Low-attendance email alerts are disabled because mail credentials are not configured.
         Set <code>MAIL_USERNAME</code> and <code>MAIL_PASSWORD</code> in your environment.
     </div>
+    {% elif mail_info.render_env %}
+    <div class="alert success" style="background: #e6f4ea; border: 1px solid #a5d6a7; padding: 16px; margin-bottom: 20px; color: #1a6a3f;">
+        <strong>Success:</strong> Render mail environment variables are detected, and email notifications are enabled.
+    </div>
     {% endif %}
 
     <form method="POST" class="settings-form">

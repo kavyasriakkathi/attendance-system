@@ -104,6 +104,11 @@ document.head.appendChild(style);
     <h2 style="margin-top: 0;">Mail configuration required</h2>
     <p>Low-attendance email alerts are disabled because mail credentials are not configured. Set <code>MAIL_USERNAME</code> and <code>MAIL_PASSWORD</code> in your environment.</p>
 </div>
+{% elif mail_info.render_env %}
+<div class="card" style="background: #e6f4ea; border: 1px solid #a5d6a7; color: #1a6a3f; margin-bottom: 16px;">
+    <h2 style="margin-top: 0;">Mail is configured</h2>
+    <p>Mail credentials are detected from Render environment variables. Low-attendance emails are enabled.</p>
+</div>
 {% endif %}
 <div class="grid">
     <div class="card stat-card">
