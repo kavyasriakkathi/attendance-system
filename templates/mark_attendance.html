@@ -160,11 +160,48 @@ document.head.appendChild(style);
                 {% endfor %}
             </tbody>
         </table>
-        <div style="display: flex; gap: 10px;">
+        <div style="display: flex; gap: 10px; flex-wrap: wrap; align-items: center;">
             <button type="submit">Save Attendance</button>
             <a href="{{ url_for('generate_qr', branch_id=branch_id, subject_id=subject_id, date=selected_date) }}" class="button" style="background-color: #2196F3; text-decoration: none; display: inline-flex; align-items: center; justify-content: center;">Generate QR Code</a>
+            <button id="copyAttendanceLinkBtn" type="button" class="button" style="background-color: #4CAF50;">Copy Attendance Scan URL</button>
+            <span id="copyStatus" style="color: #4CAF50; display: none; font-weight: bold;">Link copied!</span>
         </div>
     </form>
 </div>
+{% endif %}
+{% if students %}
+<script>
+    document.addEventListener('DOMContentLoaded', function() {
+        const copyBtn = document.getElementById('copyAttendanceLinkBtn');
+        const copyStatus = document.getElementById('copyStatus');
+        if (copyBtn) {
+            copyBtn.addEventListener('click', function() {
+                const branchId = '{{ branch_id }}';
+                const subjectId = '{{ subject_id }}';
+                const date = '{{ selected_date }}';
+                const url = `/api/generate_qr_token?branch_id=${encodeURIComponent(branchId)}&subject_id=${encodeURIComponent(subjectId)}&date=${encodeURIComponent(date)}`;
+                fetch(url)
+                    .then(response => response.json())
+                    .then(data => {
+                        if (data.scan_url) {
+                            navigator.clipboard.writeText(data.scan_url)
+                                .then(() => {
+                                    copyStatus.style.display = 'inline';
+                                    setTimeout(() => copyStatus.style.display = 'none', 3000);
+                                })
+                                .catch(() => {
+                                    alert('Unable to copy URL automatically. Please copy it manually: ' + data.scan_url);
+                                });
+                        } else {
+                            alert('Failed to get scan URL.');
+                        }
+                    })
+                    .catch(() => {
+                        alert('Failed to generate scan URL.');
+                    });
+            });
+        }
+    });
+</script>
 {% endif %}
 {% endblock %}
