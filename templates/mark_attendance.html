@@ -89,7 +89,7 @@ document.head.appendChild(style);
         {% if branch_id %}
         <div>
             <label>Subject</label>
-            <select name="subject_id" required>
+            <select name="subject_id" required onchange="this.form.submit()">
                 <option value="">Choose subject</option>
                 {% for subject in subjects %}
                 <option value="{{ subject.id }}" {% if subject_id and subject.id|string == subject_id|string %}selected{% endif %}>{{ subject.name }}</option>

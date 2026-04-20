@@ -7,6 +7,9 @@
     <form method="post">
         {% if next %}
         <input type="hidden" name="next" value="{{ next }}">
+        <div class="notice" style="margin-bottom: 16px;">
+            You are logging in to mark attendance for a saved scan link.
+        </div>
         {% endif %}
 
         <div>

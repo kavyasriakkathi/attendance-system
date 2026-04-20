@@ -61,6 +61,16 @@
     
     <div id="qrcode"></div>
     
+    <div id="scanLinkContainer" style="display:none; width:100%; margin-top: 20px; text-align:left;">
+        <div class="qr-info">
+            Save this URL to reuse the same attendance scan link later:
+        </div>
+        <div style="word-break: break-all;">
+            <a id="scanLink" href="#" target="_blank" style="display: inline-block; color: #2196F3; text-decoration: underline;"></a>
+            <button id="copyLinkBtn" type="button" class="button" style="margin-left: 10px; padding: 8px 12px; font-size: 0.9em;">Copy Link</button>
+        </div>
+    </div>
+
     <div class="timer">
         QR Code refreshes in <span id="countdown">300</span> seconds
         <div class="progress-bar">
@@ -97,6 +107,12 @@
                     colorLight : "#ffffff",
                     correctLevel : QRCode.CorrectLevel.H
                 });
+
+                const scanLinkContainer = document.getElementById("scanLinkContainer");
+                const scanLink = document.getElementById("scanLink");
+                scanLink.href = data.scan_url;
+                scanLink.textContent = data.scan_url;
+                scanLinkContainer.style.display = "block";
                 
                 startTimer();
             })
@@ -138,6 +154,17 @@
     }
     
     // Initialize
-    document.addEventListener("DOMContentLoaded", generateQR);
+    document.addEventListener("DOMContentLoaded", () => {
+        generateQR();
+        const copyLinkBtn = document.getElementById("copyLinkBtn");
+        copyLinkBtn.addEventListener("click", () => {
+            const scanLink = document.getElementById("scanLink").href;
+            navigator.clipboard.writeText(scanLink).then(() => {
+                alert("Scan link copied to clipboard");
+            }).catch(() => {
+                alert("Unable to copy scan link. Please copy it manually.");
+            });
+        });
+    });
 </script>
 {% endblock %}
