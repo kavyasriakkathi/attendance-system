@@ -942,6 +942,134 @@ def scan_qr():
     flash("Attendance successfully marked via QR Code!", "success")
     return redirect(url_for("student_dashboard"))
 
+@app.route("/department_dashboard")
+@login_required
+def department_dashboard():
+    db = get_db()
+    placeholder = get_placeholder()
+
+    # Fetch all branches (departments)
+    branches = db.execute("SELECT * FROM branches ORDER BY name").fetchall()
+
+    departments = []
+    total_students = 0
+    total_subjects = 0
+    total_attendance = 0
+    total_present = 0
+
+    for branch in branches:
+        bid = branch["id"]
+
+        # Student count
+        student_count = db.execute(
+            f"SELECT COUNT(*) FROM students WHERE branch_id = {placeholder}", (bid,)
+        ).fetchone()[0]
+
+        # Subject count
+        subject_count = db.execute(
+            f"SELECT COUNT(*) FROM subjects WHERE branch_id = {placeholder}", (bid,)
+        ).fetchone()[0]
+
+        # Attendance counts
+        att_stats = db.execute(
+            f"""SELECT
+                COUNT(*) AS total,
+                COUNT(CASE WHEN status = 'Present' THEN 1 END) AS present
+            FROM attendance WHERE branch_id = {placeholder}""",
+            (bid,),
+        ).fetchone()
+        att_total = att_stats["total"] or 0
+        att_present = att_stats["present"] or 0
+        att_absent = att_total - att_present
+        att_pct = round((att_present / att_total) * 100, 1) if att_total > 0 else 0
+
+        # Subject-wise attendance
+        subject_rows = db.execute(
+            f"""SELECT subjects.name,
+                COUNT(*) AS total,
+                COUNT(CASE WHEN attendance.status = 'Present' THEN 1 END) AS present
+            FROM attendance
+            JOIN subjects ON attendance.subject_id = subjects.id
+            WHERE attendance.branch_id = {placeholder}
+            GROUP BY subjects.id, subjects.name
+            ORDER BY subjects.name""",
+            (bid,),
+        ).fetchall()
+
+        subjects_data = []
+        for s in subject_rows:
+            s_total = s["total"] or 0
+            s_present = s["present"] or 0
+            s_pct = round((s_present / s_total) * 100, 1) if s_total > 0 else 0
+            subjects_data.append({
+                "name": s["name"],
+                "total": s_total,
+                "present": s_present,
+                "absent": s_total - s_present,
+                "pct": s_pct,
+            })
+
+        # Student-wise attendance
+        student_rows = db.execute(
+            f"""SELECT students.id, students.name, students.enrollment, students.email,
+                COUNT(attendance.id) AS total,
+                COUNT(CASE WHEN attendance.status = 'Present' THEN 1 END) AS present
+            FROM students
+            LEFT JOIN attendance ON attendance.student_id = students.id
+            WHERE students.branch_id = {placeholder}
+            GROUP BY students.id, students.name, students.enrollment, students.email
+            ORDER BY students.name""",
+            (bid,),
+        ).fetchall()
+
+        students_data = []
+        for st in student_rows:
+            st_total = st["total"] or 0
+            st_present = st["present"] or 0
+            st_pct = round((st_present / st_total) * 100, 1) if st_total > 0 else 0
+            students_data.append({
+                "id": st["id"],
+                "name": st["name"],
+                "enrollment": st["enrollment"],
+                "email": st["email"],
+                "total": st_total,
+                "present": st_present,
+                "absent": st_total - st_present,
+                "pct": st_pct,
+            })
+
+        departments.append({
+            "id": bid,
+            "name": branch["name"],
+            "location": branch["location"],
+            "student_count": student_count,
+            "subject_count": subject_count,
+            "attendance_count": att_total,
+            "present_count": att_present,
+            "absent_count": att_absent,
+            "attendance_pct": att_pct,
+            "subjects": subjects_data,
+            "students": students_data,
+        })
+
+        total_students += student_count
+        total_subjects += subject_count
+        total_attendance += att_total
+        total_present += att_present
+
+    overall_percentage = round((total_present / total_attendance) * 100, 1) if total_attendance > 0 else 0
+
+    db.close()
+    return render_template(
+        "department_dashboard.html",
+        departments=departments,
+        total_students=total_students,
+        total_subjects=total_subjects,
+        total_attendance=total_attendance,
+        overall_percentage=overall_percentage,
+    )
+
+
 @app.route("/reports", methods=["GET", "POST"])
 @login_required
 def attendance_report():

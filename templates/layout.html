@@ -13,6 +13,7 @@
         {% if session.username %}
         <nav>
             <a href="{{ url_for('dashboard') }}">Dashboard</a>
+            <a href="{{ url_for('department_dashboard') }}">Departments</a>
             <a href="{{ url_for('branches') }}">Branches</a>
             <a href="{{ url_for('subjects') }}">Subjects</a>
             <a href="{{ url_for('students') }}">Students</a>
