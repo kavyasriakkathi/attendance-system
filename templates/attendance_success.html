@@ -4,6 +4,13 @@
     <h1>Attendance Saved</h1>
     <p>Attendance for <strong>{{ subject_name }}</strong> in branch <strong>{{ branch_name }}</strong> on <strong>{{ selected_date }}</strong> has been recorded.</p>
     <p><strong>{{ attendance_count }}</strong> attendance entries were saved.</p>
+    {% if not mail_configured %}
+        <div class="notification-summary" style="background: #fff4e5; border: 1px solid #ffcc80; color: #8a6d3b; padding: 16px; margin-top: 15px; border-radius: 8px;">
+            <h2>Mail not configured</h2>
+            <p>Low-attendance email alerts are disabled because SMTP credentials are not configured.</p>
+            <p>Set <strong>MAIL_USERNAME</strong> and <strong>MAIL_PASSWORD</strong> in your environment to enable email notifications.</p>
+        </div>
+    {% endif %}
     {% if email_summary %}
         <div class="notification-summary">
             <h2>Low Attendance Alerts Sent</h2>
@@ -15,7 +22,9 @@
             </ul>
         </div>
     {% else %}
-        <p>No low-attendance emails were sent.</p>
+        {% if mail_configured %}
+            <p>No low-attendance emails were sent.</p>
+        {% endif %}
     {% endif %}
     <p>To verify, you can view the record in <strong>Reports</strong>.</p>
     <div class="button-row">
