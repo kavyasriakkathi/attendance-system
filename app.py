@@ -838,6 +838,7 @@ def attendance_success():
         selected_date=selected_date,
         attendance_count=attendance_count,
         email_summary=email_summary,
+        mail_configured=bool(app.config["MAIL_USERNAME"] and app.config["MAIL_PASSWORD"]),
     )
 
 @app.route("/api/generate_qr_token", methods=["GET"])
