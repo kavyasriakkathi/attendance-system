@@ -31,6 +31,9 @@
 
     <div class="button-row">
         <a class="button" href="{{ url_for('dashboard') }}">Back to dashboard</a>
+        {% if mail_info.configured %}
+        <a class="button secondary" href="{{ url_for('test_email') }}" style="background: #6c757d; margin-left: 10px;">Test Email Connection</a>
+        {% endif %}
     </div>
 </div>
 {% endblock %}

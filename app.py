@@ -87,7 +87,7 @@ def set_setting(db, key, value):
 def send_email(subject, recipient, body):
     if not app.config["MAIL_USERNAME"] or not app.config["MAIL_PASSWORD"] or app.config["MAIL_USERNAME"] == "your_email@gmail.com":
         print(f"DEBUG: Email to {recipient} NOT sent: mail credentials not configured.")
-        return False
+        return False, "Mail credentials not configured."
 
     msg = EmailMessage()
     msg["Subject"] = subject
@@ -100,19 +100,26 @@ def send_email(subject, recipient, body):
         if app.config["MAIL_USE_TLS"]:
             context = ssl.create_default_context()
             with smtplib.SMTP(app.config["MAIL_SERVER"], app.config["MAIL_PORT"], timeout=10) as server:
+                server.set_debuglevel(1)  # Enable debug output
                 server.starttls(context=context)
                 server.login(app.config["MAIL_USERNAME"], app.config["MAIL_PASSWORD"])
                 server.send_message(msg)
         else:
             context = ssl.create_default_context()
             with smtplib.SMTP_SSL(app.config["MAIL_SERVER"], app.config["MAIL_PORT"], context=context, timeout=10) as server:
+                server.set_debuglevel(1)  # Enable debug output
                 server.login(app.config["MAIL_USERNAME"], app.config["MAIL_PASSWORD"])
                 server.send_message(msg)
         print(f"SUCCESS: Low attendance email sent to {recipient}")
-        return True
+        return True, "Email sent successfully."
+    except smtplib.SMTPAuthenticationError:
+        error_msg = "Authentication failed. Please check your email and app password."
+        print(f"ERROR: {error_msg}")
+        return False, error_msg
     except Exception as e:
-        print(f"ERROR: Failed to send email to {recipient}: {e}")
-        return False
+        error_msg = f"Failed to send email to {recipient}: {str(e)}"
+        print(f"ERROR: {error_msg}")
+        return False, error_msg
 
 
 def notify_low_attendance(db, student_ids, subject_id=None):
@@ -169,7 +176,7 @@ def notify_low_attendance(db, student_ids, subject_id=None):
                 "Best regards,\n"
                 "Attendance Management Team"
             )
-            success = send_email(
+            success, error_msg = send_email(
                 subject=f"Low Attendance Alert ({subject_name}): {row['percentage']}%",
                 recipient=row["email"],
                 body=body,
@@ -1208,6 +1215,30 @@ def attendance_report():
         filters=filters,
         stats=stats,
     )
+
+
+@app.route("/test_email")
+@login_required
+def test_email():
+    if session.get("role") != "admin":
+        flash("Only admins can test email settings.", "error")
+        return redirect(url_for("dashboard"))
+
+    recipient = app.config["MAIL_FROM"]
+    if not recipient:
+        return "MAIL_FROM or MAIL_USERNAME not configured."
+
+    subject = "Test Email from Attendance System"
+    body = "This is a test email to verify your SMTP configuration. If you received this, your email settings are correct!"
+
+    success, message = send_email(subject, recipient, body)
+
+    if success:
+        flash(f"Test email sent successfully to {recipient}!", "success")
+    else:
+        flash(f"Failed to send test email: {message}", "error")
+
+    return redirect(url_for("settings"))
 
 
 # # SocketIO Event Handlers for Real-time Updates (disabled for Render)
