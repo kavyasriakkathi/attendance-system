@@ -24,7 +24,21 @@ Then open your browser at:
 - Username: `admin`
 - Password: `admin123`
 
-## Notes
+## Features & Configuration
 
+### 1. Database Persistence
+The application now uses a persistent SQLite database stored in the `instance/` folder. This ensures that your branches, subjects, and student data remain safe even after logging out or restarting the server.
+
+### 2. Email Notifications
+Automatic email alerts are sent to students whose attendance falls below the threshold (default: 75%) for a specific subject.
+
+To configure email:
+1. Open the `.env` file.
+2. Enter your Gmail address in `MAIL_USERNAME`.
+3. Enter your Google **App Password** in `MAIL_PASSWORD`.
+4. Ensure `MAIL_USE_TLS=True` and `MAIL_PORT=587`.
+
+## Notes
 - This app uses `waitress` as the WSGI server on Windows.
-- The first time it runs, it creates `attendance.db` automatically.
+- The database (`attendance.db`) is stored in the `instance/` directory to ensure data is not lost.
+- To enable email alerts, you must provide valid SMTP credentials in `.env`.
