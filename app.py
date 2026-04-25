@@ -20,13 +20,13 @@ from flask import jsonify
 # socketio = SocketIO(app, cors_allowed_origins="*")
 
 app = Flask(__name__)
-# Ensure the instance folder exists for the database file
-os.makedirs(app.instance_path, exist_ok=True)
+# Get the absolute path of the directory this file is in
+basedir = os.path.abspath(os.path.dirname(__file__))
 
 app.config.from_mapping(
     SECRET_KEY=os.environ.get("SECRET_KEY", "dev-key-change-in-production"),
-    # Use absolute path in instance folder to prevent data loss on restarts/logout
-    DATABASE=os.path.join(app.instance_path, "attendance.db") if not os.environ.get("DATABASE_URL") else os.environ.get("DATABASE_URL"),
+    # Use an absolute path for the database file in the project root
+    DATABASE=os.path.join(basedir, "attendance.db") if not os.environ.get("DATABASE_URL") else os.environ.get("DATABASE_URL"),
     MAIL_SERVER=os.environ.get("MAIL_SERVER", "smtp.gmail.com"),
     MAIL_PORT=int(os.environ.get("MAIL_PORT", 587)),
     MAIL_USERNAME=os.environ.get("MAIL_USERNAME"),
