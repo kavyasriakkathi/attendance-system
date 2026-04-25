@@ -439,6 +439,7 @@ def dashboard():
     database_info = {
         "storage": "PostgreSQL" if app.config["DATABASE"].startswith("postgresql") else "SQLite",
         "path": app.config["DATABASE"],
+        "is_ephemeral": bool(os.environ.get("RENDER") or os.environ.get("RENDER_INTERNAL_HOSTNAME")) and not app.config["DATABASE"].startswith("postgresql")
     }
     mail_info = {
         "configured": bool(app.config["MAIL_USERNAME"] and app.config["MAIL_PASSWORD"]),
@@ -460,6 +461,7 @@ def dashboard():
         branch_data=branch_data,
         database_info=database_info,
         mail_info=mail_info,
+        persistence_warning=database_info["is_ephemeral"]
     )
 
 @app.route("/settings", methods=["GET", "POST"])
