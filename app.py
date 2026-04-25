@@ -19,18 +19,21 @@ from flask import jsonify
 # # Initialize SocketIO
 # socketio = SocketIO(app, cors_allowed_origins="*")
 
-app = Flask(__name__)
-app.config.from_mapping(
-    SECRET_KEY=os.environ.get("SECRET_KEY", "dev-key-change-in-production"),
-    DATABASE=os.environ.get("DATABASE_URL", "attendance.db"),
-    MAIL_SERVER=os.environ.get("MAIL_SERVER", "smtp.gmail.com"),
-    MAIL_PORT=int(os.environ.get("MAIL_PORT", 587)),
-    MAIL_USERNAME=os.environ.get("MAIL_USERNAME"),
-    MAIL_PASSWORD=os.environ.get("MAIL_PASSWORD"),
-    MAIL_USE_TLS=os.environ.get("MAIL_USE_TLS", "True").lower() in ("true", "1", "yes"),
-    MAIL_FROM=os.environ.get("MAIL_FROM", os.environ.get("MAIL_USERNAME")),
-    LOW_ATTENDANCE_THRESHOLD=int(os.environ.get("LOW_ATTENDANCE_THRESHOLD", 75)),
-)
+    app = Flask(__name__)
+    # Ensure instance folder exists for storing the SQLite database
+    os.makedirs(app.instance_path, exist_ok=True)
+    # Use an absolute path for the SQLite database to avoid recreation in different working directories
+    app.config.from_mapping(
+        SECRET_KEY=os.environ.get("SECRET_KEY", "dev-key-change-in-production"),
+        DATABASE=os.path.join(app.instance_path, "attendance.db"),
+        MAIL_SERVER=os.environ.get("MAIL_SERVER", "smtp.gmail.com"),
+        MAIL_PORT=int(os.environ.get("MAIL_PORT", 587)),
+        MAIL_USERNAME=os.environ.get("MAIL_USERNAME"),
+        MAIL_PASSWORD=os.environ.get("MAIL_PASSWORD"),
+        MAIL_USE_TLS=os.environ.get("MAIL_USE_TLS", "True").lower() in ("true", "1", "yes"),
+        MAIL_FROM=os.environ.get("MAIL_FROM", os.environ.get("MAIL_USERNAME")),
+        LOW_ATTENDANCE_THRESHOLD=int(os.environ.get("LOW_ATTENDANCE_THRESHOLD", 75)),
+    )
 
 def get_db():
     if app.config["DATABASE"].startswith("postgresql"):
