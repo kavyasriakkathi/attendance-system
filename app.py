@@ -27,12 +27,12 @@ app.config.from_mapping(
     SECRET_KEY=os.environ.get("SECRET_KEY", "dev-key-change-in-production"),
     # Use an absolute path for the database file in the project root
     DATABASE=os.path.join(basedir, "attendance.db") if not os.environ.get("DATABASE_URL") else os.environ.get("DATABASE_URL"),
-    MAIL_SERVER=os.environ.get("MAIL_SERVER", "smtp.gmail.com"),
+    MAIL_SERVER=os.environ.get("MAIL_SERVER", "smtp.gmail.com").strip().strip('"'),
     MAIL_PORT=int(os.environ.get("MAIL_PORT", 587)),
-    MAIL_USERNAME=os.environ.get("MAIL_USERNAME"),
-    MAIL_PASSWORD=os.environ.get("MAIL_PASSWORD"),
+    MAIL_USERNAME=os.environ.get("MAIL_USERNAME", "").strip().strip('"'),
+    MAIL_PASSWORD=os.environ.get("MAIL_PASSWORD", "").strip().strip('"'),
     MAIL_USE_TLS=os.environ.get("MAIL_USE_TLS", "True").lower() in ("true", "1", "yes"),
-    MAIL_FROM=os.environ.get("MAIL_FROM", os.environ.get("MAIL_USERNAME")),
+    MAIL_FROM=os.environ.get("MAIL_FROM", os.environ.get("MAIL_USERNAME", "")).strip().strip('"'),
     LOW_ATTENDANCE_THRESHOLD=int(os.environ.get("LOW_ATTENDANCE_THRESHOLD", 75)),
 )
 
