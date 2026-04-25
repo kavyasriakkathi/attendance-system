@@ -86,7 +86,7 @@ def set_setting(db, key, value):
 
 def send_email(subject, recipient, body):
     if not app.config["MAIL_USERNAME"] or not app.config["MAIL_PASSWORD"] or app.config["MAIL_USERNAME"] == "your_email@gmail.com":
-        print("Email not sent: mail credentials not configured.")
+        print(f"DEBUG: Email to {recipient} NOT sent: mail credentials not configured.")
         return False
 
     msg = EmailMessage()
@@ -96,30 +96,35 @@ def send_email(subject, recipient, body):
     msg.set_content(body)
 
     try:
+        print(f"DEBUG: Attempting to send email to {recipient} via {app.config['MAIL_SERVER']}:{app.config['MAIL_PORT']}...")
         if app.config["MAIL_USE_TLS"]:
             context = ssl.create_default_context()
-            with smtplib.SMTP(app.config["MAIL_SERVER"], app.config["MAIL_PORT"]) as server:
+            with smtplib.SMTP(app.config["MAIL_SERVER"], app.config["MAIL_PORT"], timeout=10) as server:
                 server.starttls(context=context)
                 server.login(app.config["MAIL_USERNAME"], app.config["MAIL_PASSWORD"])
                 server.send_message(msg)
         else:
             context = ssl.create_default_context()
-            with smtplib.SMTP_SSL(app.config["MAIL_SERVER"], app.config["MAIL_PORT"], context=context) as server:
+            with smtplib.SMTP_SSL(app.config["MAIL_SERVER"], app.config["MAIL_PORT"], context=context, timeout=10) as server:
                 server.login(app.config["MAIL_USERNAME"], app.config["MAIL_PASSWORD"])
                 server.send_message(msg)
-        print(f"Low attendance email sent to {recipient}")
+        print(f"SUCCESS: Low attendance email sent to {recipient}")
         return True
     except Exception as e:
-        print(f"Failed to send email to {recipient}: {e}")
+        print(f"ERROR: Failed to send email to {recipient}: {e}")
         return False
 
 
-def notify_low_attendance(db, student_ids):
+def notify_low_attendance(db, student_ids, subject_id=None):
     if not student_ids:
         return []
 
     placeholder = get_placeholder()
     threshold = get_setting(db, "low_attendance_threshold", app.config["LOW_ATTENDANCE_THRESHOLD"])
+    
+    # Filter by subject if provided, otherwise check overall attendance
+    subject_clause = f"AND attendance.subject_id = {placeholder}" if subject_id else ""
+    
     query = f"""
         SELECT
             students.id AS student_id,
@@ -128,30 +133,44 @@ def notify_low_attendance(db, student_ids):
             ROUND(
                 100.0 * SUM(CASE WHEN attendance.status = 'Present' THEN 1 ELSE 0 END) / COUNT(attendance.id),
                 1
-            ) AS percentage
+            ) AS percentage,
+            subjects.name AS subject_name
         FROM students
         JOIN attendance ON attendance.student_id = students.id
+        JOIN subjects ON attendance.subject_id = subjects.id
         WHERE students.id IN ({', '.join([placeholder] * len(student_ids))})
-        GROUP BY students.id
+        {subject_clause}
+        GROUP BY students.id, subjects.id
         HAVING COUNT(attendance.id) > 0
     """
-    rows = db.execute(query, tuple(student_ids)).fetchall()
+    
+    params = list(student_ids)
+    if subject_id:
+        params.append(subject_id)
+        
+    rows = db.execute(query, tuple(params)).fetchall()
     emailed_students = []
 
+    print(f"DEBUG: Checking {len(rows)} students for low attendance (threshold: {threshold}%)")
+
     for row in rows:
-        if not row["email"]:
+        if not row["email"] or not row["email"].strip():
+            print(f"DEBUG: Student {row['student_name']} has no email address. Skipping.")
             continue
+            
         if row["percentage"] < threshold:
+            print(f"DEBUG: Student {row['student_name']} attendance is {row['percentage']}%. Sending email.")
+            subject_name = row["subject_name"] if subject_id else "your classes"
             body = (
                 f"Hello {row['student_name']},\n\n"
-                f"Your current attendance is {row['percentage']}%, which is below the minimum required threshold of {threshold}% for this course.\n"
+                f"Your current attendance for {subject_name} is {row['percentage']}%, which is below the minimum required threshold of {threshold}%.\n"
                 "Please attend classes regularly and check your attendance dashboard for details.\n\n"
                 "If you have any questions, contact your instructor.\n\n"
                 "Best regards,\n"
                 "Attendance Management Team"
             )
             success = send_email(
-                subject=f"Low Attendance Alert: {row['percentage']}%",
+                subject=f"Low Attendance Alert ({subject_name}): {row['percentage']}%",
                 recipient=row["email"],
                 body=body,
             )
@@ -160,7 +179,10 @@ def notify_low_attendance(db, student_ids):
                     "name": row["student_name"],
                     "email": row["email"],
                     "percentage": row["percentage"],
+                    "subject": subject_name
                 })
+        else:
+            print(f"DEBUG: Student {row['student_name']} attendance is {row['percentage']}%. No email needed.")
 
     return emailed_students
 
@@ -772,7 +794,7 @@ def mark_attendance():
                     saved_student_ids.append(int(student_id))
             db.commit()
 
-            emailed_students = notify_low_attendance(db, saved_student_ids)
+            emailed_students = notify_low_attendance(db, saved_student_ids, subject_id)
             session["attendance_email_summary"] = emailed_students
 
             # Emit real-time update (disabled for Render)

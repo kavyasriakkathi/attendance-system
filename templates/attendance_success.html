@@ -17,7 +17,7 @@
             <p>The following students were emailed because their attendance is below the threshold:</p>
             <ul>
                 {% for student in email_summary %}
-                    <li>{{ student.name }} &ndash; {{ student.email }} ({{ student.percentage }}%)</li>
+                    <li>{{ student.name }} &ndash; {{ student.email }} ({{ student.percentage }}% in {{ student.subject }})</li>
                 {% endfor %}
             </ul>
         </div>
