@@ -344,6 +344,23 @@ def init_db():
 
     db.commit()
     db.close()
+@app.errorhandler(Exception)
+def handle_exception(e):
+    # Pass through HTTP errors
+    if hasattr(e, "code") and e.code < 500:
+        return e
+
+    # Flash the error message for debugging
+    flash(f"Internal Server Error: {str(e)}", "error")
+    print(f"ERROR: {str(e)}")
+    import traceback
+    traceback.print_exc()
+    
+    # Return to dashboard or login
+    if session.get("user_id"):
+        return redirect(url_for("dashboard"))
+    return redirect(url_for("login"))
+
 def login_required(view):
     @wraps(view)
     def wrapped_view(**kwargs):
