@@ -37,14 +37,19 @@ app.config.from_mapping(
 )
 
 def get_db():
-    if app.config["DATABASE"].startswith("postgresql"):
+    db_url = app.config["DATABASE"]
+    if db_url.startswith("postgresql://") or db_url.startswith("postgres://"):
+        # Fix for Render/Heroku DATABASE_URL prefix
+        if db_url.startswith("postgres://"):
+            db_url = db_url.replace("postgres://", "postgresql://", 1)
+            
         import psycopg2
         from psycopg2.extras import RealDictCursor
-        conn = psycopg2.connect(app.config["DATABASE"])
+        conn = psycopg2.connect(db_url)
         conn.cursor_factory = RealDictCursor
         return conn
     else:
-        conn = sqlite3.connect(app.config["DATABASE"])
+        conn = sqlite3.connect(db_url)
         conn.row_factory = sqlite3.Row
         return conn
 
@@ -199,18 +204,8 @@ def init_db():
     placeholder = get_placeholder()
 
     # ✅ Create tables
-    if app.config["DATABASE"].startswith("postgresql"):
+    if app.config["DATABASE"].startswith("postgresql") or app.config["DATABASE"].startswith("postgres"):
         # PostgreSQL specific
-        db.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            id SERIAL PRIMARY KEY,
-            username TEXT UNIQUE NOT NULL,
-            password TEXT NOT NULL,
-            role TEXT NOT NULL,
-            student_id INTEGER,
-            FOREIGN KEY(student_id) REFERENCES students(id)
-        );
-        """)
         db.execute("""
         CREATE TABLE IF NOT EXISTS branches (
             id SERIAL PRIMARY KEY,
@@ -232,6 +227,16 @@ def init_db():
             enrollment TEXT UNIQUE NOT NULL,
             branch_id INTEGER NOT NULL,
             email TEXT
+        );
+        """)
+        db.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id SERIAL PRIMARY KEY,
+            username TEXT UNIQUE NOT NULL,
+            password TEXT NOT NULL,
+            role TEXT NOT NULL,
+            student_id INTEGER,
+            FOREIGN KEY(student_id) REFERENCES students(id)
         );
         """)
         db.execute("""
@@ -259,15 +264,6 @@ def init_db():
     else:
         # SQLite
         db.executescript("""
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY,
-            username TEXT UNIQUE NOT NULL,
-            password TEXT NOT NULL,
-            role TEXT NOT NULL,
-            student_id INTEGER,
-            FOREIGN KEY(student_id) REFERENCES students(id)
-        );
-
         CREATE TABLE IF NOT EXISTS branches (
             id INTEGER PRIMARY KEY,
             name TEXT UNIQUE NOT NULL,
@@ -286,6 +282,15 @@ def init_db():
             enrollment TEXT UNIQUE NOT NULL,
             branch_id INTEGER NOT NULL,
             email TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY,
+            username TEXT UNIQUE NOT NULL,
+            password TEXT NOT NULL,
+            role TEXT NOT NULL,
+            student_id INTEGER,
+            FOREIGN KEY(student_id) REFERENCES students(id)
         );
 
         CREATE TABLE IF NOT EXISTS attendance (
@@ -389,10 +394,10 @@ def index():
 def dashboard():
     db = get_db()
 
-    branch_count = db.execute("SELECT COUNT(*) FROM branches").fetchone()[0]
-    student_count = db.execute("SELECT COUNT(*) FROM students").fetchone()[0]
-    subject_count = db.execute("SELECT COUNT(*) FROM subjects").fetchone()[0]
-    attendance_count = db.execute("SELECT COUNT(*) FROM attendance").fetchone()[0]
+    branch_count = db.execute("SELECT COUNT(*) AS count FROM branches").fetchone()["count"]
+    student_count = db.execute("SELECT COUNT(*) AS count FROM students").fetchone()["count"]
+    subject_count = db.execute("SELECT COUNT(*) AS count FROM subjects").fetchone()["count"]
+    attendance_count = db.execute("SELECT COUNT(*) AS count FROM attendance").fetchone()["count"]
 
     attendance_stats = db.execute("""
         SELECT
@@ -426,7 +431,7 @@ def dashboard():
             COUNT(DISTINCT subjects.id) AS subject_count,
             COUNT(attendance.id) AS attendance_count,
             ROUND(
-                COUNT(CASE WHEN attendance.status='Present' THEN 1 END)*100.0 / COUNT(attendance.id),
+                COALESCE(COUNT(CASE WHEN attendance.status='Present' THEN 1 END)*100.0 / NULLIF(COUNT(attendance.id), 0), 0),
                 1
             ) AS attendance_percentage
         FROM branches
@@ -575,7 +580,7 @@ def students():
                         f"INSERT INTO students (name, enrollment, email, branch_id) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}) RETURNING id",
                         (name, enrollment, email, branch_id),
                     )
-                    student_id = cursor.fetchone()[0]
+                    student_id = cursor.fetchone()["id"]
                 else:
                     cursor = db.execute(
                         f"INSERT INTO students (name, enrollment, email, branch_id) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder})",
@@ -1001,13 +1006,13 @@ def department_dashboard():
 
         # Student count
         student_count = db.execute(
-            f"SELECT COUNT(*) FROM students WHERE branch_id = {placeholder}", (bid,)
-        ).fetchone()[0]
+            f"SELECT COUNT(*) AS count FROM students WHERE branch_id = {placeholder}", (bid,)
+        ).fetchone()["count"]
 
         # Subject count
         subject_count = db.execute(
-            f"SELECT COUNT(*) FROM subjects WHERE branch_id = {placeholder}", (bid,)
-        ).fetchone()[0]
+            f"SELECT COUNT(*) AS count FROM subjects WHERE branch_id = {placeholder}", (bid,)
+        ).fetchone()["count"]
 
         # Attendance counts
         att_stats = db.execute(
