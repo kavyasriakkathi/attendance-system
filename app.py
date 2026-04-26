@@ -35,6 +35,21 @@ app.config.from_mapping(
     MAIL_FROM=os.environ.get("MAIL_FROM", os.environ.get("MAIL_USERNAME", "")).strip().strip('"'),
     LOW_ATTENDANCE_THRESHOLD=int(os.environ.get("LOW_ATTENDANCE_THRESHOLD", 75)),
 )
+class PostgresConnectionWrapper:
+    def __init__(self, conn):
+        self.conn = conn
+    def execute(self, query, params=None):
+        cursor = self.conn.cursor()
+        cursor.execute(query, params)
+        return cursor
+    def commit(self):
+        self.conn.commit()
+    def close(self):
+        self.conn.close()
+    def fetchall(self):
+        return self.conn.cursor().fetchall()
+    def fetchone(self):
+        return self.conn.cursor().fetchone()
 
 def get_db():
     db_url = app.config["DATABASE"]
@@ -47,7 +62,7 @@ def get_db():
         from psycopg2.extras import RealDictCursor
         conn = psycopg2.connect(db_url)
         conn.cursor_factory = RealDictCursor
-        return conn
+        return PostgresConnectionWrapper(conn)
     else:
         conn = sqlite3.connect(db_url)
         conn.row_factory = sqlite3.Row
