@@ -474,9 +474,9 @@ def dashboard():
         ORDER BY branches.name
     """).fetchall()
     database_info = {
-        "storage": "PostgreSQL" if app.config["DATABASE"].startswith("postgresql") else "SQLite",
+        "storage": "PostgreSQL" if app.config["DATABASE"].startswith("postgresql") or app.config["DATABASE"].startswith("postgres") else "SQLite",
         "path": app.config["DATABASE"],
-        "is_ephemeral": bool(os.environ.get("RENDER") or os.environ.get("RENDER_INTERNAL_HOSTNAME")) and not app.config["DATABASE"].startswith("postgresql")
+        "is_ephemeral": bool(os.environ.get("RENDER") or os.environ.get("RENDER_INTERNAL_HOSTNAME")) and not (app.config["DATABASE"].startswith("postgresql") or app.config["DATABASE"].startswith("postgres"))
     }
     mail_info = {
         "configured": bool(app.config["MAIL_USERNAME"] and app.config["MAIL_PASSWORD"]),
