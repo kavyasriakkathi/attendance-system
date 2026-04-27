@@ -1350,7 +1350,7 @@ def test_email():
 with app.app_context():
     db_uri = app.config["DATABASE"]
     is_pg = db_uri.startswith("postgresql") or db_uri.startswith("postgres")
-    print(f"DATABASE CONNECTION: {'PostgreSQL' if is_pg else 'SQLite (WARNING: Ephemeral)')}")
+    print(f"DATABASE CONNECTION: {'PostgreSQL' if is_pg else 'SQLite (WARNING: Ephemeral)'}")
     print(f"DATABASE URI: {db_uri[:20]}...") 
     
     try:
