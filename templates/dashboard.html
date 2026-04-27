@@ -101,11 +101,18 @@ document.head.appendChild(style);
 {% block content %}
 {% if persistence_warning %}
 <div class="card" style="background: #fff5f5; border: 1px solid #feb2b2; color: #c53030; margin-bottom: 20px; border-left: 5px solid #f56565;">
-    <h2 style="margin-top: 0; color: #c53030;">⚠️ Data Loss Warning (Render Persistence)</h2>
-    <p>You are currently using <strong>SQLite</strong> on Render. Your attendance data will be <strong>ERASED</strong> every time you update the app or the server restarts.</p>
-    <p><strong>To fix this:</strong> Create a PostgreSQL database on Render and add the <code>DATABASE_URL</code> to your environment variables.</p>
+    <h2 style="margin-top: 0; color: #c53030;">⚠️ CRITICAL: Data is NOT Saving Permanently</h2>
+    <p>You are currently using <strong>SQLite (Local Storage)</strong> on Render. Render deletes all local files every time the server restarts (which happens on every update or deploy).</p>
+    <p><strong>ALL DATA YOU ENTER NOW WILL BE DELETED.</strong></p>
+    <p><strong>How to fix this:</strong></p>
+    <ol style="margin-left: 20px; margin-bottom: 15px;">
+        <li>Go to your <strong>Render Dashboard</strong>.</li>
+        <li>Ensure you have created a <strong>PostgreSQL Database</strong>.</li>
+        <li>In your Web Service settings, go to the <strong>Environment</strong> tab.</li>
+        <li>Add an environment variable named <code>DATABASE_URL</code> and link it to your database.</li>
+    </ol>
     <div style="margin-top: 15px;">
-        <a href="https://dashboard.render.com/" target="_blank" class="button" style="background: #c53030; color: white; text-decoration: none; padding: 8px 16px; border-radius: 4px; font-size: 0.9rem;">Setup PostgreSQL on Render</a>
+        <a href="https://dashboard.render.com/" target="_blank" class="button" style="background: #c53030; color: white; text-decoration: none; padding: 10px 20px; border-radius: 4px; font-weight: bold; display: inline-block;">Go to Render Dashboard to Fix</a>
     </div>
 </div>
 {% endif %}
