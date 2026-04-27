@@ -57,6 +57,9 @@ def get_db():
         # Fix for Render/Heroku DATABASE_URL prefix
         if db_url.startswith("postgres://"):
             db_url = db_url.replace("postgres://", "postgresql://", 1)
+            # Update the config so get_placeholder works correctly
+            app.config["DATABASE"] = db_url
+            
             
         import psycopg2
         from psycopg2.extras import RealDictCursor
@@ -69,7 +72,8 @@ def get_db():
         return conn
 
 def get_placeholder():
-    return "%s" if app.config["DATABASE"].startswith("postgresql") else "?"
+    db_url = app.config["DATABASE"]
+    return "%s" if db_url.startswith("postgresql") or db_url.startswith("postgres") else "?"
 
 
 def get_setting(db, key, default=None):
