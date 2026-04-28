@@ -125,7 +125,9 @@ def send_email(subject, recipient, body):
             context = ssl.create_default_context()
             with smtplib.SMTP(app.config["MAIL_SERVER"], app.config["MAIL_PORT"], timeout=10) as server:
                 server.set_debuglevel(1)  # Enable debug output
+                server.ehlo()
                 server.starttls(context=context)
+                server.ehlo()
                 server.login(app.config["MAIL_USERNAME"], app.config["MAIL_PASSWORD"])
                 server.send_message(msg)
         else:
