@@ -12,11 +12,11 @@ body::before {
     top: 50%;
     left: 50%;
     transform: translate(-50%, -50%);
-    width: 600px;
-    height: 600px;
-    background: url('/static/logo.png') no-repeat center;
+    width: 700px;
+    height: 700px;
+    background: url('/static/logo.jpg') no-repeat center;
     background-size: contain;
-    opacity: 0.03;
+    opacity: 0.1;
     z-index: -1;
     pointer-events: none;
 }
