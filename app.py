@@ -118,44 +118,37 @@ def set_setting(db, key, value):
         )
 
 
-def send_email(subject, recipient, body):
-    if not app.config["MAIL_USERNAME"] or not app.config["MAIL_PASSWORD"] or app.config["MAIL_USERNAME"] == "your_email@gmail.com":
-        print(f"DEBUG: Email to {recipient} NOT sent: mail credentials not configured.")
+def send_email(subject, to_email, message):
+    sender_email = app.config["MAIL_USERNAME"]
+    app_password = app.config["MAIL_PASSWORD"]
+
+    if not sender_email or not app_password or sender_email == "your_email@gmail.com":
+        print(f"DEBUG: Email to {to_email} NOT sent: mail credentials not configured.")
         return False, "Mail credentials not configured."
 
     msg = EmailMessage()
     msg["Subject"] = subject
-    msg["From"] = app.config["MAIL_FROM"]
-    msg["To"] = recipient
-    msg.set_content(body)
+    msg["From"] = sender_email
+    msg["To"] = to_email
+    msg.set_content(message)
 
     try:
-        print(f"DEBUG: Attempting to send email to {recipient} via {app.config['MAIL_SERVER']}:{app.config['MAIL_PORT']}...")
-        if app.config["MAIL_USE_TLS"]:
-            context = ssl.create_default_context()
-            with smtplib.SMTP(app.config["MAIL_SERVER"], app.config["MAIL_PORT"], timeout=10) as server:
-                server.set_debuglevel(1)  # Enable debug output
-                server.ehlo()
-                server.starttls(context=context)
-                server.ehlo()
-                server.login(app.config["MAIL_USERNAME"], app.config["MAIL_PASSWORD"])
-                server.send_message(msg)
-        else:
-            context = ssl.create_default_context()
-            with smtplib.SMTP_SSL(app.config["MAIL_SERVER"], app.config["MAIL_PORT"], context=context, timeout=10) as server:
-                server.set_debuglevel(1)  # Enable debug output
-                server.login(app.config["MAIL_USERNAME"], app.config["MAIL_PASSWORD"])
-                server.send_message(msg)
-        print(f"SUCCESS: Low attendance email sent to {recipient}")
-        return True, "Email sent successfully."
-    except smtplib.SMTPAuthenticationError:
-        error_msg = "Authentication failed. Please check your email and app password."
-        print(f"ERROR: {error_msg}")
-        return False, error_msg
+        context = ssl.create_default_context()
+        # Use config for server/port, but fallback to user's suggested Gmail defaults if not set
+        mail_server = app.config.get("MAIL_SERVER", "smtp.gmail.com")
+        mail_port = app.config.get("MAIL_PORT", 587)
+
+        with smtplib.SMTP(mail_server, mail_port, timeout=10) as server:
+            server.starttls(context=context)
+            server.login(sender_email, app_password)
+            server.send_message(msg)
+
+        print("Email sent successfully")
+        return True, "Email sent successfully"
+
     except Exception as e:
-        error_msg = f"Failed to send email to {recipient}: {str(e)}"
-        print(f"ERROR: {error_msg}")
-        return False, error_msg
+        print("Email error:", e)
+        return False, str(e)
 
 
 def notify_low_attendance(db, student_ids, subject_id=None):
@@ -214,8 +207,8 @@ def notify_low_attendance(db, student_ids, subject_id=None):
             )
             success, error_msg = send_email(
                 subject=f"Low Attendance Alert ({subject_name}): {row['percentage']}%",
-                recipient=row["email"],
-                body=body,
+                to_email=row["email"],
+                message=body,
             )
             if success:
                 emailed_students.append({
