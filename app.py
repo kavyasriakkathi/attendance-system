@@ -1279,6 +1279,100 @@ def attendance_report():
     )
 
 
+@app.route("/admin/import_data", methods=["POST"])
+@login_required
+def import_data():
+    if session.get("role") != "admin":
+        return jsonify({"error": "Unauthorized"}), 403
+
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No data provided"}), 400
+
+        db = get_db()
+        placeholder = get_placeholder()
+
+        # Import Branches
+        for branch in data.get("branches", []):
+            try:
+                db.execute(
+                    f"INSERT INTO branches (id, name, location) VALUES ({placeholder}, {placeholder}, {placeholder}) "
+                    f"ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, location = EXCLUDED.location",
+                    (branch["id"], branch["name"], branch["location"])
+                )
+            except Exception as e:
+                print(f"Error importing branch {branch['name']}: {e}")
+
+        # Import Subjects
+        for subj in data.get("subjects", []):
+            try:
+                # Use standard INSERT for SQLite fallback, or ON CONFLICT for Postgres
+                if app.config["DATABASE"].startswith("postgres"):
+                    db.execute(
+                        f"INSERT INTO subjects (id, name, branch_id) VALUES ({placeholder}, {placeholder}, {placeholder}) "
+                        f"ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, branch_id = EXCLUDED.branch_id",
+                        (subj["id"], subj["name"], subj["branch_id"])
+                    )
+                else:
+                    db.execute(
+                        f"INSERT OR REPLACE INTO subjects (id, name, branch_id) VALUES ({placeholder}, {placeholder}, {placeholder})",
+                        (subj["id"], subj["name"], subj["branch_id"])
+                    )
+            except Exception as e:
+                print(f"Error importing subject {subj['name']}: {e}")
+
+        # Import Students
+        for stu in data.get("students", []):
+            try:
+                if app.config["DATABASE"].startswith("postgres"):
+                    db.execute(
+                        f"INSERT INTO students (id, name, enrollment, branch_id, email) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}) "
+                        f"ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, enrollment = EXCLUDED.enrollment, branch_id = EXCLUDED.branch_id, email = EXCLUDED.email",
+                        (stu["id"], stu["name"], stu["enrollment"], stu["branch_id"], stu["email"])
+                    )
+                    # Also ensure user exists
+                    db.execute(
+                        f"INSERT INTO users (username, password, role, student_id) VALUES ({placeholder}, {placeholder}, 'student', {placeholder}) "
+                        f"ON CONFLICT (username) DO NOTHING",
+                        (stu["enrollment"], generate_password_hash(stu["enrollment"][-4:]), stu["id"])
+                    )
+                else:
+                    db.execute(
+                        f"INSERT OR REPLACE INTO students (id, name, enrollment, branch_id, email) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})",
+                        (stu["id"], stu["name"], stu["enrollment"], stu["branch_id"], stu["email"])
+                    )
+                    db.execute(
+                        f"INSERT OR IGNORE INTO users (username, password, role, student_id) VALUES ({placeholder}, {placeholder}, 'student', {placeholder})",
+                        (stu["enrollment"], generate_password_hash(stu["enrollment"][-4:]), stu["id"])
+                    )
+            except Exception as e:
+                print(f"Error importing student {stu['name']}: {e}")
+
+        # Import Attendance
+        for att in data.get("attendance", []):
+            try:
+                if app.config["DATABASE"].startswith("postgres"):
+                    db.execute(
+                        f"INSERT INTO attendance (id, student_id, branch_id, subject_id, date, status, note) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}) "
+                        f"ON CONFLICT (id) DO UPDATE SET status = EXCLUDED.status, note = EXCLUDED.note",
+                        (att["id"], att["student_id"], att["branch_id"], att["subject_id"], att["date"], att["status"], att["note"])
+                    )
+                else:
+                    db.execute(
+                        f"INSERT OR REPLACE INTO attendance (id, student_id, branch_id, subject_id, date, status, note) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})",
+                        (att["id"], att["student_id"], att["branch_id"], att["subject_id"], att["date"], att["status"], att["note"])
+                    )
+            except Exception as e:
+                print(f"Error importing attendance record {att['id']}: {e}")
+
+        db.commit()
+        db.close()
+        return jsonify({"message": "Data imported successfully!"}), 200
+    except Exception as e:
+        print(f"Import failed: {e}")
+        return jsonify({"error": str(e)}), 500
+
 @app.route("/test_email")
 @login_required
 def test_email():

@@ -35,5 +35,62 @@
         <a class="button secondary" href="{{ url_for('test_email') }}" style="background: #6c757d; margin-left: 10px;">Test Email Connection</a>
         {% endif %}
     </div>
+
+    <hr style="margin: 30px 0; border: none; border-top: 1px solid #eee;">
+
+    <div class="migration-section" style="background: #f8fafc; padding: 20px; border-radius: 12px; border: 1px solid #e2e8f0;">
+        <h2>🛠️ Data Migration</h2>
+        <p>If you have data in your local database (like students Akhila, Ashwini, Jeevitha) that is not showing on the website, you can import it here.</p>
+        
+        <div style="margin-top: 15px;">
+            <textarea id="migrationData" placeholder="Paste migration JSON here..." style="width: 100%; height: 120px; padding: 12px; border-radius: 8px; border: 1px solid #cbd5e1; font-family: monospace; font-size: 0.85rem; margin-bottom: 10px;"></textarea>
+            <button type="button" onclick="importData()" class="button secondary" id="importBtn" style="background: #2563eb;">Import Data to Live Website</button>
+            <div id="importStatus" style="margin-top: 10px; font-weight: 600;"></div>
+        </div>
+    </div>
+
+    <script>
+    function importData() {
+        const dataStr = document.getElementById('migrationData').value.trim();
+        const status = document.getElementById('importStatus');
+        const btn = document.getElementById('importBtn');
+
+        if (!dataStr) {
+            status.innerHTML = '<span style="color: #dc2626;">Please paste the data first.</span>';
+            return;
+        }
+
+        try {
+            const data = JSON.parse(dataStr);
+            status.innerHTML = '<span style="color: #2563eb;">Importing data... please wait...</span>';
+            btn.disabled = true;
+
+            fetch('/admin/import_data', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(data)
+            })
+            .then(response => response.json())
+            .then(result => {
+                if (result.message) {
+                    status.innerHTML = '<span style="color: #16a34a;">✅ Success! ' + result.message + '</span>';
+                    document.getElementById('migrationData').value = '';
+                    setTimeout(() => window.location.reload(), 2000);
+                } else {
+                    status.innerHTML = '<span style="color: #dc2626;">❌ Error: ' + (result.error || 'Unknown error') + '</span>';
+                }
+            })
+            .catch(err => {
+                status.innerHTML = '<span style="color: #dc2626;">❌ Connection error. Check your internet.</span>';
+            })
+            .finally(() => {
+                btn.disabled = false;
+            });
+
+        } catch (e) {
+            status.innerHTML = '<span style="color: #dc2626;">❌ Invalid JSON format. Please copy the entire data exactly.</span>';
+        }
+    }
+    </script>
 </div>
 {% endblock %}

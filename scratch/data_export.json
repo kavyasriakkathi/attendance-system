@@ -1,0 +1,305 @@
+{
+  "branches": [
+    {
+      "id": 1,
+      "name": "CSM",
+      "location": "FLOOR 1"
+    },
+    {
+      "id": 2,
+      "name": "CSD",
+      "location": "FLOOR 2"
+    },
+    {
+      "id": 3,
+      "name": "IOT",
+      "location": "FLOOR 1"
+    },
+    {
+      "id": 4,
+      "name": "MECHANICAL",
+      "location": "GROUND FLOOR"
+    },
+    {
+      "id": 5,
+      "name": "CSW",
+      "location": "FLOOR 2"
+    },
+    {
+      "id": 6,
+      "name": "CSE",
+      "location": "FLOOR 2"
+    },
+    {
+      "id": 7,
+      "name": "ECE",
+      "location": "FLOOR 1"
+    }
+  ],
+  "subjects": [
+    {
+      "id": 1,
+      "name": "PYTHON",
+      "branch_id": 1
+    },
+    {
+      "id": 2,
+      "name": "PYTHON",
+      "branch_id": 5
+    },
+    {
+      "id": 3,
+      "name": "PYTHON",
+      "branch_id": 6
+    },
+    {
+      "id": 4,
+      "name": "ODEVC",
+      "branch_id": 1
+    }
+  ],
+  "students": [
+    {
+      "id": 1,
+      "name": "Akkathi kavyasri",
+      "enrollment": "25tq1a6696",
+      "branch_id": 1,
+      "email": "25tq1a6696@siddhartha.org.in"
+    },
+    {
+      "id": 2,
+      "name": "EDIGI AKHILA",
+      "enrollment": "25tq1a66A1",
+      "branch_id": 1,
+      "email": "25tq1a66A1@siddhartha.org.in"
+    },
+    {
+      "id": 3,
+      "name": "MEEKARTHI ASHWINI",
+      "enrollment": "25tq1a6673",
+      "branch_id": 1,
+      "email": "25tq1a6673@siddhartha.org.in"
+    },
+    {
+      "id": 4,
+      "name": "GANDLA JEEVITHA",
+      "enrollment": "25tq1a6671",
+      "branch_id": 1,
+      "email": "25tq1a6671@siddhartha.org.in"
+    },
+    {
+      "id": 5,
+      "name": "DEVATHALA NANDHINI",
+      "enrollment": "25tq1a6687",
+      "branch_id": 1,
+      "email": "25tq1a6687@siddhartha.org.in"
+    },
+    {
+      "id": 6,
+      "name": "RAMDEEN SAHASRA",
+      "enrollment": "25tq1a66A9",
+      "branch_id": 1,
+      "email": "25tq1a66A9@siddhartha.org.in"
+    }
+  ],
+  "attendance": [
+    {
+      "id": 1,
+      "student_id": 1,
+      "branch_id": 1,
+      "subject_id": 1,
+      "date": "2026-04-13",
+      "status": "Present",
+      "note": "ok"
+    },
+    {
+      "id": 2,
+      "student_id": 5,
+      "branch_id": 1,
+      "subject_id": 1,
+      "date": "2026-04-13",
+      "status": "Present",
+      "note": ""
+    },
+    {
+      "id": 3,
+      "student_id": 2,
+      "branch_id": 1,
+      "subject_id": 1,
+      "date": "2026-04-13",
+      "status": "Present",
+      "note": ""
+    },
+    {
+      "id": 4,
+      "student_id": 4,
+      "branch_id": 1,
+      "subject_id": 1,
+      "date": "2026-04-13",
+      "status": "Present",
+      "note": ""
+    },
+    {
+      "id": 5,
+      "student_id": 3,
+      "branch_id": 1,
+      "subject_id": 1,
+      "date": "2026-04-13",
+      "status": "Present",
+      "note": ""
+    },
+    {
+      "id": 6,
+      "student_id": 6,
+      "branch_id": 1,
+      "subject_id": 1,
+      "date": "2026-04-13",
+      "status": "Absent",
+      "note": ""
+    },
+    {
+      "id": 7,
+      "student_id": 5,
+      "branch_id": 1,
+      "subject_id": 4,
+      "date": "2026-04-13",
+      "status": "Present",
+      "note": "Active"
+    },
+    {
+      "id": 8,
+      "student_id": 1,
+      "branch_id": 1,
+      "subject_id": 1,
+      "date": "2024-04-10",
+      "status": "Present",
+      "note": ""
+    },
+    {
+      "id": 9,
+      "student_id": 2,
+      "branch_id": 1,
+      "subject_id": 1,
+      "date": "2024-04-10",
+      "status": "Present",
+      "note": "Late"
+    },
+    {
+      "id": 10,
+      "student_id": 3,
+      "branch_id": 1,
+      "subject_id": 1,
+      "date": "2024-04-10",
+      "status": "Absent",
+      "note": ""
+    },
+    {
+      "id": 11,
+      "student_id": 4,
+      "branch_id": 1,
+      "subject_id": 1,
+      "date": "2024-04-10",
+      "status": "Present",
+      "note": "Good attendance"
+    },
+    {
+      "id": 12,
+      "student_id": 5,
+      "branch_id": 1,
+      "subject_id": 1,
+      "date": "2024-04-10",
+      "status": "Present",
+      "note": ""
+    },
+    {
+      "id": 13,
+      "student_id": 6,
+      "branch_id": 1,
+      "subject_id": 1,
+      "date": "2024-04-10",
+      "status": "Absent",
+      "note": "Sick leave"
+    },
+    {
+      "id": 14,
+      "student_id": 1,
+      "branch_id": 1,
+      "subject_id": 1,
+      "date": "2024-04-15",
+      "status": "Present",
+      "note": ""
+    },
+    {
+      "id": 15,
+      "student_id": 2,
+      "branch_id": 1,
+      "subject_id": 1,
+      "date": "2024-04-15",
+      "status": "Absent",
+      "note": ""
+    },
+    {
+      "id": 16,
+      "student_id": 1,
+      "branch_id": 1,
+      "subject_id": 1,
+      "date": "2024-04-21",
+      "status": "Present",
+      "note": ""
+    },
+    {
+      "id": 17,
+      "student_id": 1,
+      "branch_id": 1,
+      "subject_id": 4,
+      "date": "2026-04-10",
+      "status": "Present",
+      "note": ""
+    },
+    {
+      "id": 18,
+      "student_id": 5,
+      "branch_id": 1,
+      "subject_id": 4,
+      "date": "2026-04-10",
+      "status": "Present",
+      "note": ""
+    },
+    {
+      "id": 19,
+      "student_id": 2,
+      "branch_id": 1,
+      "subject_id": 4,
+      "date": "2026-04-10",
+      "status": "Present",
+      "note": ""
+    },
+    {
+      "id": 20,
+      "student_id": 4,
+      "branch_id": 1,
+      "subject_id": 4,
+      "date": "2026-04-10",
+      "status": "Late",
+      "note": ""
+    },
+    {
+      "id": 21,
+      "student_id": 3,
+      "branch_id": 1,
+      "subject_id": 4,
+      "date": "2026-04-10",
+      "status": "Late",
+      "note": ""
+    },
+    {
+      "id": 22,
+      "student_id": 6,
+      "branch_id": 1,
+      "subject_id": 4,
+      "date": "2026-04-10",
+      "status": "Late",
+      "note": ""
+    }
+  ]
+}
