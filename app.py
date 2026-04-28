@@ -677,6 +677,89 @@ def student_login():
     return render_template("student_login.html")
 
 
+@app.route("/forgot_password", methods=["GET", "POST"])
+def forgot_password():
+    if request.method == "POST":
+        email = request.form.get("email", "").strip()
+        db = get_db()
+        placeholder = get_placeholder()
+        
+        # Find student by email
+        student = db.execute(
+            f"SELECT students.id, students.email, users.username FROM students JOIN users ON students.id = users.student_id WHERE students.email = {placeholder}",
+            (email,)
+        ).fetchone()
+        
+        if student:
+            # Generate token
+            s = URLSafeTimedSerializer(app.config["SECRET_KEY"])
+            token = s.dumps(email, salt="password-reset-salt")
+            
+            # Send reset email
+            reset_url = url_for("reset_password", token=token, _external=True)
+            subject = "Password Reset Request - Attendance System"
+            message = (
+                f"Hello,\n\n"
+                f"A password reset was requested for your student account (Enrollment: {student['username']}).\n"
+                f"Click the link below to reset your password:\n\n"
+                f"{reset_url}\n\n"
+                "If you did not request this, please ignore this email.\n"
+                "The link will expire in 1 hour.\n\n"
+                "Best regards,\n"
+                "Attendance Management Team"
+            )
+            
+            success, error = send_email(subject, email, message)
+            if success:
+                flash("A password reset link has been sent to your email.", "success")
+            else:
+                flash(f"Error sending email: {error}", "error")
+        else:
+            flash("No account found with that email address.", "error")
+        
+        db.close()
+        return redirect(url_for("forgot_password"))
+
+    return render_template("forgot_password.html")
+
+
+@app.route("/reset_password/<token>", methods=["GET", "POST"])
+def reset_password(token):
+    s = URLSafeTimedSerializer(app.config["SECRET_KEY"])
+    try:
+        email = s.loads(token, salt="password-reset-salt", max_age=3600)
+    except (SignatureExpired, BadSignature):
+        flash("The password reset link is invalid or has expired.", "error")
+        return redirect(url_for("forgot_password"))
+
+    if request.method == "POST":
+        new_password = request.form.get("password", "").strip()
+        confirm_password = request.form.get("confirm_password", "").strip()
+        
+        if not new_password or len(new_password) < 4:
+            flash("Password must be at least 4 characters long.", "error")
+        elif new_password != confirm_password:
+            flash("Passwords do not match.", "error")
+        else:
+            db = get_db()
+            placeholder = get_placeholder()
+            
+            # Update password in users table
+            hashed_password = generate_password_hash(new_password)
+            db.execute(
+                f"UPDATE users SET password = {placeholder} WHERE student_id IN (SELECT id FROM students WHERE email = {placeholder})",
+                (hashed_password, email)
+            )
+            db.commit()
+            db.close()
+            
+            flash("Your password has been reset successfully. You can now login.", "success")
+            return redirect(url_for("student_login"))
+
+    return render_template("reset_password.html", token=token)
+
+
+
 @app.route("/teacher_login", methods=["GET", "POST"])
 def teacher_login():
     if request.method == "POST":
