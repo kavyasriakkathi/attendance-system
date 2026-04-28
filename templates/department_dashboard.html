@@ -446,6 +446,23 @@
 {% endblock %}
 
 {% block content %}
+{% if persistence_warning %}
+<div class="card" style="background: #fff5f5; border: 1px solid #feb2b2; color: #c53030; margin-bottom: 20px; border-left: 5px solid #f56565; padding: 20px; border-radius: 12px;">
+    <h2 style="margin-top: 0; color: #c53030; font-size: 1.25rem;">⚠️ CRITICAL: Data is NOT Saving Permanently</h2>
+    <p style="margin-bottom: 12px;">You are currently using <strong>SQLite (Local Storage)</strong> on Render. Render deletes all local files every time the server restarts (which happens on every update or deploy).</p>
+    <p style="margin-bottom: 12px;"><strong>ALL DATA YOU ENTER NOW WILL BE DELETED.</strong></p>
+    <p style="margin-bottom: 12px;"><strong>How to fix this:</strong></p>
+    <ol style="margin-left: 20px; margin-bottom: 15px;">
+        <li>Go to your <strong>Render Dashboard</strong>.</li>
+        <li>Ensure you have created a <strong>PostgreSQL Database</strong>.</li>
+        <li>In your Web Service settings, go to the <strong>Environment</strong> tab.</li>
+        <li>Add an environment variable named <code>DATABASE_URL</code> and link it to your database.</li>
+    </ol>
+    <div style="margin-top: 15px;">
+        <a href="https://dashboard.render.com/" target="_blank" class="dept-action-btn primary" style="text-decoration: none;">Go to Render Dashboard to Fix</a>
+    </div>
+</div>
+{% endif %}
 <div class="dept-dashboard">
     <!-- Hero Banner -->
     <div class="dept-hero" id="dept-hero">

@@ -40,16 +40,18 @@ class PostgresConnectionWrapper:
         self.conn = conn
     def execute(self, query, params=None):
         cursor = self.conn.cursor()
-        cursor.execute(query, params)
+        try:
+            cursor.execute(query, params)
+        except Exception as e:
+            print(f"DATABASE EXECUTE ERROR: {e}")
+            print(f"QUERY: {query}")
+            print(f"PARAMS: {params}")
+            raise
         return cursor
     def commit(self):
         self.conn.commit()
     def close(self):
         self.conn.close()
-    def fetchall(self):
-        return self.conn.cursor().fetchall()
-    def fetchone(self):
-        return self.conn.cursor().fetchone()
 
 def get_db():
     db_url = app.config["DATABASE"]
@@ -60,12 +62,20 @@ def get_db():
             # Update the config so get_placeholder works correctly
             app.config["DATABASE"] = db_url
             
-            
         import psycopg2
         from psycopg2.extras import RealDictCursor
-        conn = psycopg2.connect(db_url)
-        conn.cursor_factory = RealDictCursor
-        return PostgresConnectionWrapper(conn)
+        try:
+            conn = psycopg2.connect(db_url)
+            conn.cursor_factory = RealDictCursor
+            return PostgresConnectionWrapper(conn)
+        except Exception as e:
+            print(f"CRITICAL: Failed to connect to PostgreSQL: {e}")
+            # Fallback to SQLite if Postgres fails (only for safety, data will be ephemeral)
+            sqlite_path = os.path.join(basedir, "attendance.db")
+            print(f"FALLBACK: Using SQLite at {sqlite_path}")
+            conn = sqlite3.connect(sqlite_path)
+            conn.row_factory = sqlite3.Row
+            return conn
     else:
         conn = sqlite3.connect(db_url)
         conn.row_factory = sqlite3.Row
@@ -481,7 +491,8 @@ def dashboard():
     """).fetchall()
     database_info = {
         "storage": "PostgreSQL" if app.config["DATABASE"].startswith("postgresql") or app.config["DATABASE"].startswith("postgres") else "SQLite",
-        "path": app.config["DATABASE"],
+        "path": app.config["DATABASE"] if not (app.config["DATABASE"].startswith("postgresql") or app.config["DATABASE"].startswith("postgres")) else "PostgreSQL Server (Remote)",
+        "full_url": app.config["DATABASE"] if app.config["DATABASE"].startswith("sqlite") or "/" in app.config["DATABASE"] else "Managed Service",
         "is_ephemeral": bool(os.environ.get("RENDER") or os.environ.get("RENDER_INTERNAL_HOSTNAME")) and not (app.config["DATABASE"].startswith("postgresql") or app.config["DATABASE"].startswith("postgres"))
     }
     mail_info = {
@@ -1141,6 +1152,11 @@ def department_dashboard():
 
     overall_percentage = round((total_present / total_attendance) * 100, 1) if total_attendance > 0 else 0
 
+    database_info = {
+        "storage": "PostgreSQL" if app.config["DATABASE"].startswith("postgresql") or app.config["DATABASE"].startswith("postgres") else "SQLite",
+        "is_ephemeral": bool(os.environ.get("RENDER") or os.environ.get("RENDER_INTERNAL_HOSTNAME")) and not (app.config["DATABASE"].startswith("postgresql") or app.config["DATABASE"].startswith("postgres"))
+    }
+
     db.close()
     return render_template(
         "department_dashboard.html",
@@ -1149,6 +1165,7 @@ def department_dashboard():
         total_subjects=total_subjects,
         total_attendance=total_attendance,
         overall_percentage=overall_percentage,
+        persistence_warning=database_info["is_ephemeral"]
     )
 
 
