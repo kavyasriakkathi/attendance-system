@@ -3,6 +3,22 @@ body {
     font-family: Arial, sans-serif;
     background: #f4f7fb;
     color: #333;
+    min-height: 100vh;
+    position: relative;
+}
+body::before {
+    content: '';
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: 600px;
+    height: 600px;
+    background: url('/static/logo.png') no-repeat center;
+    background-size: contain;
+    opacity: 0.03;
+    z-index: -1;
+    pointer-events: none;
 }
 header {
     background: #2f5d9f;
