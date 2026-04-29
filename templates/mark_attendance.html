@@ -131,6 +131,23 @@ document.head.appendChild(style);
         <input type="hidden" name="branch_id" value="{{ branch_id }}" />
         <input type="hidden" name="subject_id" value="{{ subject_id }}" />
         <input type="hidden" name="date" value="{{ selected_date }}" />
+
+        <!-- Bulk Mark Absent Section -->
+        <div class="card bulk-action-card" style="margin-bottom: 20px; background-color: #fff4f4; border-left: 5px solid #f44336; padding: 15px;">
+            <h3 style="margin-top: 0; color: #d32f2f; display: flex; align-items: center; gap: 8px;">
+                <span style="font-size: 1.2em;">📋</span> Bulk Mark Absent
+            </h3>
+            <p style="margin-bottom: 10px; font-size: 0.9em; color: #666;">
+                Enter last digits or full enrollment numbers (separated by space or comma):
+            </p>
+            <div style="display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 10px;">
+                <input type="text" id="bulk_absent_input" placeholder="e.g. 75 76 79 80" style="flex-grow: 1; min-width: 200px; padding: 10px; border: 1px solid #ccd5e2; border-radius: 6px;">
+                <button type="button" onclick="bulkMarkAbsent()" style="background-color: #f44336; white-space: nowrap;">Apply Absent Status</button>
+                <button type="button" onclick="resetBulkStatus()" style="background-color: #757575; white-space: nowrap;">Reset All to Present</button>
+            </div>
+            <div id="bulk_result_msg" style="font-weight: bold; font-size: 0.9em; display: none;"></div>
+        </div>
+
         <table>
             <thead>
                 <tr>
@@ -213,6 +230,59 @@ document.head.appendChild(style);
             });
         }
     });
+
+    function bulkMarkAbsent() {
+        const input = document.getElementById('bulk_absent_input').value;
+        const rollNos = input.split(/[\s,]+/).filter(x => x.trim() !== '');
+        
+        if (rollNos.length === 0) {
+            alert('Please enter at least one roll number.');
+            return;
+        }
+
+        const rows = document.querySelectorAll('tbody tr');
+        let count = 0;
+        
+        rows.forEach(row => {
+            const enrollment = row.cells[1].textContent.trim();
+            const select = row.querySelector('select');
+            
+            // Check if enrollment matches exactly or ends with the roll number
+            const match = rollNos.find(rn => enrollment === rn || enrollment.endsWith(rn));
+            
+            if (match) {
+                if (select) {
+                    select.value = 'Absent';
+                    row.style.backgroundColor = '#fff0f0';
+                    row.style.transition = 'background-color 0.3s ease';
+                    count++;
+                }
+            }
+        });
+        
+        const resultMsg = document.getElementById('bulk_result_msg');
+        resultMsg.style.display = 'block';
+        if (count > 0) {
+            resultMsg.textContent = `✓ Marked ${count} students as Absent. Click "Save Attendance" below to save.`;
+            resultMsg.style.color = '#d32f2f';
+        } else {
+            resultMsg.textContent = '⚠ No matching students found for the entered roll numbers.';
+            resultMsg.style.color = '#666';
+        }
+    }
+
+    function resetBulkStatus() {
+        const rows = document.querySelectorAll('tbody tr');
+        rows.forEach(row => {
+            const select = row.querySelector('select');
+            if (select) {
+                select.value = 'Present';
+                row.style.backgroundColor = '';
+            }
+        });
+        document.getElementById('bulk_result_msg').style.display = 'none';
+        document.getElementById('bulk_absent_input').value = '';
+    }
 </script>
 {% endif %}
 {% endblock %}
