@@ -13,7 +13,9 @@ from flask import Flask, abort, redirect, render_template, request, session, url
 from functools import wraps
 from werkzeug.security import check_password_hash, generate_password_hash
 from itsdangerous import URLSafeTimedSerializer, SignatureExpired, BadSignature
-from flask import jsonify
+from flask import jsonify, send_file
+import pandas as pd
+import io
 # from flask_socketio import SocketIO, emit, join_room
 
 # # Initialize SocketIO
@@ -497,6 +499,24 @@ def dashboard():
         "render_env": bool(os.environ.get("RENDER") or os.environ.get("RENDER_INTERNAL_HOSTNAME")),
     }
 
+    # Fetch attendance trend for charts (last 7 days)
+    chart_data = []
+    placeholder = get_placeholder()
+    for i in range(6, -1, -1):
+        target_date = (date.today() - timedelta(days=i)).isoformat()
+        day_stats = db.execute(f"""
+            SELECT 
+                COUNT(CASE WHEN status='Present' THEN 1 END) as present_count,
+                COUNT(*) as total_count
+            FROM attendance 
+            WHERE date = {placeholder}
+        """, (target_date,)).fetchone()
+        
+        pct = round((day_stats["present_count"] / day_stats["total_count"] * 100), 1) if day_stats["total_count"] > 0 else 0
+        chart_data.append({"date": target_date, "percentage": pct})
+
+    db.close()
+
     return render_template(
         "dashboard.html",
         branch_count=branch_count,
@@ -508,7 +528,8 @@ def dashboard():
         branch_data=branch_data,
         database_info=database_info,
         mail_info=mail_info,
-        persistence_warning=database_info["is_ephemeral"]
+        persistence_warning=database_info["is_ephemeral"],
+        chart_data=chart_data
     )
 
 @app.route("/settings", methods=["GET", "POST"])
@@ -1228,9 +1249,38 @@ def department_dashboard():
 
     overall_percentage = round((total_present / total_attendance) * 100, 1) if total_attendance > 0 else 0
 
+    # Fetch attendance trend for charts (last 7 days)
+    chart_data = []
+    for i in range(6, -1, -1):
+        target_date = (date.today() - timedelta(days=i)).isoformat()
+        day_stats = db.execute(f"""
+            SELECT 
+                COUNT(CASE WHEN status='Present' THEN 1 END) as present_count,
+                COUNT(*) as total_count
+            FROM attendance 
+            WHERE date = {placeholder}
+        """, (target_date,)).fetchone()
+        
+        pct = round((day_stats["present_count"] / day_stats["total_count"] * 100), 1) if day_stats["total_count"] > 0 else 0
+        chart_data.append({"date": target_date, "percentage": pct})
+
+    # Mail configuration info
+    mail_info = {
+        "configured": bool(app.config.get("MAIL_USERNAME")),
+        "server": app.config.get("MAIL_SERVER"),
+        "port": app.config.get("MAIL_PORT"),
+        "username": app.config.get("MAIL_USERNAME"),
+        "tls": app.config.get("MAIL_USE_TLS"),
+        "render_env": "RENDER" in os.environ
+    }
+
+    persistence_warning = False
+    if "RENDER" in os.environ and "sqlite" in app.config["DATABASE"].lower():
+        persistence_warning = True
+
     database_info = {
-        "storage": "PostgreSQL" if app.config["DATABASE"].startswith("postgresql") or app.config["DATABASE"].startswith("postgres") else "SQLite",
-        "is_ephemeral": bool(os.environ.get("RENDER") or os.environ.get("RENDER_INTERNAL_HOSTNAME")) and not (app.config["DATABASE"].startswith("postgresql") or app.config["DATABASE"].startswith("postgres"))
+        "storage": "PostgreSQL (Cloud)" if "postgresql" in app.config["DATABASE"].lower() else "SQLite (Local/Ephemeral)",
+        "path": app.config["DATABASE"].split("@")[-1] if "@" in app.config["DATABASE"] else app.config["DATABASE"]
     }
 
     db.close()
@@ -1241,7 +1291,10 @@ def department_dashboard():
         total_subjects=total_subjects,
         total_attendance=total_attendance,
         overall_percentage=overall_percentage,
-        persistence_warning=database_info["is_ephemeral"]
+        persistence_warning=persistence_warning,
+        database_info=database_info,
+        chart_data=chart_data,
+        mail_info=mail_info
     )
 
 
@@ -1353,6 +1406,99 @@ def attendance_report():
         filters=filters,
         stats=stats,
     )
+
+@app.route("/export/excel")
+@login_required
+def export_excel():
+    db = get_db()
+    query = """
+        SELECT 
+            attendance.date, 
+            students.name AS Student, 
+            students.enrollment AS Enrollment, 
+            branches.name AS Branch, 
+            subjects.name AS Subject, 
+            attendance.status AS Status,
+            attendance.note AS Note
+        FROM attendance 
+        JOIN students ON attendance.student_id = students.id 
+        JOIN branches ON attendance.branch_id = branches.id 
+        JOIN subjects ON attendance.subject_id = subjects.id
+        ORDER BY attendance.date DESC
+    """
+    records = db.execute(query).fetchall()
+    db.close()
+    
+    if not records:
+        flash("No records to export.", "error")
+        return redirect(url_for("attendance_report"))
+
+    df = pd.DataFrame([dict(r) for r in records])
+    
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False, sheet_name='Attendance')
+    
+    output.seek(0)
+    return send_file(
+        output,
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        as_attachment=True,
+        download_name=f"Attendance_Report_{date.today().isoformat()}.xlsx"
+    )
+
+@app.route("/report/email", methods=["POST"])
+@login_required
+def report_email():
+    branch_id = request.form.get("branch_id")
+    subject_id = request.form.get("subject_id")
+    
+    db = get_db()
+    placeholder = get_placeholder()
+    
+    query = """
+        SELECT 
+            students.name, 
+            students.enrollment,
+            COUNT(*) as total,
+            COUNT(CASE WHEN status='Present' THEN 1 END) as present
+        FROM attendance
+        JOIN students ON attendance.student_id = students.id
+        WHERE 1=1
+    """
+    params = []
+    if branch_id:
+        query += f" AND attendance.branch_id = {placeholder}"
+        params.append(branch_id)
+    if subject_id:
+        query += f" AND attendance.subject_id = {placeholder}"
+        params.append(subject_id)
+    
+    query += " GROUP BY students.id, students.name, students.enrollment"
+    
+    records = db.execute(query, params).fetchall()
+    db.close()
+    
+    if not records:
+        flash("No data found for this report.", "error")
+        return redirect(url_for("attendance_report"))
+
+    subject = "Attendance Report Summary"
+    message = f"Attendance Report Summary ({date.today().isoformat()})\n\n"
+    message += f"{'Name':<25} {'Enrollment':<15} {'Attended':<10} {'Total':<10} {'%'}\n"
+    message += "-" * 70 + "\n"
+    
+    for r in records:
+        pct = round((r['present'] / r['total'] * 100), 1) if r['total'] > 0 else 0
+        message += f"{r['name']:<25} {r['enrollment']:<15} {r['present']:<10} {r['total']:<10} {pct}%\n"
+    
+    user_email = session.get("email") or app.config.get("MAIL_USERNAME")
+    if send_email(subject, user_email, message):
+        flash(f"Report sent to {user_email}", "success")
+    else:
+        flash("Failed to send email. Check mail configuration.", "error")
+        
+    return redirect(url_for("attendance_report"))
 
 
 @app.route("/admin/import_data", methods=["POST"])

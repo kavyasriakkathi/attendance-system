@@ -43,12 +43,26 @@
 </div>
 {% if stats %}
 <div class="card">
-    <h2>Attendance Statistics</h2>
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+        <h2 style="margin: 0;"><i class="fa-solid fa-chart-simple"></i> Attendance Statistics</h2>
+        <div style="display: flex; gap: 10px;">
+            <a href="{{ url_for('export_excel') }}" class="button" style="padding: 8px 16px; font-size: 0.85rem; background-color: var(--success-color);">
+                <i class="fa-solid fa-file-excel"></i> Export Excel
+            </a>
+            <form action="{{ url_for('report_email') }}" method="post" style="display: inline;">
+                <input type="hidden" name="branch_id" value="{{ filters.branch_id or '' }}">
+                <input type="hidden" name="subject_id" value="{{ filters.subject_id or '' }}">
+                <button type="submit" class="button" style="padding: 8px 16px; font-size: 0.85rem; background-color: var(--primary-color);">
+                    <i class="fa-solid fa-envelope"></i> Email Report
+                </button>
+            </form>
+        </div>
+    </div>
     <div class="stats-grid">
         <div class="stat-box">
             <h3>Overall Attendance</h3>
             <p class="percentage">{{ stats.overall_percentage }}%</p>
-            <p>{{ stats.overall_present }}/{{ stats.overall_total }} classes</p>
+            <p style="font-size: 0.9rem; color: var(--text-secondary);">{{ stats.overall_present }}/{{ stats.overall_total }} classes</p>
         </div>
         <div class="stat-box">
             <h3>Total Records</h3>
@@ -59,30 +73,32 @@
 {% if stats.student_stats %}
 <div class="card">
     <h2>Student Attendance Percentages</h2>
-    <table>
-        <thead>
-            <tr>
-                <th>Student Name</th>
-                <th>Enrollment</th>
-                <th>Present/Total</th>
-                <th>Percentage</th>
-            </tr>
-        </thead>
-        <tbody>
-            {% for student in stats.student_stats %}
-            <tr>
-                <td>{{ student.name }}</td>
-                <td>{{ student.enrollment }}</td>
-                <td>{{ student.present }}/{{ student.total }}</td>
-                <td>
-                    <span class="percentage-cell {% if student.percentage >= 75 %}good{% elif student.percentage >= 60 %}average{% else %}poor{% endif %}">
-                        {{ student.percentage }}%
-                    </span>
-                </td>
-            </tr>
-            {% endfor %}
-        </tbody>
-    </table>
+    <div class="table-responsive">
+        <table>
+            <thead>
+                <tr>
+                    <th>Student Name</th>
+                    <th>Enrollment</th>
+                    <th>Present/Total</th>
+                    <th>Percentage</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for student in stats.student_stats %}
+                <tr>
+                    <td>{{ student.name }}</td>
+                    <td>{{ student.enrollment }}</td>
+                    <td>{{ student.present }}/{{ student.total }}</td>
+                    <td>
+                        <span class="percentage-cell {% if student.percentage >= 75 %}good{% elif student.percentage >= 60 %}average{% else %}poor{% endif %}">
+                            {{ student.percentage }}%
+                        </span>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
 </div>
 {% endif %}
 {% if stats.subject_stats %}
@@ -114,37 +130,39 @@
 {% endif %}
 {% endif %}
 <div class="card">
-    <table>
-        <thead>
-            <tr>
-                <th>Date</th>
-                <th>Student</th>
-                <th>Enrollment</th>
-                <th>Branch</th>
-                <th>Subject</th>
-                <th>Status</th>
-                <th>Note</th>
-            </tr>
-        </thead>
-        <tbody>
-            {% if records %}
-                {% for record in records %}
+    <div class="table-responsive">
+        <table>
+            <thead>
                 <tr>
-                    <td>{{ record.date }}</td>
-                    <td>{{ record.student_name }}</td>
-                    <td>{{ record.enrollment }}</td>
-                    <td>{{ record.branch_name }}</td>
-                    <td>{{ record.subject_name }}</td>
-                    <td>{{ record.status }}</td>
-                    <td>{{ record.note or '-' }}</td>
+                    <th>Date</th>
+                    <th>Student</th>
+                    <th>Enrollment</th>
+                    <th>Branch</th>
+                    <th>Subject</th>
+                    <th>Status</th>
+                    <th>Note</th>
                 </tr>
-                {% endfor %}
-            {% else %}
-                <tr>
-                    <td colspan="7">No attendance records found.</td>
-                </tr>
-            {% endif %}
-        </tbody>
-    </table>
+            </thead>
+            <tbody>
+                {% if records %}
+                    {% for record in records %}
+                    <tr>
+                        <td>{{ record.date }}</td>
+                        <td>{{ record.student_name }}</td>
+                        <td>{{ record.enrollment }}</td>
+                        <td>{{ record.branch_name }}</td>
+                        <td>{{ record.subject_name }}</td>
+                        <td>{{ record.status }}</td>
+                        <td>{{ record.note or '-' }}</td>
+                    </tr>
+                    {% endfor %}
+                {% else %}
+                    <tr>
+                        <td colspan="7">No attendance records found.</td>
+                    </tr>
+                {% endif %}
+            </tbody>
+        </table>
+    </div>
 </div>
 {% endblock %}

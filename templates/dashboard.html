@@ -148,23 +148,14 @@ document.head.appendChild(style);
     </div>
 </div>
 
-<div class="grid">
+<div class="grid" style="margin-bottom: 30px;">
     <div class="card" style="grid-column: span 2;">
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
-            <h2 style="margin: 0;"><i class="fa-solid fa-layer-group"></i> Department Overview</h2>
-            <a href="{{ url_for('department_dashboard') }}" class="button" style="padding: 8px 16px; font-size: 0.85rem; background: var(--text-primary);">View All Detail</a>
+            <h2 style="margin: 0;"><i class="fa-solid fa-chart-line"></i> Attendance Trend</h2>
+            <span style="font-size: 0.85rem; color: var(--text-secondary);">Last 7 Days</span>
         </div>
-        <div class="branch-grid">
-            {% for branch in branch_data %}
-            <div class="branch-card" style="background: #fafbfc; border-radius: 12px; padding: 20px; border: 1px solid var(--border-color);">
-                <h4 style="margin: 0 0 5px 0; color: var(--primary-color);">{{ branch.branch_name }}</h4>
-                <p style="font-size: 0.8rem; color: var(--text-secondary); margin-bottom: 15px;"><i class="fa-solid fa-location-dot"></i> {{ branch.location or 'Campus' }}</p>
-                <div class="branch-stats" style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
-                    <div style="font-size: 0.85rem;"><strong>{{ branch.student_count }}</strong> <span style="color: var(--text-secondary);">Students</span></div>
-                    <div style="font-size: 0.85rem;"><strong>{{ branch.attendance_percentage or 0 }}%</strong> <span style="color: var(--text-secondary);">Avg Att.</span></div>
-                </div>
-            </div>
-            {% endfor %}
+        <div style="height: 300px; position: relative;">
+            <canvas id="attendanceChart"></canvas>
         </div>
     </div>
     
@@ -177,6 +168,68 @@ document.head.appendChild(style);
         </div>
     </div>
 </div>
+
+<div class="card">
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+        <h2 style="margin: 0;"><i class="fa-solid fa-layer-group"></i> Department Overview</h2>
+        <a href="{{ url_for('department_dashboard') }}" class="button" style="padding: 8px 16px; font-size: 0.85rem; background: var(--text-primary);">View All Detail</a>
+    </div>
+    <div class="branch-grid">
+        {% for branch in branch_data %}
+        <div class="branch-card" style="background: #fafbfc; border-radius: 12px; padding: 20px; border: 1px solid var(--border-color);">
+            <h4 style="margin: 0 0 5px 0; color: var(--primary-color);">{{ branch.branch_name }}</h4>
+            <p style="font-size: 0.8rem; color: var(--text-secondary); margin-bottom: 15px;"><i class="fa-solid fa-location-dot"></i> {{ branch.location or 'Campus' }}</p>
+            <div class="branch-stats" style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
+                <div style="font-size: 0.85rem;"><strong>{{ branch.student_count }}</strong> <span style="color: var(--text-secondary);">Students</span></div>
+                <div style="font-size: 0.85rem;"><strong>{{ branch.attendance_percentage or 0 }}%</strong> <span style="color: var(--text-secondary);">Avg Att.</span></div>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const ctx = document.getElementById('attendanceChart').getContext('2d');
+    const chartData = {{ chart_data | tojson }};
+    
+    new Chart(ctx, {
+        type: 'line',
+        data: {
+            labels: chartData.map(d => d.date),
+            datasets: [{
+                label: 'Attendance %',
+                data: chartData.map(d => d.percentage),
+                borderColor: '#4361ee',
+                backgroundColor: 'rgba(67, 97, 238, 0.1)',
+                borderWidth: 3,
+                fill: true,
+                tension: 0.4,
+                pointBackgroundColor: '#4361ee',
+                pointRadius: 4
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: { display: false }
+            },
+            scales: {
+                y: {
+                    beginAtZero: true,
+                    max: 100,
+                    grid: { color: '#f0f0f0' },
+                    ticks: { callback: value => value + '%' }
+                },
+                x: {
+                    grid: { display: false }
+                }
+            }
+        }
+    });
+});
+</script>
 
 <div class="card" style="background: #f9fafb; border: 1px solid #d1d5db;">
     <h2>Debug Info</h2>
