@@ -1,17 +1,32 @@
 {% extends "layout.html" %}
 {% block content %}
-<div class="card login-card">
-    <h1>Login</h1>
+<div class="card login-card" style="max-width: 450px; margin: 60px auto; padding: 40px;">
+    <div style="text-align: center; margin-bottom: 30px;">
+        <i class="fa-solid fa-user-shield" style="font-size: 3rem; color: var(--primary-color); margin-bottom: 20px;"></i>
+        <h1 style="margin: 0;">Admin Login</h1>
+        <p style="color: var(--text-secondary);">Access the management console</p>
+    </div>
     <form method="post">
-        <label>Username</label>
-        <input type="text" name="username" required autofocus />
-        <label>Password</label>
-        <input type="password" name="password" required />
-        <button type="submit">Sign In</button>
+        <div>
+            <label><i class="fa-solid fa-user"></i> Username</label>
+            <input type="text" name="username" required autofocus placeholder="Enter admin username" />
+        </div>
+        <div>
+            <label><i class="fa-solid fa-lock"></i> Password</label>
+            <input type="password" name="password" required placeholder="••••••••" />
+        </div>
+        <button type="submit" style="width: 100%; margin-top: 10px;">
+            Sign In <i class="fa-solid fa-right-to-bracket"></i>
+        </button>
     </form>
-    <p>Default admin: <strong>admin</strong> / <strong>admin123</strong></p>
-    <p>
-        <a href="{{ url_for('student_login') }}">Student login</a>
-    </p>
+    <div style="margin-top: 30px; padding: 15px; background: #f8f9fa; border-radius: 12px; font-size: 0.85rem; color: var(--text-secondary); text-align: center;">
+        <p style="margin: 0;">Default admin credentials:</p>
+        <code style="display: block; margin-top: 5px; color: var(--primary-color);">admin / admin123</code>
+    </div>
+    <div style="text-align: center; margin-top: 20px;">
+        <a href="{{ url_for('student_login') }}" style="text-decoration: none; font-weight: 600; color: var(--text-secondary);">
+            <i class="fa-solid fa-user-graduate"></i> Switch to Student Login
+        </a>
+    </div>
 </div>
 {% endblock %}

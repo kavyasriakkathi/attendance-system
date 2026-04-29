@@ -1,34 +1,43 @@
 {% extends "layout.html" %}
 
 {% block content %}
-<div class="card">
-    <h1>Student Login</h1>
+<div class="card login-card" style="max-width: 450px; margin: 60px auto; padding: 40px; border-top: 6px solid var(--danger-color);">
+    <div style="text-align: center; margin-bottom: 30px;">
+        <i class="fa-solid fa-user-graduate" style="font-size: 3.5rem; color: var(--danger-color); margin-bottom: 20px;"></i>
+        <h1 style="margin: 0;">Student Portal</h1>
+        <p style="color: var(--text-secondary);">Access your attendance track</p>
+    </div>
 
     <form method="post">
         {% if next %}
         <input type="hidden" name="next" value="{{ next }}">
-        <div class="notice" style="margin-bottom: 16px;">
-            You are logging in to mark attendance for a saved scan link.
+        <div class="flash success" style="margin-bottom: 24px; font-size: 0.9rem;">
+            <i class="fa-solid fa-qrcode"></i> Ready to mark attendance via QR scan. Please login.
         </div>
         {% endif %}
 
         <div>
-            <label>Enrollment Number</label>
-            <input type="text" name="username" required>
+            <label><i class="fa-solid fa-id-badge"></i> Enrollment Number</label>
+            <input type="text" name="username" required placeholder="e.g. 21XX1A05XX" />
         </div>
 
         <div>
-            <label>Password</label>
-            <input type="password" name="password" required>
+            <label><i class="fa-solid fa-shield-halved"></i> Password</label>
+            <input type="password" name="password" required placeholder="••••••••" />
         </div>
 
-        <button type="submit">Login</button>
+        <button type="submit" style="width: 100%; background-color: var(--danger-color); margin-top: 10px;">
+            Login to Dashboard <i class="fa-solid fa-right-to-bracket"></i>
+        </button>
     </form>
-    <p style="margin-top: 12px;">
-        <a href="{{ url_for('forgot_password') }}">Forgot password?</a>
-    </p>
-    <p>
-        <a href="{{ url_for('login') }}">Back to admin login</a>
-    </p>
+    
+    <div style="display: flex; justify-content: space-between; margin-top: 24px; font-size: 0.9rem;">
+        <a href="{{ url_for('forgot_password') }}" style="text-decoration: none; font-weight: 600; color: var(--primary-color);">
+            Forgot password?
+        </a>
+        <a href="{{ url_for('index') }}" style="text-decoration: none; font-weight: 600; color: var(--text-secondary);">
+            Back to Home
+        </a>
+    </div>
 </div>
 {% endblock %}

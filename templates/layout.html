@@ -4,26 +4,27 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Institute Attendance</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.2/css/all.min.css" />
     <link rel="stylesheet" href="/static/style.css" />
     {% block head %}{% endblock %}
 </head>
 <body>
     <header>
         <div class="brand">
-            <img src="{{ url_for('static', filename='logo.jpg') }}" alt="Logo" style="height: 40px; margin-right: 12px; vertical-align: middle;">
-            Siddhartha Attendance System
+            <img src="{{ url_for('static', filename='logo.jpg') }}" alt="Logo" style="height: 44px; border-radius: 8px;">
+            Siddhartha
         </div>
         {% if session.username %}
         <nav>
-            <a href="{{ url_for('dashboard') }}">Dashboard</a>
-            <a href="{{ url_for('department_dashboard') }}">Departments</a>
-            <a href="{{ url_for('branches') }}">Branches</a>
-            <a href="{{ url_for('subjects') }}">Subjects</a>
-            <a href="{{ url_for('students') }}">Students</a>
-            <a href="{{ url_for('mark_attendance') }}">Mark Attendance</a>
-            <a href="{{ url_for('attendance_report') }}">Reports</a>
-            <a href="{{ url_for('settings') }}">Settings</a>
-            <a class="logout" href="{{ url_for('logout') }}">Logout</a>
+            <a href="{{ url_for('dashboard') }}"><i class="fa-solid fa-chart-line"></i> Dashboard</a>
+            <a href="{{ url_for('department_dashboard') }}"><i class="fa-solid fa-building"></i> Depts</a>
+            <a href="{{ url_for('mark_attendance') }}"><i class="fa-solid fa-calendar-check"></i> Attendance</a>
+            <a href="{{ url_for('attendance_report') }}"><i class="fa-solid fa-file-invoice"></i> Reports</a>
+            <a href="{{ url_for('settings') }}"><i class="fa-solid fa-gear"></i> Settings</a>
+            <a class="logout" href="{{ url_for('logout') }}"><i class="fa-solid fa-right-from-bracket"></i></a>
         </nav>
         {% endif %}
     </header>

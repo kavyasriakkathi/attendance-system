@@ -1,176 +1,39 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Teacher Login - Attendance Management System</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
-    <style>
-        .teacher-login-container {
-            max-width: 500px;
-            margin: 5rem auto;
-            padding: 2rem;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            border-radius: 15px;
-            box-shadow: 0 20px 40px rgba(0,0,0,0.1);
-            color: white;
-        }
-
-        .teacher-login-container h1 {
-            text-align: center;
-            margin-bottom: 2rem;
-            font-size: 2.5rem;
-            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
-        }
-
-        .teacher-icon {
-            text-align: center;
-            font-size: 4rem;
-            margin-bottom: 1rem;
-            opacity: 0.9;
-        }
-
-        .form-group {
-            margin-bottom: 1.5rem;
-        }
-
-        .form-group label {
-            display: block;
-            margin-bottom: 0.5rem;
-            font-weight: 600;
-            font-size: 1.1rem;
-        }
-
-        .form-group input {
-            width: 100%;
-            padding: 1rem;
-            border: none;
-            border-radius: 8px;
-            font-size: 1rem;
-            background: rgba(255,255,255,0.9);
-            color: #333;
-            transition: all 0.3s ease;
-        }
-
-        .form-group input:focus {
-            outline: none;
-            box-shadow: 0 0 0 3px rgba(255,255,255,0.5);
-            background: white;
-        }
-
-        .btn-teacher {
-            width: 100%;
-            padding: 1rem;
-            background: linear-gradient(45deg, #FF6B6B, #4ECDC4);
-            color: white;
-            border: none;
-            border-radius: 8px;
-            font-size: 1.2rem;
-            font-weight: 600;
-            cursor: pointer;
-            transition: all 0.3s ease;
-            margin-bottom: 1rem;
-        }
-
-        .btn-teacher:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 10px 20px rgba(0,0,0,0.2);
-        }
-
-        .back-link {
-            text-align: center;
-            margin-top: 1rem;
-        }
-
-        .back-link a {
-            color: rgba(255,255,255,0.8);
-            text-decoration: none;
-            font-weight: 500;
-            transition: color 0.3s ease;
-        }
-
-        .back-link a:hover {
-            color: white;
-            text-decoration: underline;
-        }
-
-        .flash-messages {
-            margin-bottom: 1rem;
-        }
-
-        .flash-error {
-            background: rgba(255,107,107,0.9);
-            color: white;
-            padding: 1rem;
-            border-radius: 8px;
-            text-align: center;
-            margin-bottom: 1rem;
-        }
-
-        .features {
-            text-align: center;
-            margin-top: 2rem;
-            opacity: 0.8;
-        }
-
-        .features h3 {
-            margin-bottom: 1rem;
-            font-size: 1.3rem;
-        }
-
-        .features ul {
-            list-style: none;
-            padding: 0;
-        }
-
-        .features li {
-            margin: 0.5rem 0;
-            font-size: 1rem;
-        }
-    </style>
-</head>
-<body>
-    <div class="teacher-login-container">
-        <div class="teacher-icon">👨‍🏫</div>
-        <h1>Teacher Portal</h1>
-
-        {% with messages = get_flashed_messages(with_categories=true) %}
-            {% if messages %}
-                <div class="flash-messages">
-                    {% for category, message in messages %}
-                        <div class="flash-{{ category }}">{{ message }}</div>
-                    {% endfor %}
-                </div>
-            {% endif %}
-        {% endwith %}
-
-        <form method="POST">
-            <div class="form-group">
-                <label for="username">Username</label>
-                <input type="text" id="username" name="username" required placeholder="Enter your username">
-            </div>
-
-            <div class="form-group">
-                <label for="password">Password</label>
-                <input type="password" id="password" name="password" required placeholder="Enter your password">
-            </div>
-
-            <button type="submit" class="btn-teacher">Login to Dashboard</button>
-        </form>
-
-        <div class="back-link">
-            <a href="{{ url_for('index') }}">← Back to Home</a>
-        </div>
-
-        <div class="features">
-            <h3>Teacher Features</h3>
-            <ul>
-                <li>📊 View attendance reports</li>
-                <li>👥 Manage student records</li>
-                <li>📅 Mark daily attendance</li>
-                <li>📈 Generate performance analytics</li>
-            </ul>
-        </div>
+{% extends "layout.html" %}
+{% block content %}
+<div class="card login-card" style="max-width: 500px; margin: 60px auto; padding: 40px; border-top: 6px solid #06d6a0;">
+    <div style="text-align: center; margin-bottom: 30px;">
+        <i class="fa-solid fa-chalkboard-user" style="font-size: 3.5rem; color: #06d6a0; margin-bottom: 20px;"></i>
+        <h1 style="margin: 0;">Teacher Portal</h1>
+        <p style="color: var(--text-secondary);">Manage your classes and attendance</p>
     </div>
-</body>
-</html>
+
+    <form method="POST">
+        <div>
+            <label><i class="fa-solid fa-user-tie"></i> Username</label>
+            <input type="text" name="username" required placeholder="Enter your teacher ID" />
+        </div>
+        <div>
+            <label><i class="fa-solid fa-key"></i> Password</label>
+            <input type="password" name="password" required placeholder="••••••••" />
+        </div>
+        <button type="submit" style="width: 100%; background-color: #06d6a0; margin-top: 10px;">
+            Enter Dashboard <i class="fa-solid fa-arrow-right"></i>
+        </button>
+    </form>
+
+    <div style="margin-top: 30px; padding: 20px; background: #f0faf7; border-radius: 16px;">
+        <h3 style="font-size: 0.9rem; color: #0b6e54; margin-bottom: 12px; text-transform: uppercase; letter-spacing: 1px;">Capabilities</h3>
+        <ul style="margin: 0; padding: 0; list-style: none; font-size: 0.9rem; color: #1a6a3f; display: grid; gap: 8px;">
+            <li><i class="fa-solid fa-check" style="color: #06d6a0;"></i> Mark daily attendance</li>
+            <li><i class="fa-solid fa-check" style="color: #06d6a0;"></i> View class performance</li>
+            <li><i class="fa-solid fa-check" style="color: #06d6a0;"></i> Export subject reports</li>
+        </ul>
+    </div>
+
+    <div style="text-align: center; margin-top: 24px;">
+        <a href="{{ url_for('index') }}" style="text-decoration: none; font-weight: 600; color: var(--text-secondary);">
+            <i class="fa-solid fa-chevron-left"></i> Back to Home
+        </a>
+    </div>
+</div>
+{% endblock %}

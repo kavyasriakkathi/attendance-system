@@ -74,9 +74,9 @@ document.head.appendChild(style);
 {% endblock %}
 {% block content %}
 <div class="card">
-    <h1>Mark Attendance</h1>
-    <p class="notice">Select a date to mark attendance for that day.</p>
-    <form method="get" class="form-row compact">
+    <h1><i class="fa-solid fa-calendar-check"></i> Mark Attendance</h1>
+    <p class="notice">Select a branch, subject, and date to manage attendance.</p>
+    <form method="get" class="form-row">
         <div>
             <label>Branch</label>
             <select name="branch_id" required onchange="this.form.submit()">
@@ -133,28 +133,38 @@ document.head.appendChild(style);
         <input type="hidden" name="date" value="{{ selected_date }}" />
 
         <!-- Bulk Mark Absent Section -->
-        <div class="card bulk-action-card" style="margin-bottom: 20px; background-color: #fff4f4; border-left: 5px solid #f44336; padding: 15px;">
-            <h3 style="margin-top: 0; color: #d32f2f; display: flex; align-items: center; gap: 8px;">
-                <span style="font-size: 1.2em;">📋</span> Bulk Mark Absent
+        <div class="card bulk-action-card" style="margin-bottom: 30px; background-color: #fff9f9; border-left: 6px solid var(--danger-color);">
+            <h3 style="color: var(--danger-color); display: flex; align-items: center; gap: 10px;">
+                <i class="fa-solid fa-users-slash"></i> Bulk Mark Absent
             </h3>
-            <p style="margin-bottom: 10px; font-size: 0.9em; color: #666;">
+            <p style="margin-bottom: 15px; font-size: 0.95rem; color: #555;">
                 Enter last digits or full enrollment numbers (separated by space or comma):
             </p>
-            <div style="display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 10px;">
-                <input type="text" id="bulk_absent_input" placeholder="e.g. 75 76 79 80" style="flex-grow: 1; min-width: 200px; padding: 10px; border: 1px solid #ccd5e2; border-radius: 6px;">
-                <button type="button" onclick="bulkMarkAbsent()" style="background-color: #f44336; white-space: nowrap;">Apply Absent Status</button>
-                <button type="button" onclick="resetBulkStatus()" style="background-color: #757575; white-space: nowrap;">Reset All to Present</button>
+            <div style="display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 15px;">
+                <input type="text" id="bulk_absent_input" placeholder="e.g. 75 76 79 80" style="flex-grow: 1; min-width: 200px;">
+                <button type="button" onclick="bulkMarkAbsent()" style="background-color: var(--danger-color);">
+                    <i class="fa-solid fa-check-double"></i> Apply to Table
+                </button>
+                <button type="button" onclick="resetBulkStatus()" style="background-color: var(--text-secondary);">
+                    <i class="fa-solid fa-undo"></i> Reset All
+                </button>
             </div>
-            <div id="bulk_result_msg" style="font-weight: bold; font-size: 0.9em; display: none;"></div>
+            <div id="bulk_result_msg" style="font-weight: 700; font-size: 0.9rem; display: none;"></div>
+        </div>
+
+        <div style="margin-bottom: 15px; display: flex; justify-content: flex-end;">
+            <button type="button" onclick="clearAllAttendance()" class="button" style="background-color: var(--text-secondary); padding: 8px 16px; font-size: 0.9rem;">
+                <i class="fa-solid fa-eraser"></i> Clear Selections
+            </button>
         </div>
 
         <table>
             <thead>
                 <tr>
-                    <th>Student</th>
-                    <th>Enrollment</th>
-                    <th>Status</th>
-                    <th>Note</th>
+                    <th><i class="fa-solid fa-user"></i> Student</th>
+                    <th><i class="fa-solid fa-id-card"></i> Enrollment</th>
+                    <th><i class="fa-solid fa-clipboard-check"></i> Status</th>
+                    <th><i class="fa-solid fa-note-sticky"></i> Note</th>
                 </tr>
             </thead>
             <tbody>
@@ -282,6 +292,17 @@ document.head.appendChild(style);
         });
         document.getElementById('bulk_result_msg').style.display = 'none';
         document.getElementById('bulk_absent_input').value = '';
+    }
+
+    function clearAllAttendance() {
+        if (confirm('Are you sure you want to clear all selections for this class?')) {
+            const selects = document.querySelectorAll('tbody select');
+            selects.forEach(s => s.value = 'Present');
+            const rows = document.querySelectorAll('tbody tr');
+            rows.forEach(r => r.style.backgroundColor = '');
+            const inputs = document.querySelectorAll('tbody input[type="text"]');
+            inputs.forEach(i => i.value = '');
+        }
     }
 </script>
 {% endif %}

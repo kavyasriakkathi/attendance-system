@@ -1,91 +1,189 @@
-<!DOCTYPE html>
-<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Attendance Management System</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <title>Siddhartha | Attendance Management</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.2/css/all.min.css" />
     <style>
-        .container {
-            max-width: 800px;
-            margin: 2rem auto;
-            padding: 2rem;
+        :root {
+            --primary: #4361ee;
+            --secondary: #3f37c9;
+            --accent: #4cc9f0;
+            --student: #ef476f;
+            --teacher: #06d6a0;
+            --bg: #f8f9fa;
+            --text: #2b2d42;
+        }
+
+        body {
+            margin: 0;
+            font-family: 'Outfit', sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            overflow-x: hidden;
+        }
+
+        body::before {
+            content: '';
+            position: absolute;
+            top: -10%;
+            right: -10%;
+            width: 40%;
+            height: 40%;
+            background: radial-gradient(circle, rgba(67, 97, 238, 0.1) 0%, rgba(255, 255, 255, 0) 70%);
+            z-index: -1;
+        }
+
+        .hero-container {
+            max-width: 1000px;
+            width: 90%;
             text-align: center;
+            padding: 40px;
+            background: white;
+            border-radius: 30px;
+            box-shadow: 0 20px 50px rgba(0, 0, 0, 0.1);
+            animation: fadeIn 0.8s ease-out;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(20px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .logo {
+            width: 120px;
+            margin-bottom: 24px;
+            border-radius: 20px;
+            box-shadow: 0 8px 16px rgba(0, 0, 0, 0.05);
         }
 
         h1 {
-            color: #333;
-            margin-bottom: 2rem;
-            font-size: 2.5rem;
-        }
-
-        .login-options {
-            display: flex;
-            justify-content: center;
-            gap: 2rem;
-            flex-wrap: wrap;
-        }
-
-        .btn {
-            padding: 1rem 2rem;
-            border: none;
-            border-radius: 8px;
-            font-size: 1.2rem;
-            font-weight: 600;
-            cursor: pointer;
-            transition: all 0.3s ease;
-            text-decoration: none;
-            display: inline-block;
-            min-width: 200px;
-        }
-
-        .btn-primary {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-        }
-
-        .btn-primary:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 10px 20px rgba(102, 126, 234, 0.4);
-        }
-
-        .btn-secondary {
-            background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
-            color: white;
-        }
-
-        .btn-secondary:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 10px 20px rgba(245, 87, 108, 0.4);
-        }
-
-        .btn-teacher {
-            background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
-            color: white;
-        }
-
-        .btn-teacher:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 10px 20px rgba(79, 172, 254, 0.4);
+            font-size: 3rem;
+            font-weight: 800;
+            margin: 0 0 16px 0;
+            background: linear-gradient(135deg, var(--primary), var(--secondary));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            letter-spacing: -1px;
         }
 
         .welcome-text {
-            margin-bottom: 2rem;
-            color: #666;
-            font-size: 1.1rem;
+            font-size: 1.25rem;
+            color: #64748b;
+            margin-bottom: 48px;
+            max-width: 600px;
+            margin-left: auto;
+            margin-right: auto;
+        }
+
+        .portal-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 24px;
+        }
+
+        .portal-card {
+            padding: 32px;
+            border-radius: 24px;
+            text-decoration: none;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            border: 2px solid transparent;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 16px;
+        }
+
+        .portal-card i {
+            font-size: 2.5rem;
+            margin-bottom: 8px;
+        }
+
+        .portal-card h2 {
+            margin: 0;
+            font-size: 1.5rem;
+            font-weight: 700;
+        }
+
+        .portal-card p {
+            margin: 0;
+            font-size: 0.95rem;
+            opacity: 0.8;
+        }
+
+        .admin-portal {
+            background: #f0f3ff;
+            color: var(--primary);
+        }
+        .admin-portal:hover {
+            border-color: var(--primary);
+            background: white;
+            transform: translateY(-10px);
+            box-shadow: 0 15px 30px rgba(67, 97, 238, 0.15);
+        }
+
+        .teacher-portal {
+            background: #e6fcf5;
+            color: var(--teacher);
+        }
+        .teacher-portal:hover {
+            border-color: var(--teacher);
+            background: white;
+            transform: translateY(-10px);
+            box-shadow: 0 15px 30px rgba(6, 214, 160, 0.15);
+        }
+
+        .student-portal {
+            background: #fff0f3;
+            color: var(--student);
+        }
+        .student-portal:hover {
+            border-color: var(--student);
+            background: white;
+            transform: translateY(-10px);
+            box-shadow: 0 15px 30px rgba(239, 71, 111, 0.15);
+        }
+
+        @media (max-width: 640px) {
+            h1 { font-size: 2.2rem; }
+            .hero-container { padding: 24px; }
         }
     </style>
 </head>
 <body>
-    <div class="container">
-        <img src="{{ url_for('static', filename='logo.jpg') }}" alt="Siddhartha Institute Logo" style="width: 150px; margin-bottom: 1.5rem;">
-        <h1>Siddhartha Institute Attendance System</h1>
-        <p class="welcome-text">Choose your login portal to access the system</p>
-        <div class="login-options">
-            <a href="{{ url_for('login') }}" class="btn btn-primary">Admin Login 👑</a>
-            <a href="{{ url_for('teacher_login') }}" class="btn btn-teacher">Teacher Login 👨‍🏫</a>
-            <a href="{{ url_for('student_login') }}" class="btn btn-secondary">Student Login 👨‍🎓</a>
+    <div class="hero-container">
+        <img src="{{ url_for('static', filename='logo.jpg') }}" alt="Siddhartha Logo" class="logo">
+        <h1>Siddhartha Institute</h1>
+        <p class="welcome-text">Advanced Attendance Management System. Select your portal to continue.</p>
+        
+        <div class="portal-grid">
+            <a href="{{ url_for('login') }}" class="portal-card admin-portal">
+                <i class="fa-solid fa-user-shield"></i>
+                <h2>Admin</h2>
+                <p>Manage branches, users, and overall reports.</p>
+            </a>
+            
+            <a href="{{ url_for('teacher_login') }}" class="portal-card teacher-portal">
+                <i class="fa-solid fa-chalkboard-user"></i>
+                <h2>Teacher</h2>
+                <p>Mark attendance and view class performance.</p>
+            </a>
+            
+            <a href="{{ url_for('student_login') }}" class="portal-card student-portal">
+                <i class="fa-solid fa-user-graduate"></i>
+                <h2>Student</h2>
+                <p>Track your attendance and scan QR codes.</p>
+            </a>
         </div>
+        
+        <p style="margin-top: 48px; font-size: 0.85rem; color: #94a3b8;">
+            &copy; 2024 Siddhartha Institute. All rights reserved.
+        </p>
     </div>
-</body>
-</html>
+</body>

@@ -99,94 +99,82 @@ document.head.appendChild(style);
 </script>
 {% endblock %}
 {% block content %}
-{% if persistence_warning %}
-<div class="card" style="background: #fff5f5; border: 1px solid #feb2b2; color: #c53030; margin-bottom: 20px; border-left: 5px solid #f56565;">
-    <h2 style="margin-top: 0; color: #c53030;">⚠️ CRITICAL: Data is NOT Saving Permanently</h2>
-    <p>You are currently using <strong>SQLite (Local Storage)</strong> on Render. Render deletes all local files every time the server restarts (which happens on every update or deploy).</p>
-    <p><strong>ALL DATA YOU ENTER NOW WILL BE DELETED.</strong></p>
-    <p><strong>How to fix this:</strong></p>
-    <ol style="margin-left: 20px; margin-bottom: 15px;">
-        <li>Go to your <strong>Render Dashboard</strong>.</li>
-        <li>Ensure you have created a <strong>PostgreSQL Database</strong>.</li>
-        <li>In your Web Service settings, go to the <strong>Environment</strong> tab.</li>
-        <li>Add an environment variable named <code>DATABASE_URL</code> and link it to your database.</li>
-    </ol>
-    <div style="margin-top: 15px;">
-        <a href="https://dashboard.render.com/" target="_blank" class="button" style="background: #c53030; color: white; text-decoration: none; padding: 10px 20px; border-radius: 4px; font-weight: bold; display: inline-block;">Go to Render Dashboard to Fix</a>
+<div class="welcome-header" style="margin-bottom: 40px; display: flex; justify-content: space-between; align-items: flex-end;">
+    <div>
+        <h1 style="margin-bottom: 8px;"><i class="fa-solid fa-house-chimney"></i> Welcome back, {{ session.username }}</h1>
+        <p style="color: var(--text-secondary); margin: 0;">Here's an overview of your institute's attendance and performance.</p>
     </div>
+    <div class="real-time-indicator" style="background: #e6f4ea; padding: 10px 16px; border-radius: 30px; display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 0.85rem; color: #1a6a3f; box-shadow: var(--shadow-sm);">
+        <span class="status-dot" style="width: 10px; height: 10px; background: var(--success-color); border-radius: 50%; display: inline-block; animation: pulse 2s infinite;"></span>
+        Live Sync Active
+    </div>
+</div>
+
+{% if persistence_warning %}
+<div class="flash error" style="margin-bottom: 30px; display: block; border-left-width: 8px;">
+    <h3 style="color: inherit; margin-bottom: 10px;"><i class="fa-solid fa-triangle-exclamation"></i> Critical: Data Persistance Warning</h3>
+    <p style="margin-bottom: 15px;">You are using SQLite on Render. Your data will be <strong>deleted</strong> when the server restarts.</p>
+    <a href="https://dashboard.render.com/" target="_blank" class="button" style="background: var(--danger-color); color: white; padding: 8px 16px; font-size: 0.85rem;">
+        <i class="fa-solid fa-database"></i> Link PostgreSQL Now
+    </a>
 </div>
 {% endif %}
 
-{% if not mail_info.configured %}
-<div class="card" style="background: #fff4e5; border: 1px solid #ffcc80; color: #663c00; margin-bottom: 16px;">
-    <h2 style="margin-top: 0;">Mail configuration required</h2>
-    <p>Low-attendance email alerts are disabled because mail credentials are not configured. Set <code>MAIL_USERNAME</code> and <code>MAIL_PASSWORD</code> in your environment.</p>
-</div>
-{% elif mail_info.render_env %}
-<div class="card" style="background: #e6f4ea; border: 1px solid #a5d6a7; color: #1a6a3f; margin-bottom: 16px;">
-    <h2 style="margin-top: 0;">Mail is configured</h2>
-    <p>Mail credentials are detected from Render environment variables. Low-attendance emails are enabled.</p>
-</div>
-{% endif %}
-<div class="grid">
-    <div class="card stat-card">
-        <h2>Branches</h2>
-        <p>{{ branch_count }}</p>
+<div class="stats-grid">
+    <div class="stat-box" style="border-bottom: 4px solid var(--primary-color);">
+        <i class="fa-solid fa-building-columns" style="font-size: 1.5rem; color: var(--text-secondary); margin-bottom: 15px;"></i>
+        <h3>Branches</h3>
+        <p class="count">{{ branch_count }}</p>
     </div>
-    <div class="card stat-card">
-        <h2>Subjects</h2>
-        <p>{{ subject_count }}</p>
+    <div class="stat-box" style="border-bottom: 4px solid var(--secondary-color);">
+        <i class="fa-solid fa-book-open" style="font-size: 1.5rem; color: var(--text-secondary); margin-bottom: 15px;"></i>
+        <h3>Subjects</h3>
+        <p class="count">{{ subject_count }}</p>
     </div>
-    <div class="card stat-card">
-        <h2>Students</h2>
-        <p>{{ student_count }}</p>
+    <div class="stat-box" style="border-bottom: 4px solid var(--primary-hover);">
+        <i class="fa-solid fa-user-graduate" style="font-size: 1.5rem; color: var(--text-secondary); margin-bottom: 15px;"></i>
+        <h3>Students</h3>
+        <p class="count">{{ student_count }}</p>
     </div>
-    <div class="card stat-card">
-        <h2>Attendance Records</h2>
-        <p>{{ attendance_count }}</p>
+    <div class="stat-box" style="border-bottom: 4px solid var(--success-color);">
+        <i class="fa-solid fa-list-check" style="font-size: 1.5rem; color: var(--text-secondary); margin-bottom: 15px;"></i>
+        <h3>Records</h3>
+        <p class="count">{{ attendance_count }}</p>
     </div>
-    <div class="card stat-card">
-        <h2>Overall Attendance</h2>
+    <div class="stat-box" style="border-bottom: 4px solid var(--warning-color); background: linear-gradient(135deg, #ffffff 0%, #fff9e6 100%);">
+        <i class="fa-solid fa-chart-pie" style="font-size: 1.5rem; color: var(--text-secondary); margin-bottom: 15px;"></i>
+        <h3>Overall</h3>
         <p class="percentage">{{ overall_percentage }}%</p>
     </div>
 </div>
 
-<div class="card">
-    <h2>Department-wise Overview</h2>
-    <div class="branch-grid">
-        {% for branch in branch_data %}
-        <div class="branch-card">
-            <h3>{{ branch.branch_name }}</h3>
-            <p class="branch-location">{{ branch.location or 'No location specified' }}</p>
-            <div class="branch-stats">
-                <div class="stat-item">
-                    <span class="stat-label">Students:</span>
-                    <span class="stat-value">{{ branch.student_count }}</span>
-                </div>
-                <div class="stat-item">
-                    <span class="stat-label">Subjects:</span>
-                    <span class="stat-value">{{ branch.subject_count }}</span>
-                </div>
-                <div class="stat-item">
-                    <span class="stat-label">Attendance:</span>
-                    <span class="stat-value">{{ branch.attendance_count }}</span>
-                </div>
-                <div class="stat-item">
-                    <span class="stat-label">Avg %:</span>
-                    <span class="stat-value">{{ branch.attendance_percentage or 0 }}%</span>
+<div class="grid">
+    <div class="card" style="grid-column: span 2;">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+            <h2 style="margin: 0;"><i class="fa-solid fa-layer-group"></i> Department Overview</h2>
+            <a href="{{ url_for('department_dashboard') }}" class="button" style="padding: 8px 16px; font-size: 0.85rem; background: var(--text-primary);">View All Detail</a>
+        </div>
+        <div class="branch-grid">
+            {% for branch in branch_data %}
+            <div class="branch-card" style="background: #fafbfc; border-radius: 12px; padding: 20px; border: 1px solid var(--border-color);">
+                <h4 style="margin: 0 0 5px 0; color: var(--primary-color);">{{ branch.branch_name }}</h4>
+                <p style="font-size: 0.8rem; color: var(--text-secondary); margin-bottom: 15px;"><i class="fa-solid fa-location-dot"></i> {{ branch.location or 'Campus' }}</p>
+                <div class="branch-stats" style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
+                    <div style="font-size: 0.85rem;"><strong>{{ branch.student_count }}</strong> <span style="color: var(--text-secondary);">Students</span></div>
+                    <div style="font-size: 0.85rem;"><strong>{{ branch.attendance_percentage or 0 }}%</strong> <span style="color: var(--text-secondary);">Avg Att.</span></div>
                 </div>
             </div>
+            {% endfor %}
         </div>
-        {% endfor %}
     </div>
-</div>
-
-<div class="card">
-    <h1>Welcome, {{ session.username }}</h1>
-    <p>This system manages institute branches, subjects, student profiles, attendance marking, and reports.</p>
-    <div class="real-time-indicator">
-        <span class="status-dot"></span>
-        <span>Real-time updates active</span>
+    
+    <div class="card">
+        <h2><i class="fa-solid fa-bolt"></i> Quick Actions</h2>
+        <div style="display: flex; flex-direction: column; gap: 12px;">
+            <a href="{{ url_for('mark_attendance') }}" class="button"><i class="fa-solid fa-plus"></i> Mark Attendance</a>
+            <a href="{{ url_for('attendance_report') }}" class="button" style="background-color: var(--text-secondary);"><i class="fa-solid fa-file-export"></i> Export Reports</a>
+            <a href="{{ url_for('students') }}" class="button" style="background-color: var(--text-secondary);"><i class="fa-solid fa-user-plus"></i> Add Student</a>
+        </div>
     </div>
 </div>
 
