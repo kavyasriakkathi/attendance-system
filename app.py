@@ -432,6 +432,11 @@ def index():
     return render_template("index.html")
 
 
+@app.route("/health")
+def health():
+    return jsonify({"status": "healthy"}), 200
+
+
 @app.route("/dashboard")
 @login_required
 def dashboard():
