@@ -211,7 +211,21 @@ document.addEventListener('DOMContentLoaded', function() {
                 backgroundColor: backgroundColors,
                 borderColor: borderColors,
                 borderWidth: 1,
-                maxBarThickness: 48
+                maxBarThickness: 48,
+                order: 1
+            },
+            {
+                // Threshold line dataset
+                label: 'Threshold',
+                type: 'line',
+                data: labels.map(() => threshold),
+                borderColor: '#f59e0b',
+                borderWidth: 2,
+                borderDash: [6, 4],
+                pointRadius: 0,
+                fill: false,
+                order: 2,
+                tension: 0
             }]
         },
         options: {
