@@ -3,16 +3,11 @@
 {% block content %}
 <div class="card">
     <h1>Student Dashboard</h1>
-
-    <p><strong>Name:</strong> {{ student.name }}</p>
-    <p><strong>Enrollment:</strong> {{ student.enrollment }}</p>
-    <p><strong>Branch:</strong> {{ student.branch_name }}</p>
-    <p><strong>Email:</strong> {{ student.email }}</p>
     <p><strong>Attendance Percentage:</strong> {{ percentage }}%</p>
 </div>
 
 <div class="card">
-    <h2>Attendance Records</h2>
+    <h2>Subject-wise Attendance</h2>
 
     <table>
         <thead>
