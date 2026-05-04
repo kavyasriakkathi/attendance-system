@@ -42,3 +42,4 @@ To configure email:
 - This app uses `waitress` as the WSGI server on Windows.
 - The database (`attendance.db`) is stored in the `instance/` directory to ensure data is not lost.
 - To enable email alerts, you must provide valid SMTP credentials in `.env`.
+- Render auto-deploys changes from the `main` branch when connected to GitHub.
