@@ -99,11 +99,10 @@ document.head.appendChild(style);
         {% endif %}
         <div>
             <label>Date</label>
-            <input type="date" name="date" value="{{ selected_date }}" required />
+            <input type="date" name="date" value="{{ selected_date }}" max="{{ today_date }}" required />
             {% if branch_id and subject_id %}
             <div style="margin-top: 8px;">
                 <a href="{{ url_for('mark_attendance', branch_id=branch_id, subject_id=subject_id, date=prev_date) }}" class="button small">← Previous Day</a>
-                <a href="{{ url_for('mark_attendance', branch_id=branch_id, subject_id=subject_id, date=next_date) }}" class="button small">Next Day →</a>
             </div>
             {% endif %}
         </div>
