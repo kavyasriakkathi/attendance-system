@@ -9,6 +9,17 @@
 <div class="card">
     <h2>Subject-wise Attendance</h2>
 
+    <div style="display: flex; flex-wrap: wrap; gap: 10px; margin: 12px 0 20px;">
+        <a href="{{ url_for('student_dashboard') }}" class="button small" {% if not selected_subject_id %}style="background-color: var(--primary-color);"{% endif %}>
+            <i class="fa-solid fa-layer-group"></i> All Subjects
+        </a>
+        {% for subject in subjects %}
+        <a href="{{ url_for('student_dashboard', subject_id=subject.id) }}" class="button small" {% if selected_subject_id and subject.id|string == selected_subject_id|string %}style="background-color: var(--primary-color);"{% endif %}>
+            <i class="fa-solid fa-book"></i> {{ subject.name }}
+        </a>
+        {% endfor %}
+    </div>
+
     <table>
         <thead>
             <tr>
