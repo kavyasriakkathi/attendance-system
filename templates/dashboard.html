@@ -193,21 +193,44 @@ document.addEventListener('DOMContentLoaded', function() {
     const ctx = document.getElementById('attendanceChart').getContext('2d');
     const chartData = {{ chart_data | tojson }};
     
+    // Create two series: above threshold (>=75) and below threshold (<75).
+    const values = chartData.map(d => d.percentage);
+    const labels = chartData.map(d => d.date);
+    const threshold = 75;
+
+    const above = values.map(v => (v >= threshold ? v : null));
+    const below = values.map(v => (v < threshold ? v : null));
+
     new Chart(ctx, {
         type: 'line',
         data: {
-            labels: chartData.map(d => d.date),
-            datasets: [{
-                label: 'Attendance %',
-                data: chartData.map(d => d.percentage),
-                borderColor: '#4361ee',
-                backgroundColor: 'rgba(67, 97, 238, 0.1)',
-                borderWidth: 3,
-                fill: true,
-                tension: 0.4,
-                pointBackgroundColor: '#4361ee',
-                pointRadius: 4
-            }]
+            labels: labels,
+            datasets: [
+                {
+                    label: 'Above Threshold',
+                    data: above,
+                    borderColor: '#16a34a', // green
+                    backgroundColor: 'rgba(22,163,74,0.12)',
+                    borderWidth: 3,
+                    fill: true,
+                    tension: 0.4,
+                    spanGaps: true,
+                    pointRadius: 5,
+                    pointBackgroundColor: '#16a34a'
+                },
+                {
+                    label: 'Below Threshold',
+                    data: below,
+                    borderColor: '#ef4444', // red
+                    backgroundColor: 'rgba(239,68,68,0.12)',
+                    borderWidth: 3,
+                    fill: true,
+                    tension: 0.4,
+                    spanGaps: true,
+                    pointRadius: 5,
+                    pointBackgroundColor: '#ef4444'
+                }
+            ]
         },
         options: {
             responsive: true,
