@@ -193,50 +193,37 @@ document.addEventListener('DOMContentLoaded', function() {
     const ctx = document.getElementById('attendanceChart').getContext('2d');
     const chartData = {{ chart_data | tojson }};
     
-    // Create two series: above threshold (>=75) and below threshold (<75).
-    const values = chartData.map(d => d.percentage);
+    // Render a bar chart where each bar is green if >=75%, else red.
     const labels = chartData.map(d => d.date);
+    const values = chartData.map(d => d.percentage);
     const threshold = 75;
 
-    const above = values.map(v => (v >= threshold ? v : null));
-    const below = values.map(v => (v < threshold ? v : null));
+    const backgroundColors = values.map(v => v >= threshold ? 'rgba(22,163,74,0.85)' : 'rgba(239,68,68,0.85)');
+    const borderColors = values.map(v => v >= threshold ? 'rgba(16,148,56,1)' : 'rgba(220,38,38,1)');
 
     new Chart(ctx, {
-        type: 'line',
+        type: 'bar',
         data: {
             labels: labels,
-            datasets: [
-                {
-                    label: 'Above Threshold',
-                    data: above,
-                    borderColor: '#16a34a', // green
-                    backgroundColor: 'rgba(22,163,74,0.12)',
-                    borderWidth: 3,
-                    fill: true,
-                    tension: 0.4,
-                    spanGaps: true,
-                    pointRadius: 5,
-                    pointBackgroundColor: '#16a34a'
-                },
-                {
-                    label: 'Below Threshold',
-                    data: below,
-                    borderColor: '#ef4444', // red
-                    backgroundColor: 'rgba(239,68,68,0.12)',
-                    borderWidth: 3,
-                    fill: true,
-                    tension: 0.4,
-                    spanGaps: true,
-                    pointRadius: 5,
-                    pointBackgroundColor: '#ef4444'
-                }
-            ]
+            datasets: [{
+                label: 'Attendance %',
+                data: values,
+                backgroundColor: backgroundColors,
+                borderColor: borderColors,
+                borderWidth: 1,
+                maxBarThickness: 48
+            }]
         },
         options: {
             responsive: true,
             maintainAspectRatio: false,
             plugins: {
-                legend: { display: false }
+                legend: { display: false },
+                tooltip: {
+                    callbacks: {
+                        label: context => `${context.formattedValue}%`
+                    }
+                }
             },
             scales: {
                 y: {
@@ -245,9 +232,7 @@ document.addEventListener('DOMContentLoaded', function() {
                     grid: { color: '#f0f0f0' },
                     ticks: { callback: value => value + '%' }
                 },
-                x: {
-                    grid: { display: false }
-                }
+                x: { grid: { display: false } }
             }
         }
     });
