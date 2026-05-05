@@ -25,7 +25,7 @@
             <a class="logout" href="{{ url_for('logout') }}"><i class="fa-solid fa-right-from-bracket"></i></a>
             {% else %}
             <a href="{{ url_for('dashboard') }}"><i class="fa-solid fa-chart-line"></i> Dashboard</a>
-            <a href="{{ url_for('department_dashboard') }}"><i class="fa-solid fa-building"></i> Depts</a>
+            <a href="{{ url_for('branches') }}"><i class="fa-solid fa-building"></i> Depts</a>
             <a href="{{ url_for('mark_attendance') }}"><i class="fa-solid fa-calendar-check"></i> Attendance</a>
             <a href="{{ url_for('attendance_report') }}"><i class="fa-solid fa-file-invoice"></i> Reports</a>
             <a href="{{ url_for('settings') }}"><i class="fa-solid fa-gear"></i> Settings</a>

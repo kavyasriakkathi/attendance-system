@@ -23,6 +23,12 @@ app = Flask(__name__)
 # Email sending is handled by the `send_email` helper defined later in the file.
 
 
+# One-time schema init guard (per process). This prevents a missing-table crash
+# after switching from SQLite to PostgreSQL, while keeping overhead low.
+_DB_INIT_DONE = False
+_DB_INIT_LAST_ERROR = None
+
+
 @app.errorhandler(Exception)
 def log_unhandled_exception(e):
     """Log a full traceback to Render logs for any unexpected 500.
@@ -85,8 +91,15 @@ app.config.from_mapping(
 def get_db():
     db_url = str(app.config.get("DATABASE", ""))
     if db_url.startswith("postgres"):
-        import psycopg2
-        from psycopg2.extras import DictCursor
+        try:
+            import psycopg2
+            from psycopg2.extras import DictCursor
+        except Exception as e:
+            # If psycopg2 isn't installed in the environment, fail loudly with context.
+            # (This often shows up as "Internal Server Error" on Render.)
+            print("[DB] psycopg2 import failed. Is psycopg2-binary in requirements.txt?")
+            print(f"[DB] import_error={repr(e)}")
+            raise
 
         def _ensure_sslmode(url: str) -> str:
             """Render Postgres commonly requires SSL. Add sslmode=require if missing."""
@@ -137,12 +150,50 @@ def get_db():
                 print("[DB] PostgreSQL connection failed (unable to parse DATABASE_URL)")
             print(f"[DB] error={repr(e)}")
             raise
-        return _PostgresDB(conn)
+        db = _PostgresDB(conn)
+
+        # Ensure schema exists (safe to call multiple times, but we guard for speed).
+        try:
+            ensure_db_initialized(db)
+        except Exception:
+            # Initialization failure should not crash every request handler.
+            # Individual routes will handle missing-table errors with user-friendly flashes.
+            pass
+
+        return db
     else:
         conn = sqlite3.connect(app.config["DATABASE"])
         conn.row_factory = sqlite3.Row
         print(f"Database connection opened: {app.config['DATABASE']}")
+
+        # SQLite schema init (no-op if already created)
+        try:
+            ensure_db_initialized(conn)
+        except Exception:
+            pass
+
         return conn
+
+
+def ensure_db_initialized(db) -> bool:
+    """Create tables + default users/settings once per process.
+
+    This prevents login routes from crashing with UndefinedTable errors when the
+    Postgres database is new or has been recently replaced.
+    """
+    global _DB_INIT_DONE, _DB_INIT_LAST_ERROR
+    if _DB_INIT_DONE:
+        return True
+    try:
+        init_db(db=db)
+        _DB_INIT_DONE = True
+        _DB_INIT_LAST_ERROR = None
+        return True
+    except Exception as e:
+        _DB_INIT_LAST_ERROR = repr(e)
+        print(f"[DB] init_db failed: {_DB_INIT_LAST_ERROR}")
+        print(traceback.format_exc())
+        return False
 
 def get_placeholder():
     return "%s" if str(app.config.get("DATABASE", "")).startswith("postgres") else "?"
@@ -386,8 +437,16 @@ def notify_low_attendance(db, student_ids):
     return emailed_students
 
 
-def init_db():
-    db = get_db()
+def init_db(db=None):
+    """Create schema and seed minimal defaults.
+
+    If `db` is provided, it must support .execute(), .commit(), and optionally
+    .rollback(). The connection will NOT be closed by this function.
+    """
+    created_here = False
+    if db is None:
+        db = get_db()
+        created_here = True
     placeholder = get_placeholder()
 
     # ✅ Create tables
@@ -538,7 +597,11 @@ def init_db():
         )
 
     db.commit()
-    db.close()
+    if created_here:
+        try:
+            db.close()
+        except Exception:
+            pass
 def login_required(view):
     @wraps(view)
     def wrapped_view(**kwargs):
@@ -551,26 +614,46 @@ def login_required(view):
 @app.route("/admin-login", methods=["GET", "POST"])  # compatibility URL
 def login():
     if request.method == "POST":
-        username = request.form["username"].strip()
-        password = request.form["password"].strip()
+        username = (request.form.get("username", "") or "").strip()
+        password = (request.form.get("password", "") or "").strip()
 
-        db = get_db()
-        placeholder = get_placeholder()
-        user = db.execute(f"SELECT * FROM users WHERE username = {placeholder}", (username,)).fetchone()
-        db.close()
+        if not username or not password:
+            flash("Please enter username and password.", "error")
+            return render_template("login.html")
 
-        if user and check_password_hash(user["password"], password):
-            if user["role"] == "student":
-                flash("Please use the student login page.", "error")
-                return redirect(url_for("student_login"))
+        db = None
+        try:
+            db = get_db()
+            placeholder = get_placeholder()
+            user = db.execute(
+                f"SELECT id, username, password, role FROM users WHERE username = {placeholder}",
+                (username,),
+            ).fetchone()
 
-            session.clear()
-            session["user_id"] = user["id"]
-            session["username"] = user["username"]
-            session["role"] = user["role"]
-            return redirect(url_for("dashboard"))
+            if user and check_password_hash(row_get(user, "password"), password):
+                if row_get(user, "role") == "student":
+                    flash("Please use the student login page.", "error")
+                    return redirect(url_for("student_login"))
 
-        flash("Invalid username or password.", "error")
+                session.clear()
+                session["user_id"] = row_get(user, "id")
+                session["username"] = row_get(user, "username")
+                session["role"] = row_get(user, "role")
+                return redirect(url_for("dashboard"))
+
+            flash("Invalid username or password.", "error")
+
+        except Exception as e:
+            print(f"[login] ERROR: {repr(e)}")
+            print(traceback.format_exc())
+            # Common after migrating to PostgreSQL: tables missing or bad DATABASE_URL.
+            flash("Login is temporarily unavailable (database error). Please try again in a minute.", "error")
+        finally:
+            try:
+                if db is not None:
+                    db.close()
+            except Exception:
+                pass
 
     return render_template("login.html")
 
@@ -830,29 +913,41 @@ def student_login():
         username = request.form.get("username", "").strip()
         password = request.form.get("password", "").strip()
 
-        db = get_db()
-        placeholder = get_placeholder()
-        user = db.execute(f"SELECT * FROM users WHERE username = {placeholder}", (username,)).fetchone()
-        db.close()
-
         if not username or not password:
             flash("Please enter username and password.", "error")
-        elif user and user["role"] == "student" and check_password_hash(user["password"], password):
-            session.clear()
-            session["user_id"] = user["id"]
-            session["username"] = user["username"]
-            session["role"] = user["role"]
-            # sqlite row and psycopg2 RealDictCursor return different types; handle both
-            try:
-                student_id_val = user["student_id"]
-            except Exception:
-                student_id_val = user.get("student_id")
-            session["student_id"] = student_id_val
-            if next_url:
-                return redirect(next_url)
-            return redirect(url_for("student_dashboard"))
+            return render_template("student_login.html", next=next_url)
 
-        flash("Invalid student login credentials.", "error")
+        db = None
+        try:
+            db = get_db()
+            placeholder = get_placeholder()
+            user = db.execute(
+                f"SELECT id, username, password, role, student_id FROM users WHERE username = {placeholder}",
+                (username,),
+            ).fetchone()
+
+            if user and row_get(user, "role") == "student" and check_password_hash(row_get(user, "password"), password):
+                session.clear()
+                session["user_id"] = row_get(user, "id")
+                session["username"] = row_get(user, "username")
+                session["role"] = row_get(user, "role")
+                session["student_id"] = row_get(user, "student_id")
+                if next_url:
+                    return redirect(next_url)
+                return redirect(url_for("student_dashboard"))
+
+            flash("Invalid student login credentials.", "error")
+
+        except Exception as e:
+            print(f"[student_login] ERROR: {repr(e)}")
+            print(traceback.format_exc())
+            flash("Student login is temporarily unavailable (database error).", "error")
+        finally:
+            try:
+                if db is not None:
+                    db.close()
+            except Exception:
+                pass
 
     return render_template("student_login.html", next=next_url)
 
@@ -860,22 +955,41 @@ def student_login():
 @app.route("/teacher_login", methods=["GET", "POST"])
 def teacher_login():
     if request.method == "POST":
-        username = request.form["username"].strip()
-        password = request.form["password"].strip()
+        username = (request.form.get("username", "") or "").strip()
+        password = (request.form.get("password", "") or "").strip()
 
-        db = get_db()
-        placeholder = get_placeholder()
-        user = db.execute(f"SELECT * FROM users WHERE username = {placeholder}", (username,)).fetchone()
-        db.close()
+        if not username or not password:
+            flash("Please enter username and password.", "error")
+            return render_template("teacher_login.html")
 
-        if user and user["role"] == "teacher" and check_password_hash(user["password"], password):
-            session.clear()
-            session["user_id"] = user["id"]
-            session["username"] = user["username"]
-            session["role"] = user["role"]
-            return redirect(url_for("dashboard"))
+        db = None
+        try:
+            db = get_db()
+            placeholder = get_placeholder()
+            user = db.execute(
+                f"SELECT id, username, password, role FROM users WHERE username = {placeholder}",
+                (username,),
+            ).fetchone()
 
-        flash("Invalid teacher login credentials.", "error")
+            if user and row_get(user, "role") == "teacher" and check_password_hash(row_get(user, "password"), password):
+                session.clear()
+                session["user_id"] = row_get(user, "id")
+                session["username"] = row_get(user, "username")
+                session["role"] = row_get(user, "role")
+                return redirect(url_for("dashboard"))
+
+            flash("Invalid teacher login credentials.", "error")
+
+        except Exception as e:
+            print(f"[teacher_login] ERROR: {repr(e)}")
+            print(traceback.format_exc())
+            flash("Teacher login is temporarily unavailable (database error).", "error")
+        finally:
+            try:
+                if db is not None:
+                    db.close()
+            except Exception:
+                pass
 
     return render_template("teacher_login.html")
 
@@ -1712,10 +1826,14 @@ def admin_check_db():
 with app.app_context():
     try:
         print(f"Database path: {app.config['DATABASE']}")
-        print(f"Database file exists: {os.path.exists(app.config['DATABASE'])}")
-        if os.path.exists(app.config['DATABASE']):
-            db_size = os.path.getsize(app.config['DATABASE'])
-            print(f"Database file size: {db_size} bytes")
+        db_str = str(app.config.get('DATABASE', ''))
+        if not db_str.startswith('postgres'):
+            print(f"Database file exists: {os.path.exists(db_str)}")
+            if os.path.exists(db_str):
+                db_size = os.path.getsize(db_str)
+                print(f"Database file size: {db_size} bytes")
+
+        # Best-effort schema initialization at startup (won't crash the app).
         init_db()
         print("Database initialized successfully")
     except Exception as e:
