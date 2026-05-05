@@ -6,6 +6,7 @@ import ssl
 import time
 import socket
 import traceback
+from urllib.parse import urlparse
 from email.message import EmailMessage
 from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 
@@ -32,7 +33,8 @@ def log_unhandled_exception(e):
         return e
 
     try:
-        print(f"[ERROR] Unhandled exception on {request.method} {request.path}")
+        print(f"[ERROR] Unhandled exception type={type(e).__name__} on {request.method} {request.path}")
+        print(f"[ERROR] message={repr(e)}")
         # Avoid logging sensitive fields
         if request.method in ("POST", "PUT", "PATCH"):
             safe_form = {k: ("<hidden>" if k.lower() in ("password", "confirm_password") else v) for k, v in request.form.items()}
@@ -86,6 +88,20 @@ def get_db():
         import psycopg2
         from psycopg2.extras import DictCursor
 
+        def _ensure_sslmode(url: str) -> str:
+            """Render Postgres commonly requires SSL. Add sslmode=require if missing."""
+            # If user already provided sslmode in DATABASE_URL, keep it.
+            if "sslmode=" in url:
+                return url
+            # Only force SSL automatically on Render.
+            is_render = bool(os.environ.get("RENDER") or os.environ.get("RENDER_INTERNAL_HOSTNAME"))
+            if not is_render:
+                return url
+            sep = "&" if "?" in url else "?"
+            return f"{url}{sep}sslmode=require"
+
+        safe_db_url = _ensure_sslmode(db_url)
+
         class _PostgresDB:
             def __init__(self, conn):
                 self._conn = conn
@@ -106,7 +122,21 @@ def get_db():
             def close(self):
                 return self._conn.close()
 
-        conn = psycopg2.connect(db_url)
+        try:
+            # connect_timeout prevents requests hanging forever during outages.
+            conn = psycopg2.connect(safe_db_url, connect_timeout=8)
+        except Exception as e:
+            # Log a short, non-secret connection summary for Render.
+            try:
+                parsed = urlparse(db_url)
+                print(
+                    "[DB] PostgreSQL connection failed "
+                    f"host={parsed.hostname} port={parsed.port} db={parsed.path.lstrip('/')}"
+                )
+            except Exception:
+                print("[DB] PostgreSQL connection failed (unable to parse DATABASE_URL)")
+            print(f"[DB] error={repr(e)}")
+            raise
         return _PostgresDB(conn)
     else:
         conn = sqlite3.connect(app.config["DATABASE"])
