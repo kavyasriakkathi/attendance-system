@@ -59,14 +59,16 @@ def get_db():
     db_url = str(app.config.get("DATABASE", ""))
     if db_url.startswith("postgres"):
         import psycopg2
-        from psycopg2.extras import RealDictCursor
+        from psycopg2.extras import DictCursor
 
         class _PostgresDB:
             def __init__(self, conn):
                 self._conn = conn
 
             def execute(self, query, params=()):
-                cur = self._conn.cursor(cursor_factory=RealDictCursor)
+                # DictCursor returns DictRow which supports both index and key access
+                # (closer to sqlite3.Row behavior used throughout this codebase).
+                cur = self._conn.cursor(cursor_factory=DictCursor)
                 cur.execute(query, params)
                 return cur
 
@@ -314,6 +316,26 @@ def init_db():
     # ✅ Create tables
     if str(app.config.get("DATABASE", "")).startswith("postgres"):
         # PostgreSQL specific
+        # IMPORTANT: create referenced tables before tables with FOREIGN KEYs.
+
+        db.execute("""
+        CREATE TABLE IF NOT EXISTS branches (
+            id SERIAL PRIMARY KEY,
+            name TEXT UNIQUE NOT NULL,
+            location TEXT
+        );
+        """)
+
+        db.execute("""
+        CREATE TABLE IF NOT EXISTS students (
+            id SERIAL PRIMARY KEY,
+            name TEXT NOT NULL,
+            enrollment TEXT UNIQUE NOT NULL,
+            branch_id INTEGER NOT NULL,
+            email TEXT
+        );
+        """)
+
         db.execute("""
         CREATE TABLE IF NOT EXISTS users (
             id SERIAL PRIMARY KEY,
@@ -324,13 +346,7 @@ def init_db():
             FOREIGN KEY(student_id) REFERENCES students(id)
         );
         """)
-        db.execute("""
-        CREATE TABLE IF NOT EXISTS branches (
-            id SERIAL PRIMARY KEY,
-            name TEXT UNIQUE NOT NULL,
-            location TEXT
-        );
-        """)
+
         db.execute("""
         CREATE TABLE IF NOT EXISTS subjects (
             id SERIAL PRIMARY KEY,
@@ -338,15 +354,7 @@ def init_db():
             branch_id INTEGER NOT NULL
         );
         """)
-        db.execute("""
-        CREATE TABLE IF NOT EXISTS students (
-            id SERIAL PRIMARY KEY,
-            name TEXT NOT NULL,
-            enrollment TEXT UNIQUE NOT NULL,
-            branch_id INTEGER NOT NULL,
-            email TEXT
-        );
-        """)
+
         db.execute("""
         CREATE TABLE IF NOT EXISTS attendance (
             id SERIAL PRIMARY KEY,
@@ -358,6 +366,7 @@ def init_db():
             note TEXT
         );
         """)
+
         db.execute("""
         CREATE TABLE IF NOT EXISTS settings (
             id SERIAL PRIMARY KEY,
@@ -365,6 +374,7 @@ def init_db():
             value TEXT NOT NULL
         );
         """)
+
         db.execute("""
         CREATE UNIQUE INDEX IF NOT EXISTS idx_attendance_student_subject_date
         ON attendance(student_id, subject_id, date);
