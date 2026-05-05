@@ -56,13 +56,31 @@ app.config.from_mapping(
 )
 
 def get_db():
-    if str(app.config.get("DATABASE", "")).startswith("postgres"):
+    db_url = str(app.config.get("DATABASE", ""))
+    if db_url.startswith("postgres"):
         import psycopg2
         from psycopg2.extras import RealDictCursor
-        # psycopg2 accepts a postgres(ql) URL directly
-        conn = psycopg2.connect(app.config["DATABASE"])
-        conn.cursor_factory = RealDictCursor
-        return conn
+
+        class _PostgresDB:
+            def __init__(self, conn):
+                self._conn = conn
+
+            def execute(self, query, params=()):
+                cur = self._conn.cursor(cursor_factory=RealDictCursor)
+                cur.execute(query, params)
+                return cur
+
+            def commit(self):
+                return self._conn.commit()
+
+            def rollback(self):
+                return self._conn.rollback()
+
+            def close(self):
+                return self._conn.close()
+
+        conn = psycopg2.connect(db_url)
+        return _PostgresDB(conn)
     else:
         conn = sqlite3.connect(app.config["DATABASE"])
         conn.row_factory = sqlite3.Row
@@ -70,7 +88,20 @@ def get_db():
         return conn
 
 def get_placeholder():
-    return "%s" if app.config["DATABASE"].startswith("postgresql") else "?"
+    return "%s" if str(app.config.get("DATABASE", "")).startswith("postgres") else "?"
+
+
+def row_get(row, key, default=None):
+    """Access a column from either sqlite3.Row or dict-like (psycopg2 RealDictRow)."""
+    if row is None:
+        return default
+    try:
+        return row[key]
+    except Exception:
+        try:
+            return row.get(key, default)
+        except Exception:
+            return default
 
 
 def is_valid_email(email: str) -> bool:
@@ -134,68 +165,64 @@ def send_email(subject, recipient, body):
     msg["From"] = app.config["MAIL_FROM"] or app.config["MAIL_USERNAME"]
     msg["To"] = recipient
     msg.set_content(body)
-    # Resolve MAIL_SERVER to IPv4 address to avoid IPv6/errno 101 issues
     smtp_host = app.config.get("MAIL_SERVER")
     smtp_port = int(app.config.get("MAIL_PORT", 587))
-    smtp_host_ip = None
-    try:
-        smtp_host_ip = socket.gethostbyname(smtp_host)
-        print(f"Resolved SMTP host {smtp_host} -> {smtp_host_ip} (port {smtp_port})")
-    except Exception as e:
-        print(f"Warning: gethostbyname failed for {smtp_host}: {repr(e)}; will attempt to connect using hostname.")
-        smtp_host_ip = smtp_host
+    use_tls = bool(app.config.get("MAIL_USE_TLS"))
+    debug = os.environ.get("MAIL_DEBUG", "False").lower() in ("1", "true", "yes")
 
-    attempts = 3
-    for attempt in range(1, attempts + 1):
-        try:
-            context = ssl.create_default_context()
-            # Use explicit IPv4 connect to avoid IPv6 attempts
-            if is_mail_configured():
-                username = app.config.get("MAIL_USERNAME")
-                password = app.config.get("MAIL_PASSWORD")
-                if app.config.get("MAIL_USE_TLS"):
-                    server = smtplib.SMTP(timeout=10)
-                    # connect using IPv4 address
-                    server.connect(smtp_host_ip, smtp_port)
+    def _try_send(host_to_use: str) -> None:
+        context = ssl.create_default_context()
+        if is_mail_configured():
+            username = app.config.get("MAIL_USERNAME")
+            password = app.config.get("MAIL_PASSWORD")
+            if use_tls:
+                with smtplib.SMTP(host_to_use, smtp_port, timeout=10) as server:
+                    if debug:
+                        server.set_debuglevel(1)
                     server.ehlo()
                     server.starttls(context=context)
                     server.ehlo()
                     server.login(username, password)
                     server.send_message(msg)
-                    server.quit()
-                else:
-                    # SSL connection (no STARTTLS)
-                    server = smtplib.SMTP_SSL(timeout=10, context=context)
-                    server.connect(smtp_host_ip, smtp_port)
+            else:
+                with smtplib.SMTP_SSL(host_to_use, smtp_port, context=context, timeout=10) as server:
+                    if debug:
+                        server.set_debuglevel(1)
                     server.ehlo()
                     server.login(username, password)
                     server.send_message(msg)
-                    server.quit()
-            else:
-                # Development fallback: unauthenticated send (MailHog on localhost)
-                server = smtplib.SMTP(timeout=10)
-                server.connect(smtp_host_ip, smtp_port)
+        else:
+            # Development fallback: unauthenticated SMTP (MailHog/smtp4dev)
+            with smtplib.SMTP(host_to_use, smtp_port, timeout=10) as server:
+                if debug:
+                    server.set_debuglevel(1)
                 server.ehlo()
                 server.send_message(msg)
-                server.quit()
 
+    attempts = 3
+    for attempt in range(1, attempts + 1):
+        try:
+            # 1) Normal simple connection (beginner-friendly)
+            _try_send(smtp_host)
             print(f"Low attendance email sent to {recipient}")
             return True
 
+        except smtplib.SMTPAuthenticationError as e:
+            print(f"Attempt {attempt} - SMTP authentication failed: {repr(e)}")
+            return False
+
         except OSError as e:
             print(f"Attempt {attempt} - OSError when sending email to {recipient}: {repr(e)}")
-            try:
-                local_addr = socket.gethostbyname(socket.gethostname())
-                print(f"Local host resolves to {local_addr}")
-            except Exception:
-                pass
-            if getattr(e, 'errno', None) == 101:
-                print("Network is unreachable (errno 101). This is commonly caused by IPv6 routing issues or blocked outbound SMTP.\nEnsure the platform allows outbound SMTP or use an API-based transactional provider.")
-
-        except smtplib.SMTPAuthenticationError as e:
-            print(f"Attempt {attempt} - SMTP authentication failed for {recipient}: {repr(e)}")
-            # Authentication problems are unlikely to be transient — break early
-            return False
+            if getattr(e, "errno", None) == 101:
+                # 2) Retry once using IPv4 A-record (avoids common IPv6 routing issues)
+                try:
+                    ipv4 = socket.gethostbyname(smtp_host)
+                    print(f"Retrying with IPv4 address: {smtp_host} -> {ipv4}")
+                    _try_send(ipv4)
+                    print(f"Low attendance email sent to {recipient}")
+                    return True
+                except Exception as retry_err:
+                    print(f"IPv4 retry failed: {repr(retry_err)}")
 
         except Exception as e:
             print(f"Attempt {attempt} - Failed to send email to {recipient}: {repr(e)}")
@@ -285,7 +312,7 @@ def init_db():
     placeholder = get_placeholder()
 
     # ✅ Create tables
-    if app.config["DATABASE"].startswith("postgresql"):
+    if str(app.config.get("DATABASE", "")).startswith("postgres"):
         # PostgreSQL specific
         db.execute("""
         CREATE TABLE IF NOT EXISTS users (
@@ -1390,8 +1417,10 @@ def forgot_password():
                 ("student", student["id"]),
             ).fetchone()
 
+        student_email = (row_get(student, "email") or "").strip()
+
         # Only send reset link if we found a user and the student has an email address configured
-        if user and student and student.get("email"):
+        if user and student and student_email:
             token = generate_reset_token(user["id"])
             reset_link = url_for("reset_password", token=token, _external=True)
             body = (
@@ -1404,10 +1433,10 @@ def forgot_password():
             )
             send_email(
                 subject="Reset your password",
-                recipient=student["email"],
+                recipient=student_email,
                 body=body,
             )
-        elif student and (not student.get("email") or not student.get("email").strip()):
+        elif student and not student_email:
             # Found student but no email configured
             flash("Your account does not have an email address on file. Contact the administrator to reset your password.", "error")
             db.close()
