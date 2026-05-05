@@ -5,12 +5,14 @@ import smtplib
 import ssl
 import time
 import socket
+import traceback
 from email.message import EmailMessage
 from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 
 from flask import Flask, abort, redirect, render_template, request, session, url_for, flash, jsonify
 from functools import wraps
 from werkzeug.security import check_password_hash, generate_password_hash
+from werkzeug.exceptions import HTTPException
 # from flask_socketio import SocketIO, emit, join_room
 
 # # Initialize SocketIO
@@ -18,6 +20,29 @@ from werkzeug.security import check_password_hash, generate_password_hash
 
 app = Flask(__name__)
 # Email sending is handled by the `send_email` helper defined later in the file.
+
+
+@app.errorhandler(Exception)
+def log_unhandled_exception(e):
+    """Log a full traceback to Render logs for any unexpected 500.
+
+    Note: HTTPException (404/403/etc) should be handled by Flask normally.
+    """
+    if isinstance(e, HTTPException):
+        return e
+
+    try:
+        print(f"[ERROR] Unhandled exception on {request.method} {request.path}")
+        # Avoid logging sensitive fields
+        if request.method in ("POST", "PUT", "PATCH"):
+            safe_form = {k: ("<hidden>" if k.lower() in ("password", "confirm_password") else v) for k, v in request.form.items()}
+            print(f"[ERROR] form={safe_form}")
+        print(traceback.format_exc())
+    except Exception:
+        # Never crash while trying to log
+        pass
+
+    return "Internal Server Error", 500
 
 # Use a stable SQLite file path relative to the application folder unless a PostgreSQL URL is provided.
 db_env = os.environ.get("DATABASE_URL")
@@ -1622,6 +1647,7 @@ with app.app_context():
         init_db()
         print("Database initialized successfully")
     except Exception as e:
-        print(f"Database initialization failed: {e}")
+        print(f"Database initialization failed: {repr(e)}")
+        print(traceback.format_exc())
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
