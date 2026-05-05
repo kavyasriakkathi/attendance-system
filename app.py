@@ -162,11 +162,24 @@ def send_email(subject, recipient, body):
             print("Email not sent: mail credentials not configured.")
             return False
         print("Mail credentials not configured — attempting development fallback (unauthenticated SMTP).")
-    msg = EmailMessage()
-    msg["Subject"] = subject
-    msg["From"] = app.config["MAIL_FROM"] or app.config["MAIL_USERNAME"]
-    msg["To"] = recipient
-    msg.set_content(body)
+    # Build message defensively so this helper never crashes a request handler.
+    try:
+        if not recipient or not str(recipient).strip():
+            print("Email not sent: recipient is empty.")
+            return False
+        from_addr = (app.config.get("MAIL_FROM") or app.config.get("MAIL_USERNAME") or "").strip()
+        if not from_addr:
+            print("Email not sent: MAIL_FROM/MAIL_USERNAME is empty.")
+            return False
+
+        msg = EmailMessage()
+        msg["Subject"] = subject
+        msg["From"] = from_addr
+        msg["To"] = recipient
+        msg.set_content(body)
+    except Exception as e:
+        print(f"Email not sent: failed to build message: {repr(e)}")
+        return False
     smtp_host = app.config.get("MAIL_SERVER")
     smtp_port = int(app.config.get("MAIL_PORT", 587))
     use_tls = bool(app.config.get("MAIL_USE_TLS"))
@@ -206,7 +219,7 @@ def send_email(subject, recipient, body):
         try:
             # 1) Normal simple connection (beginner-friendly)
             _try_send(smtp_host)
-            print(f"Low attendance email sent to {recipient}")
+            print(f"Email sent to {recipient}")
             return True
 
         except smtplib.SMTPAuthenticationError as e:
@@ -221,7 +234,7 @@ def send_email(subject, recipient, body):
                     ipv4 = socket.gethostbyname(smtp_host)
                     print(f"Retrying with IPv4 address: {smtp_host} -> {ipv4}")
                     _try_send(ipv4)
-                    print(f"Low attendance email sent to {recipient}")
+                    print(f"Email sent to {recipient}")
                     return True
                 except Exception as retry_err:
                     print(f"IPv4 retry failed: {repr(retry_err)}")
@@ -232,6 +245,15 @@ def send_email(subject, recipient, body):
         if attempt < attempts:
             time.sleep(2)
             continue
+        return False
+
+
+def safe_send_email(subject: str, recipient: str, body: str) -> bool:
+    """Wrapper around send_email() that guarantees no exception escapes."""
+    try:
+        return bool(send_email(subject=subject, recipient=recipient, body=body))
+    except Exception as e:
+        print(f"safe_send_email: unexpected error: {repr(e)}")
         return False
 
 
@@ -1394,66 +1416,127 @@ def attendance_report():
 @app.route("/forgot_password", methods=["GET", "POST"])
 def forgot_password():
     if request.method == "POST":
-        identifier = request.form.get("email", "").strip()
+        identifier = (request.form.get("email", "") or "").strip()
+
+        # Debug logs (show up in Render logs)
+        print("[forgot_password] POST received")
+        print(f"[forgot_password] identifier_present={bool(identifier)} identifier_type={'email' if '@' in identifier else 'enrollment'}")
 
         if not identifier:
             flash("Please enter your registered email address or enrollment number.", "error")
             return render_template("forgot_password.html")
 
         if not is_mail_configured():
+            print("[forgot_password] mail not configured")
             flash("Email service is not configured. Contact the administrator.", "error")
             return render_template("forgot_password.html")
 
-        db = get_db()
-        placeholder = get_placeholder()
+        db = None
+        try:
+            db = get_db()
+            placeholder = get_placeholder()
+            is_postgres = str(app.config.get("DATABASE", "")).startswith("postgres")
+            print(f"[forgot_password] db={'postgres' if is_postgres else 'sqlite'}")
 
-        # Allow students to submit either email or enrollment number
-        student = None
-        if "@" in identifier:
-            student = db.execute(
-                f"SELECT id, email FROM students WHERE LOWER(email) = LOWER({placeholder})",
-                (identifier,),
-            ).fetchone()
-        else:
-            student = db.execute(
-                f"SELECT id, email FROM students WHERE LOWER(enrollment) = LOWER({placeholder})",
-                (identifier,),
-            ).fetchone()
+            # 1) Find student by email OR enrollment
+            student = None
+            if "@" in identifier:
+                student = db.execute(
+                    f"SELECT id, email, enrollment FROM students WHERE LOWER(email) = LOWER({placeholder})",
+                    (identifier,),
+                ).fetchone()
+            else:
+                student = db.execute(
+                    f"SELECT id, email, enrollment FROM students WHERE LOWER(enrollment) = LOWER({placeholder})",
+                    (identifier,),
+                ).fetchone()
 
-        user = None
-        if student:
-            user = db.execute(
-                f"SELECT id FROM users WHERE role = {placeholder} AND student_id = {placeholder}",
-                ("student", student["id"]),
-            ).fetchone()
+            if student:
+                print(f"[forgot_password] student_found=True student_id={row_get(student, 'id')}")
+            else:
+                print("[forgot_password] student_found=False")
 
-        student_email = (row_get(student, "email") or "").strip()
+            # 2) Find matching student user
+            user = None
+            if student:
+                user = db.execute(
+                    f"SELECT id, username, student_id FROM users WHERE role = {placeholder} AND student_id = {placeholder}",
+                    ("student", row_get(student, "id")),
+                ).fetchone()
 
-        # Only send reset link if we found a user and the student has an email address configured
-        if user and student and student_email:
-            token = generate_reset_token(user["id"])
-            reset_link = url_for("reset_password", token=token, _external=True)
-            body = (
-                "Hello,\n\n"
-                "We received a request to reset your password. Use the link below to set a new password:\n\n"
-                f"{reset_link}\n\n"
-                "If you did not request a reset, you can ignore this email.\n\n"
-                "Regards,\n"
-                "Attendance Management Team"
-            )
-            send_email(
-                subject="Reset your password",
-                recipient=student_email,
-                body=body,
-            )
-        elif student and not student_email:
-            # Found student but no email configured
-            flash("Your account does not have an email address on file. Contact the administrator to reset your password.", "error")
-            db.close()
+            # Fallback A: if users.student_id is missing/mismatched, try username matching
+            if not user:
+                user = db.execute(
+                    f"SELECT id, username, student_id FROM users WHERE role = {placeholder} AND LOWER(username) = LOWER({placeholder})",
+                    ("student", identifier),
+                ).fetchone()
+                if user:
+                    print("[forgot_password] user_found_by_username=True")
+
+            if user:
+                print(f"[forgot_password] user_found=True user_id={row_get(user, 'id')} username={row_get(user, 'username')}")
+            else:
+                print("[forgot_password] user_found=False")
+
+            # 3) Decide email to send to
+            student_email = (row_get(student, "email") or "").strip()
+            if not student_email and user and row_get(user, "student_id"):
+                # Fallback B: if we found user first, load student email from student_id
+                linked_student = db.execute(
+                    f"SELECT email FROM students WHERE id = {placeholder}",
+                    (row_get(user, "student_id"),),
+                ).fetchone()
+                student_email = (row_get(linked_student, "email") or "").strip()
+                if student_email:
+                    print("[forgot_password] student_email_resolved_via_user_student_id=True")
+
+            if student and not student_email:
+                print("[forgot_password] student found but email missing")
+                flash(
+                    "Your account does not have an email address on file. Contact the administrator to reset your password.",
+                    "error",
+                )
+                return render_template("forgot_password.html")
+
+            # 4) Generate token + send email (only if we have everything)
+            email_sent = False
+            if user and student_email:
+                token = generate_reset_token(row_get(user, "id"))
+                reset_link = url_for("reset_password", token=token, _external=True)
+                print(f"[forgot_password] reset_link_generated host={request.host}")
+
+                body = (
+                    "Hello,\n\n"
+                    "We received a request to reset your password. Use the link below to set a new password:\n\n"
+                    f"{reset_link}\n\n"
+                    "If you did not request a reset, you can ignore this email.\n\n"
+                    "Regards,\n"
+                    "Attendance Management Team"
+                )
+                email_sent = safe_send_email(
+                    subject="Reset your password",
+                    recipient=student_email,
+                    body=body,
+                )
+                print(f"[forgot_password] email_attempted=True email_sent={email_sent}")
+            else:
+                print("[forgot_password] email_attempted=False (no matching user or no email)")
+
+            # Always show generic message to avoid account enumeration
+            flash("If this account exists and has an email, a reset link has been sent.", "success")
             return render_template("forgot_password.html")
 
-        db.close()
-        flash("If this account exists and has an email, a reset link has been sent.", "success")
+        except Exception as e:
+            # Never crash this route in production
+            print(f"[forgot_password] ERROR: {repr(e)}")
+            flash("Something went wrong while processing your request. Please try again.", "error")
+            return render_template("forgot_password.html")
+        finally:
+            try:
+                if db is not None:
+                    db.close()
+            except Exception:
+                pass
 
     return render_template("forgot_password.html")
 
@@ -1461,43 +1544,56 @@ def forgot_password():
 @app.route("/reset-password/<token>", methods=["GET", "POST"])
 @app.route("/reset_password/<token>", methods=["GET", "POST"])
 def reset_password(token):
-    user_id, error = verify_reset_token(token)
-    if error:
+    print("[reset_password] request")
+    try:
+        user_id, error = verify_reset_token(token)
+        if error:
+            print(f"[reset_password] token_error={error}")
+            flash("Reset link is invalid or expired. Please request a new one.", "error")
+            return redirect(url_for("forgot_password"))
+
+        db = get_db()
+        placeholder = get_placeholder()
+        try:
+            user = db.execute(
+                f"SELECT id, role FROM users WHERE id = {placeholder}",
+                (user_id,),
+            ).fetchone()
+
+            if not user or row_get(user, "role") != "student":
+                print("[reset_password] user_not_found_or_not_student")
+                flash("Reset link is invalid or expired. Please request a new one.", "error")
+                return redirect(url_for("forgot_password"))
+
+            if request.method == "POST":
+                password = (request.form.get("password", "") or "").strip()
+                confirm_password = (request.form.get("confirm_password", "") or "").strip()
+
+                if not password or not confirm_password:
+                    flash("Please enter and confirm your new password.", "error")
+                elif password != confirm_password:
+                    flash("Passwords do not match.", "error")
+                else:
+                    db.execute(
+                        f"UPDATE users SET password = {placeholder} WHERE id = {placeholder}",
+                        (generate_password_hash(password), user_id),
+                    )
+                    db.commit()
+                    print(f"[reset_password] password_updated user_id={user_id}")
+                    flash("Password updated successfully. Please log in.", "success")
+                    return redirect(url_for("student_login"))
+
+            return render_template("reset_password.html")
+        finally:
+            try:
+                db.close()
+            except Exception:
+                pass
+
+    except Exception as e:
+        print(f"[reset_password] ERROR: {repr(e)}")
         flash("Reset link is invalid or expired. Please request a new one.", "error")
         return redirect(url_for("forgot_password"))
-
-    db = get_db()
-    placeholder = get_placeholder()
-    user = db.execute(
-        f"SELECT id, role FROM users WHERE id = {placeholder}",
-        (user_id,),
-    ).fetchone()
-
-    if not user or user["role"] != "student":
-        db.close()
-        flash("Reset link is invalid or expired. Please request a new one.", "error")
-        return redirect(url_for("forgot_password"))
-
-    if request.method == "POST":
-        password = request.form.get("password", "").strip()
-        confirm_password = request.form.get("confirm_password", "").strip()
-
-        if not password or not confirm_password:
-            flash("Please enter and confirm your new password.", "error")
-        elif password != confirm_password:
-            flash("Passwords do not match.", "error")
-        else:
-            db.execute(
-                f"UPDATE users SET password = {placeholder} WHERE id = {placeholder}",
-                (generate_password_hash(password), user_id),
-            )
-            db.commit()
-            db.close()
-            flash("Password updated successfully. Please log in.", "success")
-            return redirect(url_for("student_login"))
-
-    db.close()
-    return render_template("reset_password.html")
 
 
 @app.route('/admin/check-smtp')
