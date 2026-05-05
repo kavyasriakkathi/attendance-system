@@ -54,6 +54,18 @@ If you still have your old `attendance.db` (SQLite) locally, you can copy it int
    ```
 4. Re-check `/admin/check-db` to confirm data counts.
 
+### 1.3 Import From `scratch/data_export.json`
+If you don't have the old `attendance.db`, but you DO have an export JSON file (for example `scratch/data_export.json`), you can import it into Render PostgreSQL:
+
+```powershell
+cd "c:\Users\kavya\OneDrive\Desktop\project 1"
+$env:DATABASE_URL = "<paste Render Postgres External Database URL>"
+$env:EXPORT_JSON = "scratch\data_export.json"
+.\.venv\Scripts\python.exe .\import_data_export_json.py
+```
+
+This imports `branches`, `subjects`, `students`, `attendance` and also creates student `users` accounts (`username=enrollment`).
+
 ### 2. Email Notifications
 Automatic email alerts are sent to students whose attendance falls below the threshold (default: 75%) for a specific subject.
 
