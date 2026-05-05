@@ -1667,6 +1667,46 @@ def admin_check_smtp():
         return jsonify({'ok': True, 'server': host, 'port': port, 'message': 'Connection successful'})
     except Exception as e:
         return jsonify({'ok': False, 'server': host, 'port': port, 'error': str(e)})
+
+
+@app.route('/admin/check-db')
+@login_required
+def admin_check_db():
+    # Only admins may run this check
+    if session.get('role') != 'admin':
+        abort(403)
+
+    db = get_db()
+    try:
+        db_url = str(app.config.get('DATABASE', ''))
+        is_postgres = db_url.startswith('postgres')
+        info = {
+            'ok': True,
+            'db': 'postgres' if is_postgres else 'sqlite',
+            'database': db_url,
+        }
+        tables = ['branches', 'students', 'subjects', 'attendance', 'users', 'settings']
+        counts = {}
+        for t in tables:
+            try:
+                counts[t] = int(db.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0])
+            except Exception as e:
+                counts[t] = f"error: {repr(e)}"
+        info['counts'] = counts
+
+        # Show a small hint if DB is empty
+        if all(isinstance(counts.get(t), int) and counts[t] == 0 for t in tables if t in counts):
+            info['hint'] = (
+                "All tables are empty. This usually means you are connected to a new database "
+                "(for example, you switched from SQLite to PostgreSQL or a new Render Postgres was created)."
+            )
+
+        return jsonify(info)
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass
 with app.app_context():
     try:
         print(f"Database path: {app.config['DATABASE']}")
