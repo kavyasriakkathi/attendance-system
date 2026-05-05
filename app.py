@@ -547,6 +547,8 @@ def login_required(view):
         return view(**kwargs)
     return wrapped_view
 @app.route("/login", methods=["GET", "POST"])
+@app.route("/admin_login", methods=["GET", "POST"])  # compatibility URL
+@app.route("/admin-login", methods=["GET", "POST"])  # compatibility URL
 def login():
     if request.method == "POST":
         username = request.form["username"].strip()
