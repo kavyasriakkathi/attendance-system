@@ -20,11 +20,22 @@ TABLES = [
 
 
 def _ensure_sslmode(url: str) -> str:
+    """Add sslmode=require for non-local Postgres URLs when missing.
+
+    This fixes a common issue where Render-managed Postgres requires SSL even
+    when you run the import script from your laptop.
+    """
     if "sslmode=" in url:
         return url
-    is_render = bool(os.environ.get("RENDER") or os.environ.get("RENDER_INTERNAL_HOSTNAME"))
-    if not is_render:
+    try:
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").lower()
+        if host in ("localhost", "127.0.0.1", ""):
+            return url
+    except Exception:
+        # If parsing fails, don't mutate the URL.
         return url
+
     sep = "&" if "?" in url else "?"
     return f"{url}{sep}sslmode=require"
 
@@ -41,7 +52,12 @@ def _set_sequence(conn, table: str, id_col: str = "id") -> None:
 
 def main() -> int:
     # Import on demand so the script can be imported without Postgres libs installed.
-    import psycopg2
+    try:
+        import psycopg2
+    except ModuleNotFoundError:
+        print("ERROR: Missing dependency 'psycopg2'.")
+        print("Fix: run: .\\.venv\\Scripts\\python.exe -m pip install psycopg2-binary")
+        return 2
 
     export_path = Path(os.environ.get("EXPORT_JSON", "scratch/data_export.json"))
     pg_url = os.environ.get("DATABASE_URL")
@@ -63,6 +79,7 @@ def main() -> int:
 
     parsed = urlparse(pg_url)
     print(f"Importing {export_path} -> Postgres host={parsed.hostname} port={parsed.port} db={parsed.path.lstrip('/')}")
+    print("Tip: Use the Render Postgres *External Database URL* for DATABASE_URL.")
 
     conn = psycopg2.connect(pg_url, connect_timeout=10)
     try:
@@ -81,72 +98,83 @@ def main() -> int:
         inserted = {t: 0 for t in TABLES}
 
         with conn:
-            # branches
-            for row in data.get("branches", []):
-                conn.cursor().execute(
-                    "INSERT INTO branches (id, name, location) VALUES (%s, %s, %s) "
-                    "ON CONFLICT (id) DO NOTHING",
-                    (row.get("id"), row.get("name"), row.get("location")),
-                )
-                inserted["branches"] += 1
+            with conn.cursor() as cur:
+                # If DB already has data, importing could create duplicates.
+                # We still proceed, but we'll use ON CONFLICT DO NOTHING.
+                try:
+                    cur.execute("SELECT COUNT(*) FROM students")
+                    existing_students = int(cur.fetchone()[0])
+                    if existing_students:
+                        print(f"WARNING: Destination DB already has {existing_students} students. Import will skip conflicts.")
+                except Exception:
+                    pass
 
-            # subjects
-            for row in data.get("subjects", []):
-                conn.cursor().execute(
-                    "INSERT INTO subjects (id, name, branch_id) VALUES (%s, %s, %s) "
-                    "ON CONFLICT (id) DO NOTHING",
-                    (row.get("id"), row.get("name"), row.get("branch_id")),
-                )
-                inserted["subjects"] += 1
+                # branches
+                for row in data.get("branches", []):
+                    cur.execute(
+                        "INSERT INTO branches (id, name, location) VALUES (%s, %s, %s) "
+                        "ON CONFLICT DO NOTHING",
+                        (row.get("id"), row.get("name"), row.get("location")),
+                    )
+                    inserted["branches"] += 1
 
-            # students
-            for row in data.get("students", []):
-                conn.cursor().execute(
-                    "INSERT INTO students (id, name, enrollment, branch_id, email) VALUES (%s, %s, %s, %s, %s) "
-                    "ON CONFLICT (id) DO NOTHING",
-                    (
-                        row.get("id"),
-                        row.get("name"),
-                        row.get("enrollment"),
-                        row.get("branch_id"),
-                        row.get("email"),
-                    ),
-                )
-                inserted["students"] += 1
+                # subjects
+                for row in data.get("subjects", []):
+                    cur.execute(
+                        "INSERT INTO subjects (id, name, branch_id) VALUES (%s, %s, %s) "
+                        "ON CONFLICT DO NOTHING",
+                        (row.get("id"), row.get("name"), row.get("branch_id")),
+                    )
+                    inserted["subjects"] += 1
 
-            # attendance
-            for row in data.get("attendance", []):
-                conn.cursor().execute(
-                    "INSERT INTO attendance (id, student_id, branch_id, subject_id, date, status, note) "
-                    "VALUES (%s, %s, %s, %s, %s, %s, %s) "
-                    "ON CONFLICT (id) DO NOTHING",
-                    (
-                        row.get("id"),
-                        row.get("student_id"),
-                        row.get("branch_id"),
-                        row.get("subject_id"),
-                        row.get("date"),
-                        row.get("status"),
-                        row.get("note"),
-                    ),
-                )
-                inserted["attendance"] += 1
+                # students
+                for row in data.get("students", []):
+                    cur.execute(
+                        "INSERT INTO students (id, name, enrollment, branch_id, email) VALUES (%s, %s, %s, %s, %s) "
+                        "ON CONFLICT DO NOTHING",
+                        (
+                            row.get("id"),
+                            row.get("name"),
+                            row.get("enrollment"),
+                            row.get("branch_id"),
+                            row.get("email"),
+                        ),
+                    )
+                    inserted["students"] += 1
 
-            # Create student user accounts if missing.
-            # username = enrollment, password = last 4 chars of enrollment (same as your app behavior).
-            for row in data.get("students", []):
-                enrollment = (row.get("enrollment") or "").strip()
-                student_id = row.get("id")
-                if not enrollment or not student_id:
-                    continue
-                default_password = enrollment[-4:] if len(enrollment) >= 4 else enrollment
-                conn.cursor().execute(
-                    "INSERT INTO users (username, password, role, student_id) VALUES (%s, %s, %s, %s) "
-                    "ON CONFLICT (username) DO NOTHING",
-                    (enrollment, _generate_password_hash(default_password), "student", student_id),
-                )
+                # attendance
+                for row in data.get("attendance", []):
+                    cur.execute(
+                        "INSERT INTO attendance (id, student_id, branch_id, subject_id, date, status, note) "
+                        "VALUES (%s, %s, %s, %s, %s, %s, %s) "
+                        "ON CONFLICT DO NOTHING",
+                        (
+                            row.get("id"),
+                            row.get("student_id"),
+                            row.get("branch_id"),
+                            row.get("subject_id"),
+                            row.get("date"),
+                            row.get("status"),
+                            row.get("note"),
+                        ),
+                    )
+                    inserted["attendance"] += 1
 
-            # Fix sequences
+                # Create student user accounts if missing.
+                # username = enrollment, password = last 4 chars of enrollment (same as your app behavior).
+                for row in data.get("students", []):
+                    enrollment = (row.get("enrollment") or "").strip()
+                    student_id = row.get("id")
+                    if not enrollment or not student_id:
+                        continue
+                    default_password = enrollment[-4:] if len(enrollment) >= 4 else enrollment
+                    cur.execute(
+                        "INSERT INTO users (username, password, role, student_id) VALUES (%s, %s, %s, %s) "
+                        "ON CONFLICT DO NOTHING",
+                        (enrollment, _generate_password_hash(default_password), "student", student_id),
+                    )
+
+            # Fix sequences (separate cursors ok)
             for t in TABLES + ["users", "settings"]:
                 _set_sequence(conn, t)
 

@@ -19,10 +19,16 @@ def _ensure_sslmode(url: str) -> str:
     # If sslmode already present, keep it.
     if "sslmode=" in url:
         return url
-    # Render Postgres commonly requires SSL.
-    is_render = bool(os.environ.get("RENDER") or os.environ.get("RENDER_INTERNAL_HOSTNAME"))
+    # Managed Postgres commonly requires SSL even when run locally.
+    try:
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").lower()
+        if host in ("localhost", "127.0.0.1", ""):
+            return url
+    except Exception:
+        return url
     sep = "&" if "?" in url else "?"
-    return f"{url}{sep}sslmode=require" if is_render else url
+    return f"{url}{sep}sslmode=require"
 
 
 def _set_sequence(conn, table: str, id_col: str = "id") -> None:
