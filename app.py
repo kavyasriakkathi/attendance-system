@@ -1,91 +1,92 @@
 import os
-from dotenv import load_dotenv
-
-load_dotenv()
-
 from datetime import date, timedelta
 import sqlite3
 import smtplib
 import ssl
+import time
+import socket
 from email.message import EmailMessage
+from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 
-from flask import Flask, abort, redirect, render_template, request, session, url_for, flash
+from flask import Flask, abort, redirect, render_template, request, session, url_for, flash, jsonify
 from functools import wraps
 from werkzeug.security import check_password_hash, generate_password_hash
-from itsdangerous import URLSafeTimedSerializer, SignatureExpired, BadSignature
-from flask import jsonify, send_file
-import pandas as pd
-import io
 # from flask_socketio import SocketIO, emit, join_room
 
 # # Initialize SocketIO
 # socketio = SocketIO(app, cors_allowed_origins="*")
 
 app = Flask(__name__)
-# Get the absolute path of the directory this file is in
-basedir = os.path.abspath(os.path.dirname(__file__))
+# Email sending is handled by the `send_email` helper defined later in the file.
+
+# Use a stable SQLite file path relative to the application folder unless a PostgreSQL URL is provided.
+db_env = os.environ.get("DATABASE_URL")
+# Accept common postgres URL prefixes (postgres:// or postgresql://)
+if db_env and db_env.startswith("postgres"):
+    # Normalize to psycopg2-acceptable form if necessary
+    if db_env.startswith("postgres://"):
+        db_env = db_env.replace("postgres://", "postgresql://", 1)
+    database_path = db_env
+else:
+    # Always use absolute path relative to app.py location
+    app_dir = os.path.dirname(os.path.abspath(__file__))
+    database_path = os.path.abspath(os.path.join(app_dir, "attendance.db"))
+    print(f"App directory: {app_dir}")
+    print(f"Using database path: {database_path}")
+    print(f"Current working directory: {os.getcwd()}")
+
+# Normalize SMTP credentials from environment to avoid accidental spaces/quotes
+raw_mail_username = os.environ.get("MAIL_USERNAME") or ""
+raw_mail_password = os.environ.get("MAIL_PASSWORD") or ""
+# Trim surrounding whitespace and remove accidental inner spaces in passwords (common when copying)
+mail_username = raw_mail_username.strip() if raw_mail_username else None
+# Remove spaces commonly introduced when copying app-passwords (e.g. "abcd efgh ijkl mnop")
+mail_password = raw_mail_password.strip().replace(" ", "") if raw_mail_password else None
 
 app.config.from_mapping(
     SECRET_KEY=os.environ.get("SECRET_KEY", "dev-key-change-in-production"),
-    # Use an absolute path for the database file in the project root
-    DATABASE=os.path.join(basedir, "attendance.db") if not os.environ.get("DATABASE_URL") else os.environ.get("DATABASE_URL"),
-    MAIL_SERVER=os.environ.get("MAIL_SERVER", "smtp.gmail.com").strip().strip('"'),
+    DATABASE=database_path,
+    MAIL_SERVER=os.environ.get("MAIL_SERVER", "smtp.gmail.com"),
     MAIL_PORT=int(os.environ.get("MAIL_PORT", 587)),
-    MAIL_USERNAME=os.environ.get("MAIL_USERNAME", "").strip().strip('"'),
-    MAIL_PASSWORD=os.environ.get("MAIL_PASSWORD", "").strip().strip('"'),
+    MAIL_USERNAME=mail_username,
+    MAIL_PASSWORD=mail_password,
     MAIL_USE_TLS=os.environ.get("MAIL_USE_TLS", "True").lower() in ("true", "1", "yes"),
-    MAIL_FROM=os.environ.get("MAIL_FROM", os.environ.get("MAIL_USERNAME", "")).strip().strip('"'),
+    MAIL_FROM=os.environ.get("MAIL_FROM", mail_username),
     LOW_ATTENDANCE_THRESHOLD=int(os.environ.get("LOW_ATTENDANCE_THRESHOLD", 75)),
 )
-class PostgresConnectionWrapper:
-    def __init__(self, conn):
-        self.conn = conn
-    def execute(self, query, params=None):
-        cursor = self.conn.cursor()
-        try:
-            cursor.execute(query, params)
-        except Exception as e:
-            print(f"DATABASE EXECUTE ERROR: {e}")
-            print(f"QUERY: {query}")
-            print(f"PARAMS: {params}")
-            raise
-        return cursor
-    def commit(self):
-        self.conn.commit()
-    def close(self):
-        self.conn.close()
 
 def get_db():
-    db_url = app.config["DATABASE"]
-    if db_url.startswith("postgresql://") or db_url.startswith("postgres://"):
-        # Fix for Render/Heroku DATABASE_URL prefix
-        if db_url.startswith("postgres://"):
-            db_url = db_url.replace("postgres://", "postgresql://", 1)
-            # Update the config so get_placeholder works correctly
-            app.config["DATABASE"] = db_url
-            
+    if str(app.config.get("DATABASE", "")).startswith("postgres"):
         import psycopg2
         from psycopg2.extras import RealDictCursor
-        try:
-            conn = psycopg2.connect(db_url)
-            conn.cursor_factory = RealDictCursor
-            return PostgresConnectionWrapper(conn)
-        except Exception as e:
-            print(f"CRITICAL: Failed to connect to PostgreSQL: {e}")
-            # Fallback to SQLite if Postgres fails (only for safety, data will be ephemeral)
-            sqlite_path = os.path.join(basedir, "attendance.db")
-            print(f"FALLBACK: Using SQLite at {sqlite_path}")
-            conn = sqlite3.connect(sqlite_path)
-            conn.row_factory = sqlite3.Row
-            return conn
+        # psycopg2 accepts a postgres(ql) URL directly
+        conn = psycopg2.connect(app.config["DATABASE"])
+        conn.cursor_factory = RealDictCursor
+        return conn
     else:
-        conn = sqlite3.connect(db_url)
+        conn = sqlite3.connect(app.config["DATABASE"])
         conn.row_factory = sqlite3.Row
+        print(f"Database connection opened: {app.config['DATABASE']}")
         return conn
 
 def get_placeholder():
-    db_url = app.config["DATABASE"]
-    return "%s" if db_url.startswith("postgresql") or db_url.startswith("postgres") else "?"
+    return "%s" if app.config["DATABASE"].startswith("postgresql") else "?"
+
+
+def is_valid_email(email: str) -> bool:
+    import re
+    if not email:
+        return False
+    email = email.strip()
+    # Simple RFC-5322-ish regex for common validation
+    pattern = r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$"
+    return re.match(pattern, email) is not None
+
+
+def is_mail_configured():
+    username = app.config.get("MAIL_USERNAME")
+    password = app.config.get("MAIL_PASSWORD")
+    return bool(username and username.strip() and password and password.strip())
 
 
 def get_setting(db, key, default=None):
@@ -120,49 +121,121 @@ def set_setting(db, key, value):
         )
 
 
-def send_email(subject, to_email, message):
-    sender_email = app.config["MAIL_USERNAME"]
-    app_password = app.config["MAIL_PASSWORD"]
-
-    if not sender_email or not app_password or sender_email == "your_email@gmail.com":
-        print(f"DEBUG: Email to {to_email} NOT sent: mail credentials not configured.")
-        return False, "Mail credentials not configured."
-
+def send_email(subject, recipient, body):
+    # If credentials are not configured, allow a local dev fallback when explicitly enabled
+    dev_fallback_enabled = os.environ.get("MAIL_DEV_FALLBACK", "False").lower() in ("1", "true", "yes")
+    if not is_mail_configured():
+        if not (dev_fallback_enabled or app.config.get("MAIL_SERVER") in ("localhost", "127.0.0.1")):
+            print("Email not sent: mail credentials not configured.")
+            return False
+        print("Mail credentials not configured — attempting development fallback (unauthenticated SMTP).")
     msg = EmailMessage()
     msg["Subject"] = subject
-    msg["From"] = sender_email
-    msg["To"] = to_email
-    msg.set_content(message)
-
+    msg["From"] = app.config["MAIL_FROM"] or app.config["MAIL_USERNAME"]
+    msg["To"] = recipient
+    msg.set_content(body)
+    # Resolve MAIL_SERVER to IPv4 address to avoid IPv6/errno 101 issues
+    smtp_host = app.config.get("MAIL_SERVER")
+    smtp_port = int(app.config.get("MAIL_PORT", 587))
+    smtp_host_ip = None
     try:
-        context = ssl.create_default_context()
-        # Use config for server/port, but fallback to user's suggested Gmail defaults if not set
-        mail_server = app.config.get("MAIL_SERVER", "smtp.gmail.com")
-        mail_port = app.config.get("MAIL_PORT", 587)
-
-        with smtplib.SMTP(mail_server, mail_port, timeout=10) as server:
-            server.starttls(context=context)
-            server.login(sender_email, app_password)
-            server.send_message(msg)
-
-        print("Email sent successfully")
-        return True, "Email sent successfully"
-
+        smtp_host_ip = socket.gethostbyname(smtp_host)
+        print(f"Resolved SMTP host {smtp_host} -> {smtp_host_ip} (port {smtp_port})")
     except Exception as e:
-        print("Email error:", e)
-        return False, str(e)
+        print(f"Warning: gethostbyname failed for {smtp_host}: {repr(e)}; will attempt to connect using hostname.")
+        smtp_host_ip = smtp_host
+
+    attempts = 3
+    for attempt in range(1, attempts + 1):
+        try:
+            context = ssl.create_default_context()
+            # Use explicit IPv4 connect to avoid IPv6 attempts
+            if is_mail_configured():
+                username = app.config.get("MAIL_USERNAME")
+                password = app.config.get("MAIL_PASSWORD")
+                if app.config.get("MAIL_USE_TLS"):
+                    server = smtplib.SMTP(timeout=10)
+                    # connect using IPv4 address
+                    server.connect(smtp_host_ip, smtp_port)
+                    server.ehlo()
+                    server.starttls(context=context)
+                    server.ehlo()
+                    server.login(username, password)
+                    server.send_message(msg)
+                    server.quit()
+                else:
+                    # SSL connection (no STARTTLS)
+                    server = smtplib.SMTP_SSL(timeout=10, context=context)
+                    server.connect(smtp_host_ip, smtp_port)
+                    server.ehlo()
+                    server.login(username, password)
+                    server.send_message(msg)
+                    server.quit()
+            else:
+                # Development fallback: unauthenticated send (MailHog on localhost)
+                server = smtplib.SMTP(timeout=10)
+                server.connect(smtp_host_ip, smtp_port)
+                server.ehlo()
+                server.send_message(msg)
+                server.quit()
+
+            print(f"Low attendance email sent to {recipient}")
+            return True
+
+        except OSError as e:
+            print(f"Attempt {attempt} - OSError when sending email to {recipient}: {repr(e)}")
+            try:
+                local_addr = socket.gethostbyname(socket.gethostname())
+                print(f"Local host resolves to {local_addr}")
+            except Exception:
+                pass
+            if getattr(e, 'errno', None) == 101:
+                print("Network is unreachable (errno 101). This is commonly caused by IPv6 routing issues or blocked outbound SMTP.\nEnsure the platform allows outbound SMTP or use an API-based transactional provider.")
+
+        except smtplib.SMTPAuthenticationError as e:
+            print(f"Attempt {attempt} - SMTP authentication failed for {recipient}: {repr(e)}")
+            # Authentication problems are unlikely to be transient — break early
+            return False
+
+        except Exception as e:
+            print(f"Attempt {attempt} - Failed to send email to {recipient}: {repr(e)}")
+
+        if attempt < attempts:
+            time.sleep(2)
+            continue
+        return False
 
 
-def notify_low_attendance(db, student_ids, subject_id=None):
-    if not student_ids:
+def get_reset_serializer():
+    return URLSafeTimedSerializer(app.config["SECRET_KEY"], salt="password-reset")
+
+
+def generate_reset_token(user_id):
+    serializer = get_reset_serializer()
+    return serializer.dumps({"user_id": user_id})
+
+
+def verify_reset_token(token, max_age=3600):
+    serializer = get_reset_serializer()
+    try:
+        data = serializer.loads(token, max_age=max_age)
+    except SignatureExpired:
+        return None, "expired"
+    except BadSignature:
+        return None, "invalid"
+
+    user_id = data.get("user_id")
+    if not user_id:
+        return None, "invalid"
+    return user_id, None
+
+
+def notify_low_attendance(db, student_ids):
+    if not student_ids or not is_mail_configured():
         return []
 
     placeholder = get_placeholder()
     threshold = get_setting(db, "low_attendance_threshold", app.config["LOW_ATTENDANCE_THRESHOLD"])
-    
-    # Filter by subject if provided, otherwise check overall attendance
-    subject_clause = f"AND attendance.subject_id = {placeholder}" if subject_id else ""
-    
     query = f"""
         SELECT
             students.id AS student_id,
@@ -171,56 +244,38 @@ def notify_low_attendance(db, student_ids, subject_id=None):
             ROUND(
                 100.0 * SUM(CASE WHEN attendance.status = 'Present' THEN 1 ELSE 0 END) / COUNT(attendance.id),
                 1
-            ) AS percentage,
-            subjects.name AS subject_name
+            ) AS percentage
         FROM students
         JOIN attendance ON attendance.student_id = students.id
-        JOIN subjects ON attendance.subject_id = subjects.id
         WHERE students.id IN ({', '.join([placeholder] * len(student_ids))})
-        {subject_clause}
-        GROUP BY students.id, subjects.id
+        GROUP BY students.id
         HAVING COUNT(attendance.id) > 0
     """
-    
-    params = list(student_ids)
-    if subject_id:
-        params.append(subject_id)
-        
-    rows = db.execute(query, tuple(params)).fetchall()
+    rows = db.execute(query, tuple(student_ids)).fetchall()
     emailed_students = []
 
-    print(f"DEBUG: Checking {len(rows)} students for low attendance (threshold: {threshold}%)")
-
     for row in rows:
-        if not row["email"] or not row["email"].strip():
-            print(f"DEBUG: Student {row['student_name']} has no email address. Skipping.")
+        if not row["email"]:
             continue
-            
         if row["percentage"] < threshold:
-            print(f"DEBUG: Student {row['student_name']} attendance is {row['percentage']}%. Sending email.")
-            subject_name = row["subject_name"] if subject_id else "your classes"
             body = (
                 f"Hello {row['student_name']},\n\n"
-                f"Your current attendance for {subject_name} is {row['percentage']}%, which is below the minimum required threshold of {threshold}%.\n"
+                f"Your current attendance is {row['percentage']}%, which is below the minimum required threshold of {threshold}% for this course.\n"
                 "Please attend classes regularly and check your attendance dashboard for details.\n\n"
                 "If you have any questions, contact your instructor.\n\n"
                 "Best regards,\n"
                 "Attendance Management Team"
             )
-            success, error_msg = send_email(
-                subject=f"Low Attendance Alert ({subject_name}): {row['percentage']}%",
-                to_email=row["email"],
-                message=body,
-            )
-            if success:
+            if send_email(
+                subject=f"Low Attendance Alert: {row['percentage']}%",
+                recipient=row["email"],
+                body=body,
+            ):
                 emailed_students.append({
                     "name": row["student_name"],
                     "email": row["email"],
                     "percentage": row["percentage"],
-                    "subject": subject_name
                 })
-        else:
-            print(f"DEBUG: Student {row['student_name']} attendance is {row['percentage']}%. No email needed.")
 
     return emailed_students
 
@@ -230,8 +285,18 @@ def init_db():
     placeholder = get_placeholder()
 
     # ✅ Create tables
-    if app.config["DATABASE"].startswith("postgresql") or app.config["DATABASE"].startswith("postgres"):
+    if app.config["DATABASE"].startswith("postgresql"):
         # PostgreSQL specific
+        db.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id SERIAL PRIMARY KEY,
+            username TEXT UNIQUE NOT NULL,
+            password TEXT NOT NULL,
+            role TEXT NOT NULL,
+            student_id INTEGER,
+            FOREIGN KEY(student_id) REFERENCES students(id)
+        );
+        """)
         db.execute("""
         CREATE TABLE IF NOT EXISTS branches (
             id SERIAL PRIMARY KEY,
@@ -253,16 +318,6 @@ def init_db():
             enrollment TEXT UNIQUE NOT NULL,
             branch_id INTEGER NOT NULL,
             email TEXT
-        );
-        """)
-        db.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            id SERIAL PRIMARY KEY,
-            username TEXT UNIQUE NOT NULL,
-            password TEXT NOT NULL,
-            role TEXT NOT NULL,
-            student_id INTEGER,
-            FOREIGN KEY(student_id) REFERENCES students(id)
         );
         """)
         db.execute("""
@@ -290,6 +345,15 @@ def init_db():
     else:
         # SQLite
         db.executescript("""
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY,
+            username TEXT UNIQUE NOT NULL,
+            password TEXT NOT NULL,
+            role TEXT NOT NULL,
+            student_id INTEGER,
+            FOREIGN KEY(student_id) REFERENCES students(id)
+        );
+
         CREATE TABLE IF NOT EXISTS branches (
             id INTEGER PRIMARY KEY,
             name TEXT UNIQUE NOT NULL,
@@ -308,15 +372,6 @@ def init_db():
             enrollment TEXT UNIQUE NOT NULL,
             branch_id INTEGER NOT NULL,
             email TEXT
-        );
-
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY,
-            username TEXT UNIQUE NOT NULL,
-            password TEXT NOT NULL,
-            role TEXT NOT NULL,
-            student_id INTEGER,
-            FOREIGN KEY(student_id) REFERENCES students(id)
         );
 
         CREATE TABLE IF NOT EXISTS attendance (
@@ -370,23 +425,6 @@ def init_db():
 
     db.commit()
     db.close()
-@app.errorhandler(Exception)
-def handle_exception(e):
-    # Pass through HTTP errors
-    if hasattr(e, "code") and e.code < 500:
-        return e
-
-    # Flash the error message for debugging
-    flash(f"Internal Server Error: {str(e)}", "error")
-    print(f"ERROR: {str(e)}")
-    import traceback
-    traceback.print_exc()
-    
-    # Return to dashboard or login
-    if session.get("user_id"):
-        return redirect(url_for("dashboard"))
-    return redirect(url_for("login"))
-
 def login_required(view):
     @wraps(view)
     def wrapped_view(**kwargs):
@@ -432,20 +470,15 @@ def index():
     return render_template("index.html")
 
 
-@app.route("/health")
-def health():
-    return jsonify({"status": "healthy"}), 200
-
-
 @app.route("/dashboard")
 @login_required
 def dashboard():
     db = get_db()
 
-    branch_count = db.execute("SELECT COUNT(*) AS count FROM branches").fetchone()["count"]
-    student_count = db.execute("SELECT COUNT(*) AS count FROM students").fetchone()["count"]
-    subject_count = db.execute("SELECT COUNT(*) AS count FROM subjects").fetchone()["count"]
-    attendance_count = db.execute("SELECT COUNT(*) AS count FROM attendance").fetchone()["count"]
+    branch_count = db.execute("SELECT COUNT(*) FROM branches").fetchone()[0]
+    student_count = db.execute("SELECT COUNT(*) FROM students").fetchone()[0]
+    subject_count = db.execute("SELECT COUNT(*) FROM subjects").fetchone()[0]
+    attendance_count = db.execute("SELECT COUNT(*) FROM attendance").fetchone()[0]
 
     attendance_stats = db.execute("""
         SELECT
@@ -470,7 +503,6 @@ def dashboard():
         JOIN subjects ON attendance.subject_id = subjects.id
         GROUP BY subjects.id
     """).fetchall()
-
     branch_data = db.execute("""
         SELECT
             branches.name AS branch_name,
@@ -479,7 +511,7 @@ def dashboard():
             COUNT(DISTINCT subjects.id) AS subject_count,
             COUNT(attendance.id) AS attendance_count,
             ROUND(
-                COALESCE(COUNT(CASE WHEN attendance.status='Present' THEN 1 END)*100.0 / NULLIF(COUNT(attendance.id), 0), 0),
+                COUNT(CASE WHEN attendance.status='Present' THEN 1 END)*100.0 / NULLIF(COUNT(attendance.id),0),
                 1
             ) AS attendance_percentage
         FROM branches
@@ -489,38 +521,20 @@ def dashboard():
         GROUP BY branches.id, branches.name, branches.location
         ORDER BY branches.name
     """).fetchall()
+
+    db.close()
     database_info = {
-        "storage": "PostgreSQL" if app.config["DATABASE"].startswith("postgresql") or app.config["DATABASE"].startswith("postgres") else "SQLite",
-        "path": app.config["DATABASE"] if not (app.config["DATABASE"].startswith("postgresql") or app.config["DATABASE"].startswith("postgres")) else "PostgreSQL Server (Remote)",
-        "full_url": app.config["DATABASE"] if app.config["DATABASE"].startswith("sqlite") or "/" in app.config["DATABASE"] else "Managed Service",
-        "is_ephemeral": bool(os.environ.get("RENDER") or os.environ.get("RENDER_INTERNAL_HOSTNAME")) and not (app.config["DATABASE"].startswith("postgresql") or app.config["DATABASE"].startswith("postgres"))
+        "storage": "PostgreSQL" if app.config["DATABASE"].startswith("postgresql") else "SQLite",
+        "path": app.config["DATABASE"],
     }
     mail_info = {
-        "configured": bool(app.config["MAIL_USERNAME"] and app.config["MAIL_PASSWORD"]),
+        "configured": is_mail_configured(),
         "server": app.config["MAIL_SERVER"],
         "port": app.config["MAIL_PORT"],
         "username": app.config["MAIL_USERNAME"],
         "tls": app.config["MAIL_USE_TLS"],
         "render_env": bool(os.environ.get("RENDER") or os.environ.get("RENDER_INTERNAL_HOSTNAME")),
     }
-
-    # Fetch attendance trend for charts (last 7 days)
-    chart_data = []
-    placeholder = get_placeholder()
-    for i in range(6, -1, -1):
-        target_date = (date.today() - timedelta(days=i)).isoformat()
-        day_stats = db.execute(f"""
-            SELECT 
-                COUNT(CASE WHEN status='Present' THEN 1 END) as present_count,
-                COUNT(*) as total_count
-            FROM attendance 
-            WHERE date = {placeholder}
-        """, (target_date,)).fetchone()
-        
-        pct = round((day_stats["present_count"] / day_stats["total_count"] * 100), 1) if day_stats["total_count"] > 0 else 0
-        chart_data.append({"date": target_date, "percentage": pct})
-
-    db.close()
 
     return render_template(
         "dashboard.html",
@@ -533,8 +547,6 @@ def dashboard():
         branch_data=branch_data,
         database_info=database_info,
         mail_info=mail_info,
-        persistence_warning=database_info["is_ephemeral"],
-        chart_data=chart_data
     )
 
 @app.route("/settings", methods=["GET", "POST"])
@@ -566,7 +578,7 @@ def settings():
     db.close()
 
     mail_info = {
-        "configured": bool(app.config["MAIL_USERNAME"] and app.config["MAIL_PASSWORD"]),
+        "configured": is_mail_configured(),
         "server": app.config["MAIL_SERVER"],
         "port": app.config["MAIL_PORT"],
         "username": app.config["MAIL_USERNAME"],
@@ -594,7 +606,9 @@ def branches():
                 db.execute(f"INSERT INTO branches (name, location) VALUES ({placeholder}, {placeholder})", (name, location))
                 db.commit()
                 flash("Branch added successfully.", "success")
-            except Exception:
+            except Exception as e:
+                db.rollback()
+                print(f"Error adding branch: {e}")
                 flash("Branch name already exists.", "error")
         else:
             flash("Branch name is required.", "error")
@@ -614,12 +628,17 @@ def subjects():
         name = request.form["name"].strip()
         branch_id = request.form.get("branch_id")
         if name and branch_id:
-            db.execute(
-                f"INSERT INTO subjects (name, branch_id) VALUES ({placeholder}, {placeholder})",
-                (name, branch_id),
-            )
-            db.commit()
-            flash("Subject added successfully.", "success")
+            try:
+                db.execute(
+                    f"INSERT INTO subjects (name, branch_id) VALUES ({placeholder}, {placeholder})",
+                    (name, branch_id),
+                )
+                db.commit()
+                flash("Subject added successfully.", "success")
+            except Exception as e:
+                db.rollback()
+                print(f"Error adding subject: {e}")
+                flash("Error adding subject. Please try again.", "error")
         else:
             flash("Subject name and branch are required.", "error")
 
@@ -641,32 +660,44 @@ def students():
         enrollment = request.form["enrollment"].strip()
         email = request.form["email"].strip()
         branch_id = request.form.get("branch_id")
-        if name and enrollment and branch_id:
-            try:
-                if app.config["DATABASE"].startswith("postgresql"):
-                    cursor = db.execute(
-                        f"INSERT INTO students (name, enrollment, email, branch_id) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}) RETURNING id",
-                        (name, enrollment, email, branch_id),
-                    )
-                    student_id = cursor.fetchone()["id"]
-                else:
-                    cursor = db.execute(
-                        f"INSERT INTO students (name, enrollment, email, branch_id) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder})",
-                        (name, enrollment, email, branch_id),
-                    )
-                    student_id = cursor.lastrowid
-
-                db.execute(
-                    f"INSERT INTO users (username, password, role, student_id) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder})",
-                    (enrollment, generate_password_hash(enrollment[-4:]), "student", student_id),
-                )
-                db.commit()
-                flash("Student added successfully.", "success")
-            except Exception as e:
-                print("DB ERROR:", e)
-                flash("Enrollment or username already exists.", "error")
-        else:
+        # Basic validation
+        if not (name and enrollment and branch_id):
             flash("Student name, enrollment and branch are required.", "error")
+        elif email and not is_valid_email(email):
+            flash("Please enter a valid email address.", "error")
+        else:
+            # Check duplicates before attempting insert
+            existing = db.execute(
+                f"SELECT id FROM students WHERE enrollment = {placeholder}",
+                (enrollment,),
+            ).fetchone()
+            if existing:
+                flash("A student with this enrollment already exists.", "error")
+            else:
+                try:
+                    if str(app.config.get("DATABASE", "")).startswith("postgres"):
+                        cursor = db.execute(
+                            f"INSERT INTO students (name, enrollment, email, branch_id) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}) RETURNING id",
+                            (name, enrollment, email, branch_id),
+                        )
+                        student_id = cursor.fetchone()[0]
+                    else:
+                        cursor = db.execute(
+                            f"INSERT INTO students (name, enrollment, email, branch_id) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder})",
+                            (name, enrollment, email, branch_id),
+                        )
+                        student_id = cursor.lastrowid
+
+                    db.execute(
+                        f"INSERT INTO users (username, password, role, student_id) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder})",
+                        (enrollment, generate_password_hash(enrollment[-4:]), "student", student_id),
+                    )
+                    db.commit()
+                    flash("Student added successfully.", "success")
+                except Exception as e:
+                    db.rollback()
+                    print(f"Error adding student: {e}")
+                    flash("Enrollment or username already exists.", "error")
 
     students = db.execute(
         f"SELECT students.*, branches.name AS branch_name FROM students JOIN branches ON students.branch_id = branches.id ORDER BY students.name"
@@ -677,113 +708,37 @@ def students():
 
 @app.route("/student_login", methods=["GET", "POST"])
 def student_login():
+    next_url = request.args.get("next") or request.form.get("next")
+
     if request.method == "POST":
         username = request.form.get("username", "").strip()
         password = request.form.get("password", "").strip()
-        next_url = request.form.get("next") or request.args.get("next")
 
         db = get_db()
         placeholder = get_placeholder()
         user = db.execute(f"SELECT * FROM users WHERE username = {placeholder}", (username,)).fetchone()
         db.close()
 
-        if user and user["role"] == "student" and check_password_hash(user["password"], password):
+        if not username or not password:
+            flash("Please enter username and password.", "error")
+        elif user and user["role"] == "student" and check_password_hash(user["password"], password):
             session.clear()
             session["user_id"] = user["id"]
             session["username"] = user["username"]
             session["role"] = user["role"]
-            session["student_id"] = user.get("student_id") if isinstance(user, dict) else user["student_id"]
-            
-            if next_url and next_url.startswith("/"):
+            # sqlite row and psycopg2 RealDictCursor return different types; handle both
+            try:
+                student_id_val = user["student_id"]
+            except Exception:
+                student_id_val = user.get("student_id")
+            session["student_id"] = student_id_val
+            if next_url:
                 return redirect(next_url)
             return redirect(url_for("student_dashboard"))
 
         flash("Invalid student login credentials.", "error")
 
-    return render_template("student_login.html")
-
-
-@app.route("/forgot_password", methods=["GET", "POST"])
-def forgot_password():
-    if request.method == "POST":
-        email = request.form.get("email", "").strip()
-        db = get_db()
-        placeholder = get_placeholder()
-        
-        # Find student by email
-        student = db.execute(
-            f"SELECT students.id, students.email, users.username FROM students JOIN users ON students.id = users.student_id WHERE students.email = {placeholder}",
-            (email,)
-        ).fetchone()
-        
-        if student:
-            # Generate token
-            s = URLSafeTimedSerializer(app.config["SECRET_KEY"])
-            token = s.dumps(email, salt="password-reset-salt")
-            
-            # Send reset email
-            reset_url = url_for("reset_password", token=token, _external=True)
-            subject = "Password Reset Request - Attendance System"
-            message = (
-                f"Hello,\n\n"
-                f"A password reset was requested for your student account (Enrollment: {student['username']}).\n"
-                f"Click the link below to reset your password:\n\n"
-                f"{reset_url}\n\n"
-                "If you did not request this, please ignore this email.\n"
-                "The link will expire in 1 hour.\n\n"
-                "Best regards,\n"
-                "Attendance Management Team"
-            )
-            
-            success, error = send_email(subject, email, message)
-            if success:
-                flash("A password reset link has been sent to your email.", "success")
-            else:
-                flash(f"Error sending email: {error}", "error")
-        else:
-            flash("No account found with that email address.", "error")
-        
-        db.close()
-        return redirect(url_for("forgot_password"))
-
-    return render_template("forgot_password.html")
-
-
-@app.route("/reset_password/<token>", methods=["GET", "POST"])
-def reset_password(token):
-    s = URLSafeTimedSerializer(app.config["SECRET_KEY"])
-    try:
-        email = s.loads(token, salt="password-reset-salt", max_age=3600)
-    except (SignatureExpired, BadSignature):
-        flash("The password reset link is invalid or has expired.", "error")
-        return redirect(url_for("forgot_password"))
-
-    if request.method == "POST":
-        new_password = request.form.get("password", "").strip()
-        confirm_password = request.form.get("confirm_password", "").strip()
-        
-        if not new_password or len(new_password) < 4:
-            flash("Password must be at least 4 characters long.", "error")
-        elif new_password != confirm_password:
-            flash("Passwords do not match.", "error")
-        else:
-            db = get_db()
-            placeholder = get_placeholder()
-            
-            # Update password in users table
-            hashed_password = generate_password_hash(new_password)
-            db.execute(
-                f"UPDATE users SET password = {placeholder} WHERE student_id IN (SELECT id FROM students WHERE email = {placeholder})",
-                (hashed_password, email)
-            )
-            db.commit()
-            db.close()
-            
-            flash("Your password has been reset successfully. You can now login.", "success")
-            return redirect(url_for("student_login"))
-
-    return render_template("reset_password.html", token=token)
-
+    return render_template("student_login.html", next=next_url)
 
 
 @app.route("/teacher_login", methods=["GET", "POST"])
@@ -835,14 +790,26 @@ def student_dashboard():
         db.close()
         abort(404)
 
-    attendance_records = db.execute(
-        f"SELECT attendance.date, attendance.status, subjects.name AS subject_name "
+    selected_subject_id = request.args.get("subject_id") or ""
+
+    subjects = db.execute(
+        f"SELECT id, name FROM subjects WHERE branch_id = {placeholder} ORDER BY name",
+        (student["branch_id"],),
+    ).fetchall()
+
+    attendance_query = (
+        f"SELECT attendance.date, attendance.status, subjects.name AS subject_name, subjects.id AS subject_id "
         f"FROM attendance "
         f"JOIN subjects ON attendance.subject_id = subjects.id "
         f"WHERE attendance.student_id = {placeholder} "
-        f"ORDER BY attendance.date DESC",
-        (student_id,),
-    ).fetchall()
+    )
+    params = [student_id]
+    if selected_subject_id:
+        attendance_query += f"AND attendance.subject_id = {placeholder} "
+        params.append(selected_subject_id)
+    attendance_query += "ORDER BY attendance.date DESC"
+
+    attendance_records = db.execute(attendance_query, tuple(params)).fetchall()
 
     total = len(attendance_records)
     present = len([a for a in attendance_records if a["status"] == "Present"])
@@ -854,6 +821,8 @@ def student_dashboard():
         student=student,
         attendance_records=attendance_records,
         percentage=percentage,
+        subjects=subjects,
+        selected_subject_id=selected_subject_id,
     )
 
 
@@ -876,14 +845,26 @@ def student_dashboard_by_id(student_id):
         db.close()
         abort(404)
 
-    attendance_records = db.execute(
-        f"SELECT attendance.date, attendance.status, subjects.name AS subject_name "
+    selected_subject_id = request.args.get("subject_id") or ""
+
+    subjects = db.execute(
+        f"SELECT id, name FROM subjects WHERE branch_id = {placeholder} ORDER BY name",
+        (student["branch_id"],),
+    ).fetchall()
+
+    attendance_query = (
+        f"SELECT attendance.date, attendance.status, subjects.name AS subject_name, subjects.id AS subject_id "
         f"FROM attendance "
         f"JOIN subjects ON attendance.subject_id = subjects.id "
         f"WHERE attendance.student_id = {placeholder} "
-        f"ORDER BY attendance.date DESC",
-        (student_id,),
-    ).fetchall()
+    )
+    params = [student_id]
+    if selected_subject_id:
+        attendance_query += f"AND attendance.subject_id = {placeholder} "
+        params.append(selected_subject_id)
+    attendance_query += "ORDER BY attendance.date DESC"
+
+    attendance_records = db.execute(attendance_query, tuple(params)).fetchall()
 
     total = len(attendance_records)
     present = len([a for a in attendance_records if a["status"] == "Present"])
@@ -895,6 +876,8 @@ def student_dashboard_by_id(student_id):
         student=student,
         attendance_records=attendance_records,
         percentage=percentage,
+        subjects=subjects,
+        selected_subject_id=selected_subject_id,
     )
 
 
@@ -907,12 +890,22 @@ def mark_attendance():
     branch_id = request.args.get("branch_id") or ""
     subject_id = request.args.get("subject_id") or ""
     selected_date = request.args.get("date") or date.today().isoformat()
+    today_date = date.today()
+    try:
+        selected_date_obj = date.fromisoformat(selected_date)
+    except ValueError:
+        selected_date_obj = today_date
+
+    if selected_date_obj > today_date:
+        selected_date_obj = today_date
+
+    selected_date = selected_date_obj.isoformat()
     subjects = []
     students = []
     existing_dates = []
 
     # Calculate previous and next dates
-    current_date_obj = date.fromisoformat(selected_date)
+    current_date_obj = selected_date_obj
     prev_date = (current_date_obj - timedelta(days=1)).isoformat()
     next_date = (current_date_obj + timedelta(days=1)).isoformat()
 
@@ -934,33 +927,57 @@ def mark_attendance():
         branch_id = request.form.get("branch_id") or ""
         subject_id = request.form.get("subject_id") or ""
         selected_date = request.form.get("date") or date.today().isoformat()
+        try:
+            selected_date_obj = date.fromisoformat(selected_date)
+        except ValueError:
+            selected_date_obj = today_date
+
+        if selected_date_obj > today_date:
+            selected_date_obj = today_date
+
+        selected_date = selected_date_obj.isoformat()
         student_ids = request.form.getlist("student_id")
 
         if branch_id and subject_id and student_ids:
             saved_student_ids = []
-            for student_id in student_ids:
-                status = request.form.get(f"status_{student_id}", "Absent")
-                note = request.form.get(f"note_{student_id}", "")
-                existing = db.execute(
-                    f"SELECT id FROM attendance WHERE student_id = {placeholder} AND subject_id = {placeholder} AND date = {placeholder}",
-                    (student_id, subject_id, selected_date),
-                ).fetchone()
-                if existing:
-                    db.execute(
-                        f"UPDATE attendance SET status = {placeholder}, note = {placeholder} WHERE id = {placeholder}",
-                        (status, note, existing["id"]),
-                    )
-                else:
-                    db.execute(
-                        f"INSERT INTO attendance (student_id, branch_id, subject_id, date, status, note) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})",
-                        (student_id, branch_id, subject_id, selected_date, status, note),
-                    )
-                if student_id.isdigit():
-                    saved_student_ids.append(int(student_id))
-            db.commit()
+            try:
+                for student_id in student_ids:
+                    status = request.form.get(f"status_{student_id}", "Absent")
+                    note = request.form.get(f"note_{student_id}", "")
+                    existing = db.execute(
+                        f"SELECT id FROM attendance WHERE student_id = {placeholder} AND subject_id = {placeholder} AND date = {placeholder}",
+                        (student_id, subject_id, selected_date),
+                    ).fetchone()
+                    if existing:
+                        db.execute(
+                            f"UPDATE attendance SET status = {placeholder}, note = {placeholder} WHERE id = {placeholder}",
+                            (status, note, existing["id"]),
+                        )
+                    else:
+                        db.execute(
+                            f"INSERT INTO attendance (student_id, branch_id, subject_id, date, status, note) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})",
+                            (student_id, branch_id, subject_id, selected_date, status, note),
+                        )
+                    if student_id.isdigit():
+                        saved_student_ids.append(int(student_id))
+                db.commit()
+                print(f"Committed attendance for {len(saved_student_ids)} students on {selected_date}")
+                
+                # Verify the data was saved
+                count = db.execute(
+                    f"SELECT COUNT(*) FROM attendance WHERE date = {placeholder}",
+                    (selected_date,)
+                ).fetchone()[0]
+                print(f"Total attendance records for {selected_date}: {count}")
 
-            emailed_students = notify_low_attendance(db, saved_student_ids, subject_id)
-            session["attendance_email_summary"] = emailed_students
+                flash("Attendance saved successfully.", "success")
+                emailed_students = notify_low_attendance(db, saved_student_ids)
+                session["attendance_email_summary"] = emailed_students
+            except Exception as e:
+                db.rollback()
+                print(f"Error saving attendance: {e}")
+                flash("Error saving attendance. Please try again.", "error")
+                saved_student_ids = []
 
             # Emit real-time update (disabled for Render)
             # socketio.emit('attendance_saved', {
@@ -1004,7 +1021,134 @@ def mark_attendance():
         existing_dates=existing_dates,
         prev_date=prev_date,
         next_date=next_date,
+        today_date=today_date.isoformat(),
     )
+
+
+@app.route("/attendance/qr")
+@login_required
+def generate_qr():
+    branch_id = request.args.get("branch_id")
+    subject_id = request.args.get("subject_id")
+    selected_date = request.args.get("date") or date.today().isoformat()
+
+    if not branch_id or not subject_id:
+        flash("Please select a branch and subject before generating a QR code.", "error")
+        return redirect(url_for("mark_attendance", branch_id=branch_id, subject_id=subject_id, date=selected_date))
+
+    db = get_db()
+    placeholder = get_placeholder()
+    branch = db.execute(
+        f"SELECT name FROM branches WHERE id = {placeholder}",
+        (branch_id,),
+    ).fetchone()
+    subject = db.execute(
+        f"SELECT name FROM subjects WHERE id = {placeholder}",
+        (subject_id,),
+    ).fetchone()
+    db.close()
+
+    if not branch or not subject:
+        flash("Selected branch or subject was not found.", "error")
+        return redirect(url_for("mark_attendance", branch_id=branch_id, subject_id=subject_id, date=selected_date))
+
+    return render_template(
+        "qr_display.html",
+        branch_id=branch_id,
+        subject_id=subject_id,
+        branch_name=branch["name"],
+        subject_name=subject["name"],
+        date=selected_date,
+    )
+
+
+@app.route("/attendance/scan")
+def attendance_scan():
+    branch_id = request.args.get("branch_id")
+    subject_id = request.args.get("subject_id")
+    selected_date = request.args.get("date") or date.today().isoformat()
+
+    if not branch_id or not subject_id:
+        flash("Invalid attendance scan link.", "error")
+        return redirect(url_for("student_login"))
+
+    if not session.get("user_id") or session.get("role") != "student":
+        login_url = url_for("student_login", next=request.url)
+        return redirect(login_url)
+
+    student_id = session.get("student_id")
+    if not student_id:
+        flash("Student session not found. Please log in again.", "error")
+        return redirect(url_for("student_login", next=request.url))
+
+    db = get_db()
+    placeholder = get_placeholder()
+    branch = db.execute(
+        f"SELECT name FROM branches WHERE id = {placeholder}",
+        (branch_id,),
+    ).fetchone()
+    subject = db.execute(
+        f"SELECT name FROM subjects WHERE id = {placeholder}",
+        (subject_id,),
+    ).fetchone()
+
+    if not branch or not subject:
+        db.close()
+        flash("Attendance scan link is invalid.", "error")
+        return redirect(url_for("student_dashboard"))
+
+    existing = db.execute(
+        f"SELECT id, status FROM attendance WHERE student_id = {placeholder} AND subject_id = {placeholder} AND date = {placeholder}",
+        (student_id, subject_id, selected_date),
+    ).fetchone()
+
+    if existing:
+        if existing["status"] != "Present":
+            db.execute(
+                f"UPDATE attendance SET status = {placeholder}, note = {placeholder} WHERE id = {placeholder}",
+                ("Present", "Marked via QR scan", existing["id"]),
+            )
+            db.commit()
+            message = "Your attendance has been updated to Present."
+        else:
+            message = "Your attendance is already marked as Present."
+    else:
+        db.execute(
+            f"INSERT INTO attendance (student_id, branch_id, subject_id, date, status, note) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})",
+            (student_id, branch_id, subject_id, selected_date, "Present", "Marked via QR scan"),
+        )
+        db.commit()
+        message = "Attendance recorded successfully."
+
+    db.close()
+
+    return render_template(
+        "attendance_scan.html",
+        branch_name=branch["name"],
+        subject_name=subject["name"],
+        date=selected_date,
+        message=message,
+    )
+
+
+@app.route("/api/generate_qr_token")
+@login_required
+def generate_qr_token():
+    branch_id = request.args.get("branch_id")
+    subject_id = request.args.get("subject_id")
+    selected_date = request.args.get("date") or date.today().isoformat()
+
+    if not branch_id or not subject_id:
+        return jsonify({"error": "branch_id and subject_id are required."}), 400
+
+    scan_url = url_for(
+        "attendance_scan",
+        branch_id=branch_id,
+        subject_id=subject_id,
+        date=selected_date,
+        _external=True,
+    )
+    return jsonify({"scan_url": scan_url})
 
 
 @app.route("/attendance/success")
@@ -1024,6 +1168,7 @@ def attendance_success():
     db.close()
 
     email_summary = session.pop("attendance_email_summary", [])
+    mail_configured = is_mail_configured()
 
     return render_template(
         "attendance_success.html",
@@ -1032,274 +1177,7 @@ def attendance_success():
         selected_date=selected_date,
         attendance_count=attendance_count,
         email_summary=email_summary,
-        mail_configured=bool(app.config["MAIL_USERNAME"] and app.config["MAIL_PASSWORD"]),
-    )
-
-@app.route("/api/generate_qr_token", methods=["GET"])
-@login_required
-def generate_qr_token():
-    branch_id = request.args.get("branch_id")
-    subject_id = request.args.get("subject_id")
-    date_str = request.args.get("date")
-
-    if not branch_id or not subject_id or not date_str:
-        return abort(400, "Missing parameters")
-
-    s = URLSafeTimedSerializer(app.config["SECRET_KEY"])
-    token = s.dumps({"branch_id": branch_id, "subject_id": subject_id, "date": date_str})
-    
-    return jsonify({"token": token, "scan_url": url_for("scan_qr", token=token, _external=True)})
-
-@app.route("/generate_qr")
-@login_required
-def generate_qr():
-    branch_id = request.args.get("branch_id")
-    subject_id = request.args.get("subject_id")
-    date_str = request.args.get("date")
-    
-    if not branch_id or not subject_id or not date_str:
-        flash("Missing parameters for QR generation", "error")
-        return redirect(url_for("mark_attendance"))
-        
-    db = get_db()
-    placeholder = get_placeholder()
-    branch = db.execute(f"SELECT name FROM branches WHERE id = {placeholder}", (branch_id,)).fetchone()
-    subject = db.execute(f"SELECT name FROM subjects WHERE id = {placeholder}", (subject_id,)).fetchone()
-    db.close()
-    
-    return render_template(
-        "qr_display.html",
-        branch_id=branch_id,
-        subject_id=subject_id,
-        date=date_str,
-        branch_name=branch["name"] if branch else "",
-        subject_name=subject["name"] if subject else "",
-    )
-
-@app.route("/scan_qr")
-def scan_qr():
-    token = request.args.get("token")
-    if not token:
-        flash("Invalid or missing QR token.", "error")
-        return redirect(url_for("index"))
-
-    # Enforce student login
-    if session.get("role") != "student":
-        flash("You must be logged in as a student to scan QR codes.", "error")
-        return redirect(url_for("student_login", next=request.url))
-
-    s = URLSafeTimedSerializer(app.config["SECRET_KEY"])
-    try:
-        # Token valid for 5 minutes (300 seconds)
-        data = s.loads(token, max_age=300)
-    except SignatureExpired:
-        flash("This QR code has expired. Please ask the teacher to generate a new one.", "error")
-        return redirect(url_for("student_dashboard"))
-    except BadSignature:
-        flash("Invalid QR code.", "error")
-        return redirect(url_for("student_dashboard"))
-
-    branch_id = data.get("branch_id")
-    subject_id = data.get("subject_id")
-    date_str = data.get("date")
-    student_id = session.get("student_id")
-
-    db = get_db()
-    placeholder = get_placeholder()
-    
-    # Check if student belongs to this branch
-    student = db.execute(f"SELECT branch_id FROM students WHERE id = {placeholder}", (student_id,)).fetchone()
-    if not student or str(student["branch_id"]) != str(branch_id):
-        db.close()
-        flash("You are not enrolled in this branch.", "error")
-        return redirect(url_for("student_dashboard"))
-
-    # Mark attendance as present
-    existing = db.execute(
-        f"SELECT id FROM attendance WHERE student_id = {placeholder} AND subject_id = {placeholder} AND date = {placeholder}",
-        (student_id, subject_id, date_str),
-    ).fetchone()
-
-    if existing:
-        db.execute(
-            f"UPDATE attendance SET status = 'Present', note = 'QR Scan' WHERE id = {placeholder}",
-            (existing["id"],),
-        )
-    else:
-        db.execute(
-            f"INSERT INTO attendance (student_id, branch_id, subject_id, date, status, note) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, 'Present', 'QR Scan')",
-            (student_id, branch_id, subject_id, date_str),
-        )
-    
-    db.commit()
-    db.close()
-
-    flash("Attendance successfully marked via QR Code!", "success")
-    return redirect(url_for("student_dashboard"))
-
-@app.route("/department_dashboard")
-@login_required
-def department_dashboard():
-    db = get_db()
-    placeholder = get_placeholder()
-
-    # Fetch all branches (departments)
-    branches = db.execute("SELECT * FROM branches ORDER BY name").fetchall()
-
-    departments = []
-    total_students = 0
-    total_subjects = 0
-    total_attendance = 0
-    total_present = 0
-
-    for branch in branches:
-        bid = branch["id"]
-
-        # Student count
-        student_count = db.execute(
-            f"SELECT COUNT(*) AS count FROM students WHERE branch_id = {placeholder}", (bid,)
-        ).fetchone()["count"]
-
-        # Subject count
-        subject_count = db.execute(
-            f"SELECT COUNT(*) AS count FROM subjects WHERE branch_id = {placeholder}", (bid,)
-        ).fetchone()["count"]
-
-        # Attendance counts
-        att_stats = db.execute(
-            f"""SELECT
-                COUNT(*) AS total,
-                COUNT(CASE WHEN status = 'Present' THEN 1 END) AS present
-            FROM attendance WHERE branch_id = {placeholder}""",
-            (bid,),
-        ).fetchone()
-        att_total = att_stats["total"] or 0
-        att_present = att_stats["present"] or 0
-        att_absent = att_total - att_present
-        att_pct = round((att_present / att_total) * 100, 1) if att_total > 0 else 0
-
-        # Subject-wise attendance
-        subject_rows = db.execute(
-            f"""SELECT subjects.name,
-                COUNT(*) AS total,
-                COUNT(CASE WHEN attendance.status = 'Present' THEN 1 END) AS present
-            FROM attendance
-            JOIN subjects ON attendance.subject_id = subjects.id
-            WHERE attendance.branch_id = {placeholder}
-            GROUP BY subjects.id, subjects.name
-            ORDER BY subjects.name""",
-            (bid,),
-        ).fetchall()
-
-        subjects_data = []
-        for s in subject_rows:
-            s_total = s["total"] or 0
-            s_present = s["present"] or 0
-            s_pct = round((s_present / s_total) * 100, 1) if s_total > 0 else 0
-            subjects_data.append({
-                "name": s["name"],
-                "total": s_total,
-                "present": s_present,
-                "absent": s_total - s_present,
-                "pct": s_pct,
-            })
-
-        # Student-wise attendance
-        student_rows = db.execute(
-            f"""SELECT students.id, students.name, students.enrollment, students.email,
-                COUNT(attendance.id) AS total,
-                COUNT(CASE WHEN attendance.status = 'Present' THEN 1 END) AS present
-            FROM students
-            LEFT JOIN attendance ON attendance.student_id = students.id
-            WHERE students.branch_id = {placeholder}
-            GROUP BY students.id, students.name, students.enrollment, students.email
-            ORDER BY students.name""",
-            (bid,),
-        ).fetchall()
-
-        students_data = []
-        for st in student_rows:
-            st_total = st["total"] or 0
-            st_present = st["present"] or 0
-            st_pct = round((st_present / st_total) * 100, 1) if st_total > 0 else 0
-            students_data.append({
-                "id": st["id"],
-                "name": st["name"],
-                "enrollment": st["enrollment"],
-                "email": st["email"],
-                "total": st_total,
-                "present": st_present,
-                "absent": st_total - st_present,
-                "pct": st_pct,
-            })
-
-        departments.append({
-            "id": bid,
-            "name": branch["name"],
-            "location": branch["location"],
-            "student_count": student_count,
-            "subject_count": subject_count,
-            "attendance_count": att_total,
-            "present_count": att_present,
-            "absent_count": att_absent,
-            "attendance_pct": att_pct,
-            "subjects": subjects_data,
-            "students": students_data,
-        })
-
-        total_students += student_count
-        total_subjects += subject_count
-        total_attendance += att_total
-        total_present += att_present
-
-    overall_percentage = round((total_present / total_attendance) * 100, 1) if total_attendance > 0 else 0
-
-    # Fetch attendance trend for charts (last 7 days)
-    chart_data = []
-    for i in range(6, -1, -1):
-        target_date = (date.today() - timedelta(days=i)).isoformat()
-        day_stats = db.execute(f"""
-            SELECT 
-                COUNT(CASE WHEN status='Present' THEN 1 END) as present_count,
-                COUNT(*) as total_count
-            FROM attendance 
-            WHERE date = {placeholder}
-        """, (target_date,)).fetchone()
-        
-        pct = round((day_stats["present_count"] / day_stats["total_count"] * 100), 1) if day_stats["total_count"] > 0 else 0
-        chart_data.append({"date": target_date, "percentage": pct})
-
-    # Mail configuration info
-    mail_info = {
-        "configured": bool(app.config.get("MAIL_USERNAME")),
-        "server": app.config.get("MAIL_SERVER"),
-        "port": app.config.get("MAIL_PORT"),
-        "username": app.config.get("MAIL_USERNAME"),
-        "tls": app.config.get("MAIL_USE_TLS"),
-        "render_env": "RENDER" in os.environ
-    }
-
-    persistence_warning = False
-    if "RENDER" in os.environ and "sqlite" in app.config["DATABASE"].lower():
-        persistence_warning = True
-
-    database_info = {
-        "storage": "PostgreSQL (Cloud)" if "postgresql" in app.config["DATABASE"].lower() else "SQLite (Local/Ephemeral)",
-        "path": app.config["DATABASE"].split("@")[-1] if "@" in app.config["DATABASE"] else app.config["DATABASE"]
-    }
-
-    db.close()
-    return render_template(
-        "department_dashboard.html",
-        departments=departments,
-        total_students=total_students,
-        total_subjects=total_subjects,
-        total_attendance=total_attendance,
-        overall_percentage=overall_percentage,
-        persistence_warning=persistence_warning,
-        database_info=database_info,
-        chart_data=chart_data,
-        mail_info=mail_info
+        mail_configured=mail_configured,
     )
 
 
@@ -1412,217 +1290,6 @@ def attendance_report():
         stats=stats,
     )
 
-@app.route("/export/excel")
-@login_required
-def export_excel():
-    db = get_db()
-    query = """
-        SELECT 
-            attendance.date, 
-            students.name AS Student, 
-            students.enrollment AS Enrollment, 
-            branches.name AS Branch, 
-            subjects.name AS Subject, 
-            attendance.status AS Status,
-            attendance.note AS Note
-        FROM attendance 
-        JOIN students ON attendance.student_id = students.id 
-        JOIN branches ON attendance.branch_id = branches.id 
-        JOIN subjects ON attendance.subject_id = subjects.id
-        ORDER BY attendance.date DESC
-    """
-    records = db.execute(query).fetchall()
-    db.close()
-    
-    if not records:
-        flash("No records to export.", "error")
-        return redirect(url_for("attendance_report"))
-
-    df = pd.DataFrame([dict(r) for r in records])
-    
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        df.to_excel(writer, index=False, sheet_name='Attendance')
-    
-    output.seek(0)
-    return send_file(
-        output,
-        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        as_attachment=True,
-        download_name=f"Attendance_Report_{date.today().isoformat()}.xlsx"
-    )
-
-@app.route("/report/email", methods=["POST"])
-@login_required
-def report_email():
-    branch_id = request.form.get("branch_id")
-    subject_id = request.form.get("subject_id")
-    
-    db = get_db()
-    placeholder = get_placeholder()
-    
-    query = """
-        SELECT 
-            students.name, 
-            students.enrollment,
-            COUNT(*) as total,
-            COUNT(CASE WHEN status='Present' THEN 1 END) as present
-        FROM attendance
-        JOIN students ON attendance.student_id = students.id
-        WHERE 1=1
-    """
-    params = []
-    if branch_id:
-        query += f" AND attendance.branch_id = {placeholder}"
-        params.append(branch_id)
-    if subject_id:
-        query += f" AND attendance.subject_id = {placeholder}"
-        params.append(subject_id)
-    
-    query += " GROUP BY students.id, students.name, students.enrollment"
-    
-    records = db.execute(query, params).fetchall()
-    db.close()
-    
-    if not records:
-        flash("No data found for this report.", "error")
-        return redirect(url_for("attendance_report"))
-
-    subject = "Attendance Report Summary"
-    message = f"Attendance Report Summary ({date.today().isoformat()})\n\n"
-    message += f"{'Name':<25} {'Enrollment':<15} {'Attended':<10} {'Total':<10} {'%'}\n"
-    message += "-" * 70 + "\n"
-    
-    for r in records:
-        pct = round((r['present'] / r['total'] * 100), 1) if r['total'] > 0 else 0
-        message += f"{r['name']:<25} {r['enrollment']:<15} {r['present']:<10} {r['total']:<10} {pct}%\n"
-    
-    user_email = session.get("email") or app.config.get("MAIL_USERNAME")
-    if send_email(subject, user_email, message):
-        flash(f"Report sent to {user_email}", "success")
-    else:
-        flash("Failed to send email. Check mail configuration.", "error")
-        
-    return redirect(url_for("attendance_report"))
-
-
-@app.route("/admin/import_data", methods=["POST"])
-@login_required
-def import_data():
-    if session.get("role") != "admin":
-        return jsonify({"error": "Unauthorized"}), 403
-
-    try:
-        data = request.get_json()
-        if not data:
-            return jsonify({"error": "No data provided"}), 400
-
-        db = get_db()
-        placeholder = get_placeholder()
-
-        # Import Branches
-        for branch in data.get("branches", []):
-            try:
-                db.execute(
-                    f"INSERT INTO branches (id, name, location) VALUES ({placeholder}, {placeholder}, {placeholder}) "
-                    f"ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, location = EXCLUDED.location",
-                    (branch["id"], branch["name"], branch["location"])
-                )
-            except Exception as e:
-                print(f"Error importing branch {branch['name']}: {e}")
-
-        # Import Subjects
-        for subj in data.get("subjects", []):
-            try:
-                # Use standard INSERT for SQLite fallback, or ON CONFLICT for Postgres
-                if app.config["DATABASE"].startswith("postgres"):
-                    db.execute(
-                        f"INSERT INTO subjects (id, name, branch_id) VALUES ({placeholder}, {placeholder}, {placeholder}) "
-                        f"ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, branch_id = EXCLUDED.branch_id",
-                        (subj["id"], subj["name"], subj["branch_id"])
-                    )
-                else:
-                    db.execute(
-                        f"INSERT OR REPLACE INTO subjects (id, name, branch_id) VALUES ({placeholder}, {placeholder}, {placeholder})",
-                        (subj["id"], subj["name"], subj["branch_id"])
-                    )
-            except Exception as e:
-                print(f"Error importing subject {subj['name']}: {e}")
-
-        # Import Students
-        for stu in data.get("students", []):
-            try:
-                if app.config["DATABASE"].startswith("postgres"):
-                    db.execute(
-                        f"INSERT INTO students (id, name, enrollment, branch_id, email) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}) "
-                        f"ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, enrollment = EXCLUDED.enrollment, branch_id = EXCLUDED.branch_id, email = EXCLUDED.email",
-                        (stu["id"], stu["name"], stu["enrollment"], stu["branch_id"], stu["email"])
-                    )
-                    # Also ensure user exists
-                    db.execute(
-                        f"INSERT INTO users (username, password, role, student_id) VALUES ({placeholder}, {placeholder}, 'student', {placeholder}) "
-                        f"ON CONFLICT (username) DO NOTHING",
-                        (stu["enrollment"], generate_password_hash(stu["enrollment"][-4:]), stu["id"])
-                    )
-                else:
-                    db.execute(
-                        f"INSERT OR REPLACE INTO students (id, name, enrollment, branch_id, email) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})",
-                        (stu["id"], stu["name"], stu["enrollment"], stu["branch_id"], stu["email"])
-                    )
-                    db.execute(
-                        f"INSERT OR IGNORE INTO users (username, password, role, student_id) VALUES ({placeholder}, {placeholder}, 'student', {placeholder})",
-                        (stu["enrollment"], generate_password_hash(stu["enrollment"][-4:]), stu["id"])
-                    )
-            except Exception as e:
-                print(f"Error importing student {stu['name']}: {e}")
-
-        # Import Attendance
-        for att in data.get("attendance", []):
-            try:
-                if app.config["DATABASE"].startswith("postgres"):
-                    db.execute(
-                        f"INSERT INTO attendance (id, student_id, branch_id, subject_id, date, status, note) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}) "
-                        f"ON CONFLICT (id) DO UPDATE SET status = EXCLUDED.status, note = EXCLUDED.note",
-                        (att["id"], att["student_id"], att["branch_id"], att["subject_id"], att["date"], att["status"], att["note"])
-                    )
-                else:
-                    db.execute(
-                        f"INSERT OR REPLACE INTO attendance (id, student_id, branch_id, subject_id, date, status, note) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})",
-                        (att["id"], att["student_id"], att["branch_id"], att["subject_id"], att["date"], att["status"], att["note"])
-                    )
-            except Exception as e:
-                print(f"Error importing attendance record {att['id']}: {e}")
-
-        db.commit()
-        db.close()
-        return jsonify({"message": "Data imported successfully!"}), 200
-    except Exception as e:
-        print(f"Import failed: {e}")
-        return jsonify({"error": str(e)}), 500
-
-@app.route("/test_email")
-@login_required
-def test_email():
-    if session.get("role") != "admin":
-        flash("Only admins can test email settings.", "error")
-        return redirect(url_for("dashboard"))
-
-    recipient = app.config["MAIL_FROM"]
-    if not recipient:
-        return "MAIL_FROM or MAIL_USERNAME not configured."
-
-    subject = "Test Email from Attendance System"
-    body = "This is a test email to verify your SMTP configuration. If you received this, your email settings are correct!"
-
-    success, message = send_email(subject, recipient, body)
-
-    if success:
-        flash(f"Test email sent successfully to {recipient}!", "success")
-    else:
-        flash(f"Failed to send test email: {message}", "error")
-
-    return redirect(url_for("settings"))
-
 
 # # SocketIO Event Handlers for Real-time Updates (disabled for Render)
 # @socketio.on('connect')
@@ -1686,18 +1353,140 @@ def test_email():
 #     finally:
 #         db.close()
 
-# Initialize DB when app starts
-with app.app_context():
-    db_uri = app.config["DATABASE"]
-    is_pg = db_uri.startswith("postgresql") or db_uri.startswith("postgres")
-    print(f"DATABASE CONNECTION: {'PostgreSQL' if is_pg else 'SQLite (WARNING: Ephemeral)'}")
-    print(f"DATABASE URI: {db_uri[:20]}...") 
-    
+@app.route("/forgot-password", methods=["GET", "POST"])
+@app.route("/forgot_password", methods=["GET", "POST"])
+def forgot_password():
+    if request.method == "POST":
+        identifier = request.form.get("email", "").strip()
+
+        if not identifier:
+            flash("Please enter your registered email address or enrollment number.", "error")
+            return render_template("forgot_password.html")
+
+        if not is_mail_configured():
+            flash("Email service is not configured. Contact the administrator.", "error")
+            return render_template("forgot_password.html")
+
+        db = get_db()
+        placeholder = get_placeholder()
+
+        # Allow students to submit either email or enrollment number
+        student = None
+        if "@" in identifier:
+            student = db.execute(
+                f"SELECT id, email FROM students WHERE LOWER(email) = LOWER({placeholder})",
+                (identifier,),
+            ).fetchone()
+        else:
+            student = db.execute(
+                f"SELECT id, email FROM students WHERE LOWER(enrollment) = LOWER({placeholder})",
+                (identifier,),
+            ).fetchone()
+
+        user = None
+        if student:
+            user = db.execute(
+                f"SELECT id FROM users WHERE role = {placeholder} AND student_id = {placeholder}",
+                ("student", student["id"]),
+            ).fetchone()
+
+        # Only send reset link if we found a user and the student has an email address configured
+        if user and student and student.get("email"):
+            token = generate_reset_token(user["id"])
+            reset_link = url_for("reset_password", token=token, _external=True)
+            body = (
+                "Hello,\n\n"
+                "We received a request to reset your password. Use the link below to set a new password:\n\n"
+                f"{reset_link}\n\n"
+                "If you did not request a reset, you can ignore this email.\n\n"
+                "Regards,\n"
+                "Attendance Management Team"
+            )
+            send_email(
+                subject="Reset your password",
+                recipient=student["email"],
+                body=body,
+            )
+        elif student and (not student.get("email") or not student.get("email").strip()):
+            # Found student but no email configured
+            flash("Your account does not have an email address on file. Contact the administrator to reset your password.", "error")
+            db.close()
+            return render_template("forgot_password.html")
+
+        db.close()
+        flash("If this account exists and has an email, a reset link has been sent.", "success")
+
+    return render_template("forgot_password.html")
+
+
+@app.route("/reset-password/<token>", methods=["GET", "POST"])
+@app.route("/reset_password/<token>", methods=["GET", "POST"])
+def reset_password(token):
+    user_id, error = verify_reset_token(token)
+    if error:
+        flash("Reset link is invalid or expired. Please request a new one.", "error")
+        return redirect(url_for("forgot_password"))
+
+    db = get_db()
+    placeholder = get_placeholder()
+    user = db.execute(
+        f"SELECT id, role FROM users WHERE id = {placeholder}",
+        (user_id,),
+    ).fetchone()
+
+    if not user or user["role"] != "student":
+        db.close()
+        flash("Reset link is invalid or expired. Please request a new one.", "error")
+        return redirect(url_for("forgot_password"))
+
+    if request.method == "POST":
+        password = request.form.get("password", "").strip()
+        confirm_password = request.form.get("confirm_password", "").strip()
+
+        if not password or not confirm_password:
+            flash("Please enter and confirm your new password.", "error")
+        elif password != confirm_password:
+            flash("Passwords do not match.", "error")
+        else:
+            db.execute(
+                f"UPDATE users SET password = {placeholder} WHERE id = {placeholder}",
+                (generate_password_hash(password), user_id),
+            )
+            db.commit()
+            db.close()
+            flash("Password updated successfully. Please log in.", "success")
+            return redirect(url_for("student_login"))
+
+    db.close()
+    return render_template("reset_password.html")
+
+
+@app.route('/admin/check-smtp')
+@login_required
+def admin_check_smtp():
+    # Only admins may run this check
+    if session.get('role') != 'admin':
+        abort(403)
+
+    host = app.config.get('MAIL_SERVER')
+    port = int(app.config.get('MAIL_PORT', 587))
+    timeout = 8
     try:
+        s = socket.create_connection((host, port), timeout=timeout)
+        s.close()
+        return jsonify({'ok': True, 'server': host, 'port': port, 'message': 'Connection successful'})
+    except Exception as e:
+        return jsonify({'ok': False, 'server': host, 'port': port, 'error': str(e)})
+with app.app_context():
+    try:
+        print(f"Database path: {app.config['DATABASE']}")
+        print(f"Database file exists: {os.path.exists(app.config['DATABASE'])}")
+        if os.path.exists(app.config['DATABASE']):
+            db_size = os.path.getsize(app.config['DATABASE'])
+            print(f"Database file size: {db_size} bytes")
         init_db()
-        print("Database initialization successful.")
+        print("Database initialized successfully")
     except Exception as e:
         print(f"Database initialization failed: {e}")
-
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000, debug=True)
+    app.run(host="0.0.0.0", port=10000)
