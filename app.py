@@ -16,10 +16,10 @@ from functools import wraps
 from werkzeug.security import check_password_hash, generate_password_hash
 from werkzeug.exceptions import HTTPException
 from werkzeug.utils import secure_filename
-# from flask_socketio import SocketIO, emit, join_room
+from flask_socketio import SocketIO, emit, join_room
 
-# # Initialize SocketIO
-# socketio = SocketIO(app, cors_allowed_origins="*")
+# Initialize SocketIO
+socketio = SocketIO(app, cors_allowed_origins="*")
 
 app = Flask(__name__)
 # Email sending is handled by the `send_email` helper defined later in the file.
@@ -2393,67 +2393,66 @@ def report_email():
     return redirect(url_for("attendance_report", **redirect_params))
 
 
-# # SocketIO Event Handlers for Real-time Updates (disabled for Render)
-# @socketio.on('connect')
-# def handle_connect():
-#     print('Client connected')
-#     emit('status', {'message': 'Connected to real-time attendance system'})
+# SocketIO Event Handlers for Real-time Updates
+@socketio.on('connect')
+def handle_connect():
+    print("Client connected")
+    emit('status', {'message': 'Connected to real-time system'})
 
-# @socketio.on('disconnect')
-# def handle_disconnect():
-#     print('Client disconnected')
+@socketio.on('disconnect')
+def handle_disconnect():
+    print("Client disconnected")
 
-# @socketio.on('join_room')
-# def handle_join_room(data):
-#     """Join a room for real-time updates"""
-#     room = data.get('room', 'general')
-#     join_room(room)
-#     emit('status', {'message': f'Joined room: {room}'})
+@socketio.on('join_room')
+def handle_join_room(data):
+    room = data.get('room')
+    if room:
+        join_room(room)
+        print(f"Client joined room: {room}")
 
-# @socketio.on('request_stats')
-# def handle_request_stats():
-#     """Send current attendance statistics to client"""
-#     db = get_db()
-#     try:
-#         # Get overall attendance stats
-#         total_records = db.execute("SELECT COUNT(*) FROM attendance").fetchone()[0]
-#         present_count = db.execute("SELECT COUNT(*) FROM attendance WHERE status = 'Present'").fetchone()[0]
-#         overall_percentage = (present_count / total_records * 100) if total_records > 0 else 0
+@socketio.on('request_stats')
+def handle_request_stats():
+    """Fetch and emit latest stats to the dashboard."""
+    db = None
+    try:
+        db = get_db()
+        stats = {
+            'total_records': db.execute("SELECT COUNT(*) FROM attendance").fetchone()[0],
+            'overall_percentage': 0,
+            'recent_activity': []
+        }
+        
+        total = db.execute("SELECT COUNT(*) FROM attendance").fetchone()[0]
+        present = db.execute("SELECT COUNT(*) FROM attendance WHERE status='Present'").fetchone()[0]
+        if total > 0:
+            stats['overall_percentage'] = round((present / total) * 100, 1)
+            
+        # Get last 5 activity items
+        activity_rows = db.execute("""
+            SELECT a.date, s.name as student_name, sub.name as subject_name, a.status, b.name as branch_name
+            FROM attendance a
+            JOIN students s ON a.student_id = s.id
+            JOIN subjects sub ON a.subject_id = sub.id
+            JOIN branches b ON a.branch_id = b.id
+            ORDER BY a.id DESC LIMIT 5
+        """).fetchall()
+        
+        stats['recent_activity'] = [
+            {
+                'date': str(r['date']),
+                'student': r['student_name'],
+                'subject': r['subject_name'],
+                'status': r['status'],
+                'branch': r['branch_name']
+            } for r in activity_rows
+        ]
+        
+        emit('stats_update', stats)
+    except Exception as e:
+        print(f"SocketIO Stats Error: {e}")
+    finally:
+        if db: db.close()
 
-#         # Get today's attendance
-#         today = date.today().isoformat()
-#         today_count = db.execute("SELECT COUNT(*) FROM attendance WHERE date = ?", (today,)).fetchone()[0]
-
-#         # Get recent activity (last 5 attendance records)
-#         recent_activity = db.execute("""
-#             SELECT attendance.date, students.name as student_name, subjects.name as subject_name,
-#                    attendance.status, branches.name as branch_name
-#             FROM attendance
-#             JOIN students ON attendance.student_id = students.id
-#             JOIN subjects ON attendance.subject_id = subjects.id
-#             JOIN branches ON attendance.branch_id = branches.id
-#             ORDER BY attendance.id DESC LIMIT 5
-#         """).fetchall()
-
-#         stats_data = {
-#             'overall_percentage': round(overall_percentage, 1),
-#             'total_records': total_records,
-#             'today_count': today_count,
-#             'recent_activity': [{
-#                 'date': activity['date'],
-#                 'student': activity['student_name'],
-#                 'subject': activity['subject_name'],
-#                 'status': activity['status'],
-#                 'branch': activity['branch_name']
-#             } for activity in recent_activity]
-#         }
-
-#         emit('stats_update', stats_data)
-#     except Exception as e:
-#         print(f"Error getting stats: {e}")
-#         emit('error', {'message': 'Failed to load statistics'})
-#     finally:
-#         db.close()
 
 @app.route("/forgot-password", methods=["GET", "POST"])
 @app.route("/forgot_password", methods=["GET", "POST"])
@@ -2770,4 +2769,4 @@ def not_found_error(error):
     return "<h1>404 Not Found</h1><p>The page you requested does not exist.</p>", 404
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000)
+    socketio.run(app, host="0.0.0.0", port=10000, debug=True)
