@@ -1414,50 +1414,73 @@ def upload_students():
 @app.route("/upload_students_csv", methods=["GET", "POST"])
 @login_required
 def upload_students_csv():
-    """Simple CSV upload for students with automatic login creation."""
+    """Smart CSV upload for students with fuzzy column mapping."""
     if request.method == "POST":
         file = request.files.get("file")
         if not file or not file.filename.endswith(".csv"):
             flash("Please upload a valid CSV file.", "error")
             return redirect(url_for("upload_students_csv"))
 
+        db = None
         try:
             import pandas as pd
-            # Use pandas to read CSV for better handling of delimiters and whitespace
             df = pd.read_csv(file)
             
-            # Standardize column names to lowercase
+            if df.empty:
+                flash("The uploaded CSV file is empty.", "error")
+                return redirect(url_for("upload_students_csv"))
+
+            # Normalize column names for fuzzy matching
             df.columns = [str(c).strip().lower() for c in df.columns]
             
+            # Map common variations to standard names
+            mapping = {
+                'name': 'name', 'student name': 'name', 'fullname': 'name',
+                'enrollment': 'enrollment', 'enrollment no': 'enrollment', 'roll no': 'enrollment',
+                'email': 'email', 'mail id': 'email', 'email id': 'email',
+                'branch_id': 'branch_id', 'branch id': 'branch_id', 'branch': 'branch_id'
+            }
+            
+            # Rename columns based on mapping
+            new_cols = []
+            for col in df.columns:
+                mapped = False
+                for alias, target in mapping.items():
+                    if alias in col: # Check if alias is part of the header
+                        new_cols.append(target)
+                        mapped = True
+                        break
+                if not mapped:
+                    new_cols.append(col)
+            df.columns = new_cols
+
             required = {"name", "enrollment", "email", "branch_id"}
-            if not required.issubset(set(df.columns)):
-                flash(f"CSV must contain: {', '.join(required)}", "error")
+            missing = required - set(df.columns)
+            if missing:
+                flash(f"Missing required columns: {', '.join(missing)}. Please ensure your CSV headers are clear.", "error")
                 return redirect(url_for("upload_students_csv"))
 
             db = get_db()
             placeholder = get_placeholder()
             is_postgres = str(app.config.get("DATABASE", "")).startswith("postgres")
-            
-            inserted = 0
-            skipped = 0
+            inserted, skipped = 0, 0
 
             for _, row in df.iterrows():
-                name = str(row["name"]).strip()
-                enrollment = str(row["enrollment"]).strip()
-                email = str(row["email"]).strip()
-                branch_id = str(row["branch_id"]).strip()
+                name = str(row.get("name", "")).strip()
+                enrollment = str(row.get("enrollment", "")).strip()
+                email = str(row.get("email", "")).strip()
+                branch_id = str(row.get("branch_id", "")).strip()
 
-                if not name or not enrollment or not branch_id:
+                if not name or not enrollment or not branch_id or branch_id.lower() == "nan":
                     continue
 
-                # 1) Duplicate Check
+                # Duplicate Check
                 existing = db.execute(f"SELECT id FROM students WHERE enrollment = {placeholder}", (enrollment,)).fetchone()
                 if existing:
                     skipped += 1
                     continue
 
                 try:
-                    # 2) Insert Student
                     if is_postgres:
                         cur = db.execute(
                             f"INSERT INTO students (name, enrollment, email, branch_id) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}) RETURNING id",
@@ -1466,32 +1489,34 @@ def upload_students_csv():
                         student_id = cur.fetchone()[0]
                     else:
                         cur = db.execute(
-                            f"INSERT INTO students (name, enrollment, email, branch_id) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder})", (name, enrollment, email or None, branch_id)
+                            f"INSERT INTO students (name, enrollment, email, branch_id) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder})", 
+                            (name, enrollment, email or None, branch_id)
                         )
                         student_id = cur.lastrowid
 
-                    # 3) Create User Account (Password = last 4 digits of enrollment)
-                    password_plain = enrollment[-4:] if len(enrollment) >= 4 else enrollment
-                    password_hash = generate_password_hash(password_plain)
-                    
+                    # Create account: Password = last 4 digits
+                    pwd_plain = enrollment[-4:] if len(enrollment) >= 4 else enrollment
                     db.execute(
                         f"INSERT INTO users (username, password, role, student_id) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder})",
-                        (enrollment, password_hash, "student", student_id)
+                        (enrollment, generate_password_hash(pwd_plain), "student", student_id)
                     )
                     inserted += 1
                 except Exception as e:
-                    print(f"[CSV Upload Error] Row {enrollment}: {repr(e)}")
+                    print(f"[CSV Row Error] {enrollment}: {repr(e)}")
                     continue
 
             db.commit()
-            db.close()
-            flash(f"Upload complete! {inserted} students added, {skipped} skipped.", "success")
+            flash(f"Successfully uploaded {inserted} students. {skipped} students were skipped (already exist).", "success")
             return redirect(url_for("students"))
 
         except Exception as e:
-            print(f"[CSV CRITICAL] {repr(e)}")
-            flash("Failed to process CSV file. Ensure it is correctly formatted.", "error")
+            print(f"[CSV Critical] {repr(e)}")
+            flash("An error occurred while processing the CSV file.", "error")
             return redirect(url_for("upload_students_csv"))
+        finally:
+            if db:
+                try: db.close()
+                except: pass
 
     return render_template("upload_students_csv.html")
 
