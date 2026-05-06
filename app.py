@@ -1267,7 +1267,7 @@ def upload_students():
             found_header = False
             for i, row in all_data.iterrows():
                 row_str = [str(cell).lower() for cell in row]
-                if any(k in " ".join(row_str) for k in ["name", "enrollment", "h.t.no", "mail", "branch"]):
+                if any(k in " ".join(row_str) for k in ["name", "enrollment", "h.t.no", "mail", "branch", "section"]):
                     header_idx = i
                     found_header = True
                     break
@@ -1296,7 +1296,8 @@ def upload_students():
             'email id': 'email',
             'branch_id': 'branch_id',
             'branch id': 'branch_id',
-            'branch': 'branch_id'
+            'branch': 'branch_id',
+            'section': 'branch_id'
         }
 
         # Normalize existing columns and rename based on mapping
@@ -1317,7 +1318,7 @@ def upload_students():
         missing = required - set(df.columns)
         
         if missing:
-            flash(f"Missing columns: {', '.join(sorted(missing))}. We searched for keywords like 'Name', 'Enrollment', 'Mail', and 'Branch'.", "error")
+            flash(f"Missing columns: {', '.join(sorted(missing))}. We searched for keywords like 'Name', 'Enrollment', 'Mail', 'Branch', and 'Section'.", "error")
             return redirect(url_for("upload_students"))
 
         db = get_db()
@@ -1326,23 +1327,44 @@ def upload_students():
         inserted = 0
         skipped = 0
         errors = 0
+
+        # Pre-fetch branches for name matching
+        branches_map = {}
+        for b in db.execute("SELECT id, name FROM branches").fetchall():
+            # Support both name and ID lookups
+            branches_map[str(row_get(b, "name")).lower()] = row_get(b, "id")
+            branches_map[str(row_get(b, "id"))] = row_get(b, "id")
+
         try:
             for _, row in df.iterrows():
                 name = str(row.get("name", "")).strip()
                 enrollment = str(row.get("enrollment", "")).strip()
                 email = str(row.get("email", "")).strip()
-                branch_id_raw = row.get("branch_id")
+                branch_id_raw = str(row.get("branch_id", "")).strip()
 
                 if not name or not enrollment:
                     errors += 1
                     continue
 
-                if pd.isna(branch_id_raw):
+                if not branch_id_raw or branch_id_raw.lower() == "nan":
                     errors += 1
                     continue
-                try:
-                    branch_id = int(branch_id_raw)
-                except (TypeError, ValueError):
+
+                # Try exact match first, then partial match for branch name
+                branch_id = None
+                branch_id_raw_lower = branch_id_raw.lower()
+                
+                if branch_id_raw_lower in branches_map:
+                    branch_id = branches_map[branch_id_raw_lower]
+                else:
+                    # Partial match: if "CSM" is in "I CSM-B"
+                    for b_name, b_id in branches_map.items():
+                        if b_name and b_name in branch_id_raw_lower:
+                            branch_id = b_id
+                            break
+                
+                if branch_id is None:
+                    print(f"[upload_students] Branch not found for: {branch_id_raw}")
                     errors += 1
                     continue
 
