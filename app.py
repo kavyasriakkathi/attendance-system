@@ -1328,14 +1328,18 @@ def upload_students():
         skipped = 0
         errors = 0
 
-        # Pre-fetch branches for name matching
-        branches_map = {}
-        for b in db.execute("SELECT id, name FROM branches").fetchall():
-            # Support both name and ID lookups
-            branches_map[str(row_get(b, "name")).lower()] = row_get(b, "id")
-            branches_map[str(row_get(b, "id"))] = row_get(b, "id")
-
         try:
+            # Pre-fetch branches for name matching
+            branches_map = {}
+            for b in db.execute("SELECT id, name FROM branches").fetchall():
+                # Support both name and ID lookups
+                b_name = row_get(b, "name")
+                b_id = row_get(b, "id")
+                if b_name is not None:
+                    branches_map[str(b_name).lower()] = b_id
+                if b_id is not None:
+                    branches_map[str(b_id)] = b_id
+
             for _, row in df.iterrows():
                 name = str(row.get("name", "")).strip()
                 enrollment = str(row.get("enrollment", "")).strip()
