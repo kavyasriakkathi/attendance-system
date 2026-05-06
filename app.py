@@ -1803,160 +1803,74 @@ def student_dashboard_by_id(student_id):
     )
 
 
-@app.route("/attendance", methods=["GET", "POST"])
+@app.route("/mark_attendance", methods=["GET", "POST"])
 @login_required
 def mark_attendance():
-    db = get_db()
-    placeholder = get_placeholder()
-    branches = db.execute(f"SELECT * FROM branches ORDER BY name").fetchall()
-    branch_id = request.args.get("branch_id") or ""
-    subject_id = request.args.get("subject_id") or ""
-    selected_date = request.args.get("date") or date.today().isoformat()
-    today_date = date.today()
+    """Clean, high-performance route to mark student attendance."""
+    db = None
     try:
-        selected_date_obj = date.fromisoformat(selected_date)
-    except ValueError:
-        selected_date_obj = today_date
+        db = get_db()
+        placeholder = get_placeholder()
+        today_str = date.today().isoformat()
+        
+        # 1. Fetch initial selection data
+        branches = db.execute("SELECT id, name FROM branches ORDER BY name").fetchall()
+        branch_id = request.args.get("branch_id")
+        subject_id = request.args.get("subject_id")
+        selected_date = request.args.get("date") or today_str
 
-    if selected_date_obj > today_date:
-        selected_date_obj = today_date
-
-    selected_date = selected_date_obj.isoformat()
-    subjects = []
-    students = []
-    existing_dates = []
-
-    # Calculate previous and next dates
-    current_date_obj = selected_date_obj
-    prev_date = (current_date_obj - timedelta(days=1)).isoformat()
-    next_date = (current_date_obj + timedelta(days=1)).isoformat()
-
-    if branch_id:
-        subjects = db.execute(
-            f"SELECT * FROM subjects WHERE branch_id = {placeholder} ORDER BY name", (branch_id,)
-        ).fetchall()
-    if branch_id and subject_id:
-        students = db.execute(
-            f"SELECT * FROM students WHERE branch_id = {placeholder} ORDER BY name", (branch_id,)
-        ).fetchall()
-        # Get existing attendance dates for this branch/subject
-        existing_dates = db.execute(
-            f"SELECT date, COUNT(*) as count FROM attendance WHERE branch_id = {placeholder} AND subject_id = {placeholder} GROUP BY date ORDER BY date DESC",
-            (branch_id, subject_id)
-        ).fetchall()
-
-    if request.method == "POST":
-        branch_id = request.form.get("branch_id") or ""
-        subject_id = request.form.get("subject_id") or ""
-        selected_date = request.form.get("date") or date.today().isoformat()
-        try:
-            selected_date_obj = date.fromisoformat(selected_date)
-        except ValueError:
-            selected_date_obj = today_date
-
-        if selected_date_obj > today_date:
-            selected_date_obj = today_date
-
-        selected_date = selected_date_obj.isoformat()
-        student_ids = request.form.getlist("student_id")
-
-        if branch_id and subject_id and student_ids:
-            saved_student_ids = []
-            try:
-                for student_id in student_ids:
-                    status = request.form.get(f"status_{student_id}", "Absent")
-                    note = request.form.get(f"note_{student_id}", "")
-                    existing = db.execute(
-                        f"SELECT id FROM attendance WHERE student_id = {placeholder} AND subject_id = {placeholder} AND date = {placeholder}",
-                        (student_id, subject_id, selected_date),
-                    ).fetchone()
-                    if existing:
-                        db.execute(
-                            f"UPDATE attendance SET status = {placeholder}, note = {placeholder} WHERE id = {placeholder}",
-                            (status, note, existing["id"]),
-                        )
-                    else:
-                        db.execute(
-                            f"INSERT INTO attendance (student_id, branch_id, subject_id, date, status, note) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})",
-                            (student_id, branch_id, subject_id, selected_date, status, note),
-                        )
-                    if student_id.isdigit():
-                        saved_student_ids.append(int(student_id))
-                db.commit()
-                print(f"Committed attendance for {len(saved_student_ids)} students on {selected_date}")
-                
-                # Verify the data was saved
-                count = db.execute(
-                    f"SELECT COUNT(*) FROM attendance WHERE date = {placeholder}",
-                    (selected_date,)
-                ).fetchone()[0]
-                print(f"Total attendance records for {selected_date}: {count}")
-
-                flash("Attendance saved successfully.", "success")
-                emailed_students = notify_low_attendance(db, saved_student_ids)
-                session["attendance_email_summary"] = emailed_students
-            except Exception as e:
-                selected_date_obj = date.fromisoformat(selected_date)
-            except ValueError:
-                selected_date_obj = today_date
-
-            if selected_date_obj > today_date:
-                selected_date_obj = today_date
-
-            selected_date = selected_date_obj.isoformat()
+        # 2. Handle POST (Saving Attendance)
+        if request.method == "POST":
+            # Re-read form data to avoid stale context
+            branch_id = request.form.get("branch_id")
+            subject_id = request.form.get("subject_id")
+            selected_date = request.form.get("date") or today_str
             student_ids = request.form.getlist("student_id")
-
+            
             if branch_id and subject_id and student_ids:
-                saved_student_ids = []
                 try:
+                    saved_ids = []
                     for student_id in student_ids:
                         status = request.form.get(f"status_{student_id}", "Absent")
                         note = request.form.get(f"note_{student_id}", "")
-                        existing = db.execute(
-                            f"SELECT id FROM attendance WHERE student_id = {placeholder} AND subject_id = {placeholder} AND date = {placeholder}",
-                            (student_id, subject_id, selected_date),
-                        ).fetchone()
-                        if existing:
-                            db.execute(
-                                f"UPDATE attendance SET status = {placeholder}, note = {placeholder} WHERE id = {placeholder}",
-                                (status, note, existing["id"]),
-                            )
+                        
+                        # Use ON CONFLICT for PostgreSQL stability, or manual check for SQLite
+                        is_pg = str(app.config.get("DATABASE", "")).startswith("postgres")
+                        if is_pg:
+                            db.execute(f"""
+                                INSERT INTO attendance (student_id, branch_id, subject_id, date, status, note)
+                                VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})
+                                ON CONFLICT (student_id, subject_id, date) DO UPDATE 
+                                SET status = EXCLUDED.status, note = EXCLUDED.note
+                            """, (student_id, branch_id, subject_id, selected_date, status, note))
                         else:
-                            db.execute(
-                                f"INSERT INTO attendance (student_id, branch_id, subject_id, date, status, note) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})",
-                                (student_id, branch_id, subject_id, selected_date, status, note),
-                            )
-                        if student_id.isdigit():
-                            saved_student_ids.append(int(student_id))
-                    db.commit()
+                            # SQLite manual update
+                            db.execute(f"DELETE FROM attendance WHERE student_id={placeholder} AND subject_id={placeholder} AND date={placeholder}", (student_id, subject_id, selected_date))
+                            db.execute(f"INSERT INTO attendance (student_id, branch_id, subject_id, date, status, note) VALUES ({placeholder},{placeholder},{placeholder},{placeholder},{placeholder},{placeholder})", (student_id, branch_id, subject_id, selected_date, status, note))
+                        
+                        if str(student_id).isdigit():
+                            saved_ids.append(int(student_id))
                     
+                    db.commit()
                     flash("Attendance saved successfully.", "success")
-                    emailed_students = notify_low_attendance(db, saved_student_ids)
-                    session["attendance_email_summary"] = emailed_students
+                    notify_low_attendance(db, saved_ids) # Background notification
+                    return redirect(url_for("attendance_success", branch_id=branch_id, subject_id=subject_id, date=selected_date))
                 except Exception as e:
                     db.rollback()
-                    print(f"Error saving attendance: {e}")
-                    flash("Error saving attendance. Please try again.", "error")
-                    saved_student_ids = []
+                    print(f"[mark_attendance] Save Error: {repr(e)}")
+                    flash("Failed to save attendance. Please check your data.", "error")
 
-                return redirect(
-                    url_for(
-                        "attendance_success",
-                        branch_id=branch_id,
-                        subject_id=subject_id,
-                        date=selected_date,
-                    )
-                )
-            else:
-                flash("Please select a branch, subject, and mark attendance for students.", "error")
+        # 3. Fetch data for display
+        subjects = []
+        if branch_id:
+            subjects = db.execute(f"SELECT id, name FROM subjects WHERE branch_id = {placeholder} ORDER BY name", (branch_id,)).fetchall()
 
+        students = []
         attendance_map = {}
         if branch_id and subject_id:
-            rows = db.execute(
-                f"SELECT student_id, status, note FROM attendance WHERE subject_id = {placeholder} AND date = {placeholder}",
-                (subject_id, selected_date),
-            ).fetchall()
-            attendance_map = {str(row["student_id"]): row for row in rows}
+            students = db.execute(f"SELECT id, name, enrollment FROM students WHERE branch_id = {placeholder} ORDER BY name", (branch_id,)).fetchall()
+            att_rows = db.execute(f"SELECT student_id, status, note FROM attendance WHERE subject_id = {placeholder} AND date = {placeholder}", (subject_id, selected_date)).fetchall()
+            attendance_map = {str(row_get(r, "student_id")): r for r in att_rows}
 
         return render_template(
             "mark_attendance.html",
@@ -1967,14 +1881,11 @@ def mark_attendance():
             subject_id=subject_id,
             selected_date=selected_date,
             attendance_map=attendance_map,
-            existing_dates=existing_dates,
-            prev_date=prev_date,
-            next_date=next_date,
-            today_date=today_date.isoformat(),
+            today_date=today_str
         )
     except Exception as e:
-        print(f"[mark_attendance] ERROR: {repr(e)}")
-        flash("Attendance marking is temporarily unavailable.", "error")
+        print(f"[mark_attendance] General Error: {repr(e)}")
+        flash("Unable to load attendance page.", "error")
         return redirect(url_for("dashboard"))
     finally:
         if db:
