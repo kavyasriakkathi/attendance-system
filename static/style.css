@@ -86,6 +86,68 @@ nav a:hover {
     color: var(--primary-color);
 }
 
+nav a.nav-link {
+    position: relative;
+    border: 1px solid transparent;
+    outline: 0 solid transparent;
+    outline-offset: 0;
+}
+
+nav a.nav-link::after {
+    content: '';
+    position: absolute;
+    left: 14px;
+    right: 14px;
+    bottom: 6px;
+    height: 2px;
+    background: currentColor;
+    opacity: 0.0;
+    transform: scaleX(0);
+    transform-origin: left;
+    transition: transform 0.3s ease, opacity 0.3s ease;
+}
+
+nav a.nav-link:hover::after {
+    opacity: 0.6;
+    transform: scaleX(1);
+}
+
+nav a.nav-link.is-active {
+    background: var(--primary-color);
+    color: white;
+    border-color: var(--primary-color);
+}
+
+nav a.nav-link.is-active::after {
+    opacity: 0.9;
+    transform: scaleX(1);
+}
+
+nav a.nav-link.just-clicked {
+    animation: navClickPulse 0.45s ease-in-out;
+}
+
+@keyframes navClickPulse {
+    0% {
+        outline-width: 0;
+        outline-color: var(--primary-color);
+        outline-style: solid;
+        outline-offset: 0;
+    }
+    50% {
+        outline-width: 6px;
+        outline-color: var(--primary-color);
+        outline-style: solid;
+        outline-offset: 2px;
+    }
+    100% {
+        outline-width: 0;
+        outline-color: var(--primary-color);
+        outline-style: solid;
+        outline-offset: 0;
+    }
+}
+
 nav a.logout {
     background: #fdecea;
     color: var(--danger-color);

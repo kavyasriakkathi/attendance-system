@@ -21,17 +21,19 @@
         {% if session.username and not hide_nav %}
         <nav>
             {% if session.role == 'student' %}
-            <a href="{{ url_for('student_dashboard') }}"><i class="fa-solid fa-user-graduate"></i> Dashboard</a>
+            <a class="nav-link" href="{{ url_for('student_dashboard') }}"><i class="fa-solid fa-user-graduate"></i> Dashboard</a>
             <a class="logout" href="{{ url_for('logout') }}"><i class="fa-solid fa-right-from-bracket"></i></a>
             {% else %}
-            <a href="{{ url_for('dashboard') }}"><i class="fa-solid fa-chart-line"></i> Dashboard</a>
-            <a href="{{ url_for('branches') }}"><i class="fa-solid fa-building"></i> Depts</a>
-            <a href="{{ url_for('mark_attendance') }}"><i class="fa-solid fa-calendar-check"></i> Attendance</a>
-            <a href="{{ url_for('attendance_report') }}"><i class="fa-solid fa-file-invoice"></i> Reports</a>
+            <a class="nav-link" href="{{ url_for('dashboard') }}"><i class="fa-solid fa-chart-line"></i> Dashboard</a>
+            <a class="nav-link" href="{{ url_for('students') }}"><i class="fa-solid fa-users"></i> Students</a>
+            <a class="nav-link" href="{{ url_for('branches') }}"><i class="fa-solid fa-building"></i> Depts</a>
+            <a class="nav-link" href="{{ url_for('mark_attendance') }}"><i class="fa-solid fa-calendar-check"></i> Attendance</a>
+            <a class="nav-link" href="{{ url_for('department_dashboard') }}"><i class="fa-solid fa-chart-pie"></i> Summary</a>
+            <a class="nav-link" href="{{ url_for('attendance_report') }}"><i class="fa-solid fa-file-invoice"></i> Reports</a>
             {% if session.role == 'admin' %}
-            <a href="{{ url_for('upload_students') }}"><i class="fa-solid fa-file-arrow-up"></i> Upload Students</a>
+            <a class="nav-link" href="{{ url_for('upload_students') }}"><i class="fa-solid fa-file-arrow-up"></i> Upload Students</a>
             {% endif %}
-            <a href="{{ url_for('settings') }}"><i class="fa-solid fa-gear"></i> Settings</a>
+            <a class="nav-link" href="{{ url_for('settings') }}"><i class="fa-solid fa-gear"></i> Settings</a>
             <a class="logout" href="{{ url_for('logout') }}"><i class="fa-solid fa-right-from-bracket"></i></a>
             {% endif %}
         </nav>
@@ -49,5 +51,94 @@
         {% endwith %}
         {% block content %}{% endblock %}
     </main>
+
+    <script>
+        (function () {
+            const nav = document.querySelector('header nav');
+            if (!nav) return;
+
+            const links = Array.from(nav.querySelectorAll('a.nav-link'));
+            if (!links.length) return;
+
+            const currentPath = window.location.pathname || '/';
+
+            const normalizePath = (path) => {
+                if (!path) return '/';
+                const trimmed = path.trim();
+                if (trimmed.length > 1 && trimmed.endsWith('/')) return trimmed.slice(0, -1);
+                return trimmed;
+            };
+
+            const isPrefixMatch = (candidate, full) => {
+                const c = normalizePath(candidate);
+                const f = normalizePath(full);
+                if (c === '/') return f === '/';
+                return f === c || f.startsWith(c + '/');
+            };
+
+            const pickActiveLink = () => {
+                let best = null;
+                for (const a of links) {
+                    let path;
+                    try {
+                        path = new URL(a.href, window.location.href).pathname;
+                    } catch {
+                        continue;
+                    }
+
+                    if (!isPrefixMatch(path, currentPath)) continue;
+                    if (!best) {
+                        best = a;
+                        continue;
+                    }
+                    const bestPath = new URL(best.href, window.location.href).pathname;
+                    if (normalizePath(path).length > normalizePath(bestPath).length) {
+                        best = a;
+                    }
+                }
+                return best;
+            };
+
+            const setActive = () => {
+                links.forEach((a) => a.classList.remove('is-active'));
+                const active = pickActiveLink();
+                if (active) active.classList.add('is-active');
+            };
+
+            // Persist a short click effect across navigation.
+            links.forEach((a) => {
+                a.addEventListener('click', () => {
+                    try {
+                        const hrefPath = new URL(a.href, window.location.href).pathname;
+                        sessionStorage.setItem('navClickedPath', normalizePath(hrefPath));
+                    } catch {
+                        // ignore
+                    }
+                });
+            });
+
+            setActive();
+
+            try {
+                const clickedPath = sessionStorage.getItem('navClickedPath');
+                if (clickedPath) {
+                    sessionStorage.removeItem('navClickedPath');
+                    const target = links.find((a) => {
+                        try {
+                            return normalizePath(new URL(a.href, window.location.href).pathname) === clickedPath;
+                        } catch {
+                            return false;
+                        }
+                    });
+                    if (target) {
+                        target.classList.add('just-clicked');
+                        window.setTimeout(() => target.classList.remove('just-clicked'), 500);
+                    }
+                }
+            } catch {
+                // ignore
+            }
+        })();
+    </script>
 </body>
 </html>
