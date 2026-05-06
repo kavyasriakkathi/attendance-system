@@ -1,0 +1,25 @@
+{% extends "layout.html" %}
+
+{% block content %}
+<div class="card">
+    <h1>Upload Students (Excel)</h1>
+    <p>Upload an Excel (.xlsx) file with columns: Name, Enrollment, Email, Branch_ID.</p>
+
+    <form method="post" enctype="multipart/form-data" class="form-row wrap" style="align-items: flex-end;">
+        <div style="min-width: 260px;">
+            <label for="file">Excel file (.xlsx)</label>
+            <input type="file" id="file" name="file" accept=".xlsx" required>
+        </div>
+        <button type="submit" class="button">Upload</button>
+    </form>
+
+    <div style="margin-top: 20px; font-size: 0.95rem; color: var(--text-secondary);">
+        <p>Tips:</p>
+        <ul style="margin: 8px 0 0 18px;">
+            <li>Branch_ID must match an existing branch in the database.</li>
+            <li>Enrollment must be unique; duplicates are skipped.</li>
+            <li>Passwords are set to the last 4 characters of the enrollment.</li>
+        </ul>
+    </div>
+</div>
+{% endblock %}

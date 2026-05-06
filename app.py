@@ -15,6 +15,7 @@ from flask import Flask, abort, redirect, render_template, request, session, url
 from functools import wraps
 from werkzeug.security import check_password_hash, generate_password_hash
 from werkzeug.exceptions import HTTPException
+from werkzeug.utils import secure_filename
 # from flask_socketio import SocketIO, emit, join_room
 
 # # Initialize SocketIO
@@ -1205,6 +1206,133 @@ def subjects():
     ).fetchall()
     db.close()
     return render_template("subjects.html", subjects=subjects, branches=branches)
+
+
+@app.route("/upload_students", methods=["GET", "POST"])
+@login_required
+def upload_students():
+    if session.get("role") != "admin":
+        return redirect(url_for("dashboard"))
+
+    if request.method == "POST":
+        file = request.files.get("file")
+        if not file or not file.filename:
+            flash("Please choose an Excel (.xlsx) file to upload.", "error")
+            return redirect(url_for("upload_students"))
+
+        filename = secure_filename(file.filename)
+        if not filename.lower().endswith(".xlsx"):
+            flash("Only .xlsx files are supported.", "error")
+            return redirect(url_for("upload_students"))
+
+        try:
+            import pandas as pd
+        except Exception:
+            flash("pandas is not installed. Please add pandas and openpyxl to requirements.", "error")
+            return redirect(url_for("upload_students"))
+
+        try:
+            df = pd.read_excel(file)
+        except Exception as e:
+            print(f"[upload_students] Failed to read Excel: {repr(e)}")
+            flash("Failed to read the Excel file. Please check the format.", "error")
+            return redirect(url_for("upload_students"))
+
+        df.columns = [str(c).strip().lower() for c in df.columns]
+        required = {"name", "enrollment", "email", "branch_id"}
+        missing = required - set(df.columns)
+        if missing:
+            flash(f"Missing columns: {', '.join(sorted(missing))}", "error")
+            return redirect(url_for("upload_students"))
+
+        db = get_db()
+        placeholder = get_placeholder()
+        is_postgres = str(app.config.get("DATABASE", "")).startswith("postgres")
+        inserted = 0
+        skipped = 0
+        errors = 0
+        try:
+            for _, row in df.iterrows():
+                name = str(row.get("name", "")).strip()
+                enrollment = str(row.get("enrollment", "")).strip()
+                email = str(row.get("email", "")).strip()
+                branch_id_raw = row.get("branch_id")
+
+                if not name or not enrollment:
+                    errors += 1
+                    continue
+
+                if pd.isna(branch_id_raw):
+                    errors += 1
+                    continue
+                try:
+                    branch_id = int(branch_id_raw)
+                except (TypeError, ValueError):
+                    errors += 1
+                    continue
+
+                email_value = email or None
+
+                if is_postgres:
+                    student_row = db.execute(
+                        f"""
+                        INSERT INTO students (name, enrollment, email, branch_id)
+                        VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder})
+                        ON CONFLICT (enrollment) DO NOTHING
+                        RETURNING id
+                        """,
+                        (name, enrollment, email_value, branch_id),
+                    ).fetchone()
+                    student_id = row_get(student_row, "id")
+                    if not student_id:
+                        skipped += 1
+                        continue
+                else:
+                    cur = db.execute(
+                        f"INSERT OR IGNORE INTO students (name, enrollment, email, branch_id) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder})",
+                        (name, enrollment, email_value, branch_id),
+                    )
+                    if getattr(cur, "rowcount", 0) == 0:
+                        skipped += 1
+                        continue
+                    student_id = cur.lastrowid
+
+                default_password = enrollment[-4:] if len(enrollment) >= 4 else enrollment
+                if is_postgres:
+                    db.execute(
+                        f"""
+                        INSERT INTO users (username, password, role, student_id)
+                        VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder})
+                        ON CONFLICT (username) DO NOTHING
+                        """,
+                        (enrollment, generate_password_hash(default_password), "student", student_id),
+                    )
+                else:
+                    db.execute(
+                        f"INSERT OR IGNORE INTO users (username, password, role, student_id) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder})",
+                        (enrollment, generate_password_hash(default_password), "student", student_id),
+                    )
+
+                inserted += 1
+
+            db.commit()
+            flash(
+                f"Upload complete: {inserted} added, {skipped} skipped, {errors} errors.",
+                "success",
+            )
+        except Exception as e:
+            db.rollback()
+            print(f"[upload_students] ERROR: {repr(e)}")
+            flash("Upload failed due to a server error. Please try again.", "error")
+        finally:
+            try:
+                db.close()
+            except Exception:
+                pass
+
+        return redirect(url_for("upload_students"))
+
+    return render_template("upload_students.html")
 
 
 @app.route("/students", methods=["GET", "POST"])
