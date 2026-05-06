@@ -1677,6 +1677,7 @@ def teacher_login():
 
 
 @app.route("/student_dashboard")
+@app.route("/student/dashboard")
 @login_required
 def student_dashboard():
     student_id = session.get("student_id")
@@ -1997,32 +1998,6 @@ def attendance_scan():
         date=selected_date,
         message=message,
     )
-
-
-@app.route("/student/dashboard")
-@login_required
-def student_dashboard():
-    db = None
-    try:
-        db = get_db()
-        placeholder = get_placeholder()
-        student_id = session.get("student_id")
-        if not student_id:
-            flash("Student profile not found.", "error")
-            return redirect(url_for("logout"))
-
-        student = db.execute(f"SELECT * FROM students WHERE id = {placeholder}", (student_id,)).fetchone()
-        stats = db.execute(f"SELECT COUNT(*) as total, SUM(CASE WHEN status='Present' THEN 1 ELSE 0 END) as present FROM attendance WHERE student_id = {placeholder}", (student_id,)).fetchone()
-        
-        return render_template("student_dashboard.html", student=student, stats=stats)
-    except Exception as e:
-        print(f"[student_dashboard] ERROR: {repr(e)}")
-        flash("Student dashboard is temporarily unavailable.", "error")
-        return redirect(url_for("logout"))
-    finally:
-        if db:
-            try: db.close()
-            except: pass
 
 
 @app.route("/api/generate_qr_token")
