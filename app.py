@@ -580,13 +580,17 @@ def init_db(db=None):
             db.close()
         except Exception:
             pass
-def login_required(view):
-    @wraps(view)
-    def wrapped_view(**kwargs):
-        if not session.get("user_id"):
-            return redirect(url_for("login"))
-        return view(**kwargs)
-    return wrapped_view
+def login_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if "user_id" not in session:
+            flash("You must be logged in to view this page.", "warning")
+            return redirect(url_for("teacher_login"))
+        if session.get("role") == "student":
+            flash("You do not have permission to access this page.", "danger")
+            return redirect(url_for("student_dashboard"))
+        return f(*args, **kwargs)
+    return decorated_function
 @app.route("/login", methods=["GET", "POST"])
 @app.route("/admin_login", methods=["GET", "POST"])  # compatibility URL
 @app.route("/admin-login", methods=["GET", "POST"])  # compatibility URL
@@ -1459,8 +1463,7 @@ def upload_students_csv():
                         student_id = cur.fetchone()[0]
                     else:
                         cur = db.execute(
-                            f"INSERT INTO students (name, enrollment, email, branch_id) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder})",
-                            (name, enrollment, email or None, branch_id)
+                            f"INSERT INTO students (name, enrollment, email, branch_id) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder})", (name, enrollment, email or None, branch_id)
                         )
                         student_id = cur.lastrowid
 
@@ -1931,11 +1934,11 @@ def generate_qr():
     placeholder = get_placeholder()
     branch = db.execute(
         f"SELECT name FROM branches WHERE id = {placeholder}",
-        (branch_id,),
+        (branch_id,)
     ).fetchone()
     subject = db.execute(
         f"SELECT name FROM subjects WHERE id = {placeholder}",
-        (subject_id,),
+        (subject_id,)
     ).fetchone()
     db.close()
 
@@ -1976,11 +1979,11 @@ def attendance_scan():
     placeholder = get_placeholder()
     branch = db.execute(
         f"SELECT name FROM branches WHERE id = {placeholder}",
-        (branch_id,),
+        (branch_id,)
     ).fetchone()
     subject = db.execute(
         f"SELECT name FROM subjects WHERE id = {placeholder}",
-        (subject_id,),
+        (subject_id,)
     ).fetchone()
 
     if not branch or not subject:
@@ -2350,21 +2353,21 @@ def report_email():
         if filters.get("branch_id"):
             branch_row = db.execute(
                 f"SELECT name FROM branches WHERE id = {placeholder}",
-                (filters["branch_id"],),
+                (filters["branch_id"],)
             ).fetchone()
             branch_name = row_get(branch_row, "name") or branch_name
 
         if filters.get("subject_id"):
             subject_row = db.execute(
                 f"SELECT name FROM subjects WHERE id = {placeholder}",
-                (filters["subject_id"],),
+                (filters["subject_id"],)
             ).fetchone()
             subject_name = row_get(subject_row, "name") or subject_name
 
         if filters.get("student_id"):
             student_row = db.execute(
                 f"SELECT name FROM students WHERE id = {placeholder}",
-                (filters["student_id"],),
+                (filters["student_id"],)
             ).fetchone()
             student_name = row_get(student_row, "name") or student_name
 
