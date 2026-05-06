@@ -31,15 +31,18 @@
         </button>
     </form>
     
-    <div style="display: flex; justify-content: space-between; margin-top: 24px; font-size: 0.9rem; gap: 10px; flex-wrap: wrap;">
-        <a href="{{ url_for('forgot_password') }}" style="text-decoration: none; font-weight: 600; color: var(--primary-color);">
-            Forgot password?
-        </a>
-        <a href="{{ url_for('login') }}" style="text-decoration: none; font-weight: 600; color: var(--text-secondary);">
-            Admin Login
-        </a>
-        <a href="{{ url_for('index') }}" style="text-decoration: none; font-weight: 600; color: var(--text-secondary);">
-            Back to Home
+    <div style="margin-top: 24px; display: grid; gap: 12px;">
+        <div style="display: flex; justify-content: space-between; font-size: 0.9rem; gap: 10px; flex-wrap: wrap;">
+            <a href="{{ url_for('forgot_password') }}" style="text-decoration: none; font-weight: 600; color: var(--primary-color);">
+                Forgot password?
+            </a>
+            <a href="{{ url_for('index') }}" style="text-decoration: none; font-weight: 600; color: var(--text-secondary);">
+                Back to Home
+            </a>
+        </div>
+
+        <a class="button" href="{{ url_for('login') }}" style="width: 100%; justify-content: center;">
+            Admin/Teacher Login <i class="fa-solid fa-user-shield"></i>
         </a>
     </div>
 </div>
