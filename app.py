@@ -1532,6 +1532,33 @@ def student_dashboard():
     present = len([a for a in attendance_records if a["status"] == "Present"])
     percentage = round((present / total) * 100, 1) if total > 0 else 0
 
+    student_qr_data_uri = None
+    try:
+        # Generate a small QR for quick student identification.
+        # Payload is intentionally simple so it remains stable.
+        import base64
+        from io import BytesIO
+
+        import qrcode
+
+        enrollment = str(student.get("enrollment") or "")
+        payload = f"ENROLLMENT:{enrollment}" if enrollment else f"STUDENT_ID:{student_id}"
+        qr = qrcode.QRCode(
+            version=None,
+            error_correction=qrcode.constants.ERROR_CORRECT_M,
+            box_size=6,
+            border=2,
+        )
+        qr.add_data(payload)
+        qr.make(fit=True)
+        img = qr.make_image(fill_color="black", back_color="white")
+        buf = BytesIO()
+        img.save(buf, format="PNG")
+        student_qr_data_uri = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+    except Exception as e:
+        # QR is a convenience feature; do not fail the dashboard if it can't be generated.
+        print(f"[student_dashboard] QR generation skipped: {repr(e)}")
+
     db.close()
     return render_template(
         "student_dashboard.html",
@@ -1540,6 +1567,7 @@ def student_dashboard():
         percentage=percentage,
         subjects=subjects,
         selected_subject_id=selected_subject_id,
+        student_qr_data_uri=student_qr_data_uri,
     )
 
 

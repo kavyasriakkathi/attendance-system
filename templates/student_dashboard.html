@@ -6,6 +6,21 @@
     <p><strong>Attendance Percentage:</strong> {{ percentage }}%</p>
 </div>
 
+{% if student_qr_data_uri %}
+<div class="card" style="display: flex; align-items: center; justify-content: space-between; gap: 20px; flex-wrap: wrap;">
+    <div>
+        <h2 style="margin-bottom: 6px;">Your QR Code</h2>
+        <p style="margin: 0; color: var(--text-secondary);">Use this for quick identification.</p>
+        {% if student and student.enrollment %}
+        <p style="margin: 10px 0 0;"><strong>Enrollment:</strong> {{ student.enrollment }}</p>
+        {% endif %}
+    </div>
+    <div style="background: white; border: 1px solid var(--border-color); border-radius: 12px; padding: 12px;">
+        <img src="{{ student_qr_data_uri }}" alt="Student QR" style="display:block; width: 180px; height: 180px;" />
+    </div>
+</div>
+{% endif %}
+
 <div class="card">
     <h2>Subject-wise Attendance</h2>
 
