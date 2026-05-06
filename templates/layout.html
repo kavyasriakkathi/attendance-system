@@ -28,6 +28,9 @@
             <a href="{{ url_for('branches') }}"><i class="fa-solid fa-building"></i> Depts</a>
             <a href="{{ url_for('mark_attendance') }}"><i class="fa-solid fa-calendar-check"></i> Attendance</a>
             <a href="{{ url_for('attendance_report') }}"><i class="fa-solid fa-file-invoice"></i> Reports</a>
+            {% if session.role == 'admin' %}
+            <a href="{{ url_for('upload_students') }}"><i class="fa-solid fa-file-arrow-up"></i> Upload Students</a>
+            {% endif %}
             <a href="{{ url_for('settings') }}"><i class="fa-solid fa-gear"></i> Settings</a>
             <a class="logout" href="{{ url_for('logout') }}"><i class="fa-solid fa-right-from-bracket"></i></a>
             {% endif %}
