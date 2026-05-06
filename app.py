@@ -1,3 +1,5 @@
+import eventlet
+eventlet.monkey_patch()
 import os
 from datetime import date, timedelta
 from io import BytesIO
@@ -18,10 +20,10 @@ from werkzeug.exceptions import HTTPException
 from werkzeug.utils import secure_filename
 from flask_socketio import SocketIO, emit, join_room
 
-# Initialize SocketIO
-socketio = SocketIO(app, cors_allowed_origins="*")
-
 app = Flask(__name__)
+
+# Initialize SocketIO after app creation
+socketio = SocketIO(app, cors_allowed_origins="*")
 # Email sending is handled by the `send_email` helper defined later in the file.
 
 
