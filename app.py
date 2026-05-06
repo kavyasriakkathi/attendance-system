@@ -721,6 +721,32 @@ def dashboard():
         ORDER BY branches.name
     """).fetchall()
 
+    # Build last-7-days chart data for the dashboard
+    chart_dates = [date.today() - timedelta(days=i) for i in range(6, -1, -1)]
+    chart_date_values = [d.isoformat() for d in chart_dates]
+    chart_data = []
+    if chart_date_values:
+        placeholder = get_placeholder()
+        chart_rows = db.execute(
+            f"""
+            SELECT
+                date,
+                SUM(CASE WHEN status='Present' THEN 1 ELSE 0 END) AS present_count,
+                COUNT(*) AS total_count
+            FROM attendance
+            WHERE date IN ({', '.join([placeholder] * len(chart_date_values))})
+            GROUP BY date
+            """,
+            tuple(chart_date_values),
+        ).fetchall()
+        chart_map = {row_get(r, "date"): r for r in chart_rows}
+        for date_str in chart_date_values:
+            row = chart_map.get(date_str)
+            total_count = row_get(row, "total_count", 0) or 0
+            present_count = row_get(row, "present_count", 0) or 0
+            percentage = round((present_count / total_count) * 100, 1) if total_count else 0
+            chart_data.append({"date": date_str, "percentage": percentage})
+
     db.close()
     database_info = {
         "storage": "PostgreSQL" if app.config["DATABASE"].startswith("postgresql") else "SQLite",
@@ -744,8 +770,177 @@ def dashboard():
         overall_percentage=overall_percentage,
         subject_data=subject_data,
         branch_data=branch_data,
+        chart_data=chart_data,
         database_info=database_info,
         mail_info=mail_info,
+    )
+
+
+@app.route("/department-dashboard")
+@login_required
+def department_dashboard():
+    db = get_db()
+
+    departments = db.execute(
+        "SELECT id, name, location FROM branches ORDER BY name"
+    ).fetchall()
+
+    total_students = db.execute("SELECT COUNT(*) AS count FROM students").fetchone()
+    total_subjects = db.execute("SELECT COUNT(*) AS count FROM subjects").fetchone()
+    total_attendance = db.execute("SELECT COUNT(*) AS count FROM attendance").fetchone()
+
+    attendance_stats = db.execute(
+        """
+        SELECT
+            SUM(CASE WHEN status = 'Present' THEN 1 ELSE 0 END) AS present_count,
+            COUNT(*) AS total_count
+        FROM attendance
+        """
+    ).fetchone()
+
+    overall_percentage = 0
+    total_count = row_get(attendance_stats, "total_count", 0) or 0
+    present_count = row_get(attendance_stats, "present_count", 0) or 0
+    if total_count:
+        overall_percentage = round((present_count / total_count) * 100, 1)
+
+    student_counts = {
+        row_get(row, "branch_id"): row_get(row, "count", 0) or 0
+        for row in db.execute(
+            "SELECT branch_id, COUNT(*) AS count FROM students GROUP BY branch_id"
+        ).fetchall()
+    }
+
+    subject_counts = {
+        row_get(row, "branch_id"): row_get(row, "count", 0) or 0
+        for row in db.execute(
+            "SELECT branch_id, COUNT(*) AS count FROM subjects GROUP BY branch_id"
+        ).fetchall()
+    }
+
+    attendance_counts = {}
+    present_counts = {}
+    absent_counts = {}
+    for row in db.execute(
+        """
+        SELECT
+            branch_id,
+            SUM(CASE WHEN status = 'Present' THEN 1 ELSE 0 END) AS present_count,
+            SUM(CASE WHEN status = 'Absent' THEN 1 ELSE 0 END) AS absent_count,
+            COUNT(*) AS total_count
+        FROM attendance
+        GROUP BY branch_id
+        """
+    ).fetchall():
+        branch_id = row_get(row, "branch_id")
+        present_counts[branch_id] = row_get(row, "present_count", 0) or 0
+        absent_counts[branch_id] = row_get(row, "absent_count", 0) or 0
+        attendance_counts[branch_id] = row_get(row, "total_count", 0) or 0
+
+    subjects_by_branch = {}
+    for row in db.execute(
+        """
+        SELECT
+            subjects.id AS subject_id,
+            subjects.branch_id AS branch_id,
+            subjects.name AS subject_name,
+            SUM(CASE WHEN attendance.status = 'Present' THEN 1 ELSE 0 END) AS present_count,
+            COUNT(attendance.id) AS total_count
+        FROM subjects
+        LEFT JOIN attendance ON attendance.subject_id = subjects.id
+        GROUP BY subjects.id, subjects.branch_id, subjects.name
+        ORDER BY subjects.name
+        """
+    ).fetchall():
+        branch_id = row_get(row, "branch_id")
+        total = row_get(row, "total_count", 0) or 0
+        present = row_get(row, "present_count", 0) or 0
+        pct = round((present / total) * 100, 1) if total else 0
+        subjects_by_branch.setdefault(branch_id, []).append(
+            {
+                "id": row_get(row, "subject_id"),
+                "name": row_get(row, "subject_name"),
+                "present_count": present,
+                "total_count": total,
+                "pct": pct,
+            }
+        )
+
+    students_by_branch = {}
+    for row in db.execute(
+        """
+        SELECT
+            students.id AS student_id,
+            students.branch_id AS branch_id,
+            students.name AS student_name,
+            students.enrollment AS enrollment,
+            students.email AS email,
+            SUM(CASE WHEN attendance.status = 'Present' THEN 1 ELSE 0 END) AS present_count,
+            SUM(CASE WHEN attendance.status = 'Absent' THEN 1 ELSE 0 END) AS absent_count,
+            COUNT(attendance.id) AS total_count
+        FROM students
+        LEFT JOIN attendance ON attendance.student_id = students.id
+        GROUP BY students.id, students.branch_id, students.name, students.enrollment, students.email
+        ORDER BY students.name
+        """
+    ).fetchall():
+        branch_id = row_get(row, "branch_id")
+        total = row_get(row, "total_count", 0) or 0
+        present = row_get(row, "present_count", 0) or 0
+        absent = row_get(row, "absent_count", 0) or 0
+        pct = round((present / total) * 100, 1) if total else 0
+        students_by_branch.setdefault(branch_id, []).append(
+            {
+                "id": row_get(row, "student_id"),
+                "name": row_get(row, "student_name"),
+                "enrollment": row_get(row, "enrollment"),
+                "email": row_get(row, "email"),
+                "present": present,
+                "absent": absent,
+                "total": total,
+                "pct": pct,
+            }
+        )
+
+    departments_data = []
+    for dept in departments:
+        dept_id = row_get(dept, "id")
+        attendance_total = attendance_counts.get(dept_id, 0)
+        present = present_counts.get(dept_id, 0)
+        absent = absent_counts.get(dept_id, 0)
+        attendance_pct = round((present / attendance_total) * 100, 1) if attendance_total else 0
+        departments_data.append(
+            {
+                "id": dept_id,
+                "name": row_get(dept, "name"),
+                "location": row_get(dept, "location"),
+                "student_count": student_counts.get(dept_id, 0),
+                "subject_count": subject_counts.get(dept_id, 0),
+                "attendance_count": attendance_total,
+                "present_count": present,
+                "absent_count": absent,
+                "attendance_pct": attendance_pct,
+                "subjects": subjects_by_branch.get(dept_id, []),
+                "students": students_by_branch.get(dept_id, []),
+            }
+        )
+
+    db.close()
+
+    total_students_value = row_get(total_students, "count", 0) or 0
+    total_subjects_value = row_get(total_subjects, "count", 0) or 0
+    total_attendance_value = row_get(total_attendance, "count", 0) or 0
+    render_env = bool(os.environ.get("RENDER") or os.environ.get("RENDER_INTERNAL_HOSTNAME"))
+    persistence_warning = render_env and not str(app.config.get("DATABASE", "")).startswith("postgres")
+
+    return render_template(
+        "department_dashboard.html",
+        departments=departments_data,
+        total_students=total_students_value,
+        total_subjects=total_subjects_value,
+        total_attendance=total_attendance_value,
+        overall_percentage=overall_percentage,
+        persistence_warning=persistence_warning,
     )
 
 @app.route("/settings", methods=["GET", "POST"])
