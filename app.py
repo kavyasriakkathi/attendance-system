@@ -1002,6 +1002,155 @@ def settings():
         mail_info=mail_info,
     )
 
+
+@app.route("/test-email")
+@app.route("/test_email")
+@login_required
+def test_email():
+    if session.get("role") != "admin":
+        return redirect(url_for("dashboard"))
+
+    if not is_mail_configured():
+        flash("Email is not configured. Please set MAIL_USERNAME and MAIL_PASSWORD.", "error")
+        return redirect(url_for("settings"))
+
+    recipient = (app.config.get("REPORT_ADMIN_EMAIL") or "").strip()
+    if not recipient or not is_valid_email(recipient):
+        flash("Admin email is invalid. Update REPORT_ADMIN_EMAIL.", "error")
+        return redirect(url_for("settings"))
+
+    body = (
+        "Test email from Attendance Management System.\n\n"
+        f"Sent to: {recipient}\n"
+        f"Time: {date.today().isoformat()}\n"
+    )
+    email_sent = safe_send_email(
+        subject="Test Email: Attendance System",
+        recipient=recipient,
+        body=body,
+    )
+    if email_sent:
+        flash(f"Test email sent to {recipient}.", "success")
+    else:
+        flash("Failed to send test email. Check mail settings.", "error")
+
+    return redirect(url_for("settings"))
+
+
+@app.route("/admin/import_data", methods=["POST"])
+@login_required
+def admin_import_data():
+    if session.get("role") != "admin":
+        return jsonify({"error": "Unauthorized"}), 403
+
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        return jsonify({"error": "Invalid JSON payload"}), 400
+
+    db = get_db()
+    placeholder = get_placeholder()
+    is_postgres = str(app.config.get("DATABASE", "")).startswith("postgres")
+
+    def insert_ignore(table, columns, values):
+        cols = ", ".join(columns)
+        placeholders = ", ".join([placeholder] * len(columns))
+        if is_postgres:
+            query = f"INSERT INTO {table} ({cols}) VALUES ({placeholders}) ON CONFLICT DO NOTHING"
+        else:
+            query = f"INSERT OR IGNORE INTO {table} ({cols}) VALUES ({placeholders})"
+        db.execute(query, tuple(values))
+
+    def sync_sequence(table, id_col="id"):
+        if not is_postgres:
+            return
+        try:
+            db.execute(
+                f"SELECT setval(pg_get_serial_sequence('{table}', '{id_col}'), "
+                f"COALESCE(MAX({id_col}), 0), COALESCE(MAX({id_col}), 0) > 0) FROM {table}"
+            )
+        except Exception as e:
+            print(f"[import_data] sequence sync failed for {table}: {repr(e)}")
+
+    counts = {"branches": 0, "subjects": 0, "students": 0, "attendance": 0, "users": 0}
+    try:
+        for row in payload.get("branches", []) or []:
+            insert_ignore(
+                "branches",
+                ["id", "name", "location"],
+                [row.get("id"), row.get("name"), row.get("location")],
+            )
+            counts["branches"] += 1
+
+        for row in payload.get("subjects", []) or []:
+            insert_ignore(
+                "subjects",
+                ["id", "name", "branch_id"],
+                [row.get("id"), row.get("name"), row.get("branch_id")],
+            )
+            counts["subjects"] += 1
+
+        students_payload = payload.get("students", []) or []
+        for row in students_payload:
+            insert_ignore(
+                "students",
+                ["id", "name", "enrollment", "branch_id", "email"],
+                [
+                    row.get("id"),
+                    row.get("name"),
+                    row.get("enrollment"),
+                    row.get("branch_id"),
+                    row.get("email"),
+                ],
+            )
+            counts["students"] += 1
+
+        for row in payload.get("attendance", []) or []:
+            insert_ignore(
+                "attendance",
+                ["id", "student_id", "branch_id", "subject_id", "date", "status", "note"],
+                [
+                    row.get("id"),
+                    row.get("student_id"),
+                    row.get("branch_id"),
+                    row.get("subject_id"),
+                    row.get("date"),
+                    row.get("status"),
+                    row.get("note"),
+                ],
+            )
+            counts["attendance"] += 1
+
+        for row in students_payload:
+            enrollment = (row.get("enrollment") or "").strip()
+            student_id = row.get("id")
+            if not enrollment or not student_id:
+                continue
+            default_password = enrollment[-4:] if len(enrollment) >= 4 else enrollment
+            insert_ignore(
+                "users",
+                ["username", "password", "role", "student_id"],
+                [enrollment, generate_password_hash(default_password), "student", student_id],
+            )
+            counts["users"] += 1
+
+        sync_sequence("branches")
+        sync_sequence("subjects")
+        sync_sequence("students")
+        sync_sequence("attendance")
+        sync_sequence("users")
+
+        db.commit()
+        return jsonify({"message": "Import completed", "counts": counts})
+    except Exception as e:
+        db.rollback()
+        print(f"[import_data] ERROR: {repr(e)}")
+        return jsonify({"error": "Import failed. Check server logs."}), 500
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass
+
 @app.route("/branches", methods=["GET", "POST"])
 @login_required
 def branches():
