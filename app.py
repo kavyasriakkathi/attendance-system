@@ -1140,57 +1140,60 @@ def admin_import_data():
 @app.route("/branches", methods=["GET", "POST"])
 @login_required
 def branches():
-    db = get_db()
-    placeholder = get_placeholder()
-    if request.method == "POST":
-        name = request.form["name"].strip()
-        location = request.form["location"].strip()
-        if name:
-            try:
+    db = None
+    try:
+        db = get_db()
+        placeholder = get_placeholder()
+        if request.method == "POST":
+            name = request.form.get("name")
+            location = request.form.get("location")
+            if name:
                 db.execute(f"INSERT INTO branches (name, location) VALUES ({placeholder}, {placeholder})", (name, location))
                 db.commit()
                 flash("Branch added successfully.", "success")
-            except Exception as e:
-                db.rollback()
-                print(f"Error adding branch: {e}")
-                flash("Branch name already exists.", "error")
-        else:
-            flash("Branch name is required.", "error")
+            else:
+                flash("Branch name is required.", "error")
 
-    branches = db.execute(f"SELECT * FROM branches ORDER BY name").fetchall()
-    db.close()
-    return render_template("branches.html", branches=branches)
+        branches_list = db.execute("SELECT * FROM branches ORDER BY name").fetchall()
+        return render_template("branches.html", branches=branches_list)
+    except Exception as e:
+        print(f"[branches] ERROR: {repr(e)}")
+        flash("Branch management is temporarily unavailable.", "error")
+        return redirect(url_for("dashboard"))
+    finally:
+        if db:
+            try: db.close()
+            except: pass
 
 
 @app.route("/subjects", methods=["GET", "POST"])
 @login_required
 def subjects():
-    db = get_db()
-    placeholder = get_placeholder()
-    branches = db.execute(f"SELECT * FROM branches ORDER BY name").fetchall()
-    if request.method == "POST":
-        name = request.form["name"].strip()
-        branch_id = request.form.get("branch_id")
-        if name and branch_id:
-            try:
-                db.execute(
-                    f"INSERT INTO subjects (name, branch_id) VALUES ({placeholder}, {placeholder})",
-                    (name, branch_id),
-                )
+    db = None
+    try:
+        db = get_db()
+        placeholder = get_placeholder()
+        if request.method == "POST":
+            name = request.form.get("name")
+            branch_id = request.form.get("branch_id")
+            if name and branch_id:
+                db.execute(f"INSERT INTO subjects (name, branch_id) VALUES ({placeholder}, {placeholder})", (name, branch_id))
                 db.commit()
                 flash("Subject added successfully.", "success")
-            except Exception as e:
-                db.rollback()
-                print(f"Error adding subject: {e}")
-                flash("Error adding subject. Please try again.", "error")
-        else:
-            flash("Subject name and branch are required.", "error")
+            else:
+                flash("Name and branch are required.", "error")
 
-    subjects = db.execute(
-        f"SELECT subjects.*, branches.name AS branch_name FROM subjects JOIN branches ON subjects.branch_id = branches.id ORDER BY subjects.name"
-    ).fetchall()
-    db.close()
-    return render_template("subjects.html", subjects=subjects, branches=branches)
+        subjects_list = db.execute("SELECT subjects.*, branches.name AS branch_name FROM subjects JOIN branches ON subjects.branch_id = branches.id ORDER BY subjects.name").fetchall()
+        branches_list = db.execute("SELECT id, name FROM branches ORDER BY name").fetchall()
+        return render_template("subjects.html", subjects=subjects_list, branches=branches_list)
+    except Exception as e:
+        print(f"[subjects] ERROR: {repr(e)}")
+        flash("Subject management is temporarily unavailable.", "error")
+        return redirect(url_for("dashboard"))
+    finally:
+        if db:
+            try: db.close()
+            except: pass
 
 
 @app.route("/upload_students", methods=["GET", "POST"])
@@ -1548,15 +1551,15 @@ def students():
         
         students_list = db.execute(query, params).fetchall()
         branches_list = db.execute("SELECT id, name FROM branches ORDER BY name").fetchall()
-        db.close()
         return render_template("students.html", students=students_list, branches=branches_list)
     except Exception as e:
         print(f"[students] ERROR: {repr(e)}")
+        flash("Student management is temporarily unavailable.", "error")
+        return redirect(url_for("dashboard"))
+    finally:
         if db:
             try: db.close()
             except: pass
-        flash("Student management is temporarily unavailable.", "error")
-        return redirect(url_for("dashboard"))
 
 
 @app.route("/student_login", methods=["GET", "POST"])
@@ -1868,55 +1871,90 @@ def mark_attendance():
                 emailed_students = notify_low_attendance(db, saved_student_ids)
                 session["attendance_email_summary"] = emailed_students
             except Exception as e:
-                db.rollback()
-                print(f"Error saving attendance: {e}")
-                flash("Error saving attendance. Please try again.", "error")
+                selected_date_obj = date.fromisoformat(selected_date)
+            except ValueError:
+                selected_date_obj = today_date
+
+            if selected_date_obj > today_date:
+                selected_date_obj = today_date
+
+            selected_date = selected_date_obj.isoformat()
+            student_ids = request.form.getlist("student_id")
+
+            if branch_id and subject_id and student_ids:
                 saved_student_ids = []
+                try:
+                    for student_id in student_ids:
+                        status = request.form.get(f"status_{student_id}", "Absent")
+                        note = request.form.get(f"note_{student_id}", "")
+                        existing = db.execute(
+                            f"SELECT id FROM attendance WHERE student_id = {placeholder} AND subject_id = {placeholder} AND date = {placeholder}",
+                            (student_id, subject_id, selected_date),
+                        ).fetchone()
+                        if existing:
+                            db.execute(
+                                f"UPDATE attendance SET status = {placeholder}, note = {placeholder} WHERE id = {placeholder}",
+                                (status, note, existing["id"]),
+                            )
+                        else:
+                            db.execute(
+                                f"INSERT INTO attendance (student_id, branch_id, subject_id, date, status, note) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})",
+                                (student_id, branch_id, subject_id, selected_date, status, note),
+                            )
+                        if student_id.isdigit():
+                            saved_student_ids.append(int(student_id))
+                    db.commit()
+                    
+                    flash("Attendance saved successfully.", "success")
+                    emailed_students = notify_low_attendance(db, saved_student_ids)
+                    session["attendance_email_summary"] = emailed_students
+                except Exception as e:
+                    db.rollback()
+                    print(f"Error saving attendance: {e}")
+                    flash("Error saving attendance. Please try again.", "error")
+                    saved_student_ids = []
 
-            # Emit real-time update (disabled for Render)
-            # socketio.emit('attendance_saved', {
-            #     'branch_id': branch_id,
-            #     'subject_id': subject_id,
-            #     'date': selected_date,
-            #     'count': attendance_count,
-            #     'message': f'Attendance saved for {attendance_count} students on {selected_date}'
-            # })
-
-            db.close()
-            return redirect(
-                url_for(
-                    "attendance_success",
-                    branch_id=branch_id,
-                    subject_id=subject_id,
-                    date=selected_date,
+                return redirect(
+                    url_for(
+                        "attendance_success",
+                        branch_id=branch_id,
+                        subject_id=subject_id,
+                        date=selected_date,
+                    )
                 )
-            )
-        else:
-            flash("Please select a branch, subject, and mark attendance for students.", "error")
+            else:
+                flash("Please select a branch, subject, and mark attendance for students.", "error")
 
-    attendance_map = {}
-    if branch_id and subject_id:
-        rows = db.execute(
-            f"SELECT student_id, status, note FROM attendance WHERE subject_id = {placeholder} AND date = {placeholder}",
-            (subject_id, selected_date),
-        ).fetchall()
-        attendance_map = {str(row["student_id"]): row for row in rows}
+        attendance_map = {}
+        if branch_id and subject_id:
+            rows = db.execute(
+                f"SELECT student_id, status, note FROM attendance WHERE subject_id = {placeholder} AND date = {placeholder}",
+                (subject_id, selected_date),
+            ).fetchall()
+            attendance_map = {str(row["student_id"]): row for row in rows}
 
-    db.close()
-    return render_template(
-        "mark_attendance.html",
-        branches=branches,
-        subjects=subjects,
-        students=students,
-        branch_id=branch_id,
-        subject_id=subject_id,
-        selected_date=selected_date,
-        attendance_map=attendance_map,
-        existing_dates=existing_dates,
-        prev_date=prev_date,
-        next_date=next_date,
-        today_date=today_date.isoformat(),
-    )
+        return render_template(
+            "mark_attendance.html",
+            branches=branches,
+            subjects=subjects,
+            students=students,
+            branch_id=branch_id,
+            subject_id=subject_id,
+            selected_date=selected_date,
+            attendance_map=attendance_map,
+            existing_dates=existing_dates,
+            prev_date=prev_date,
+            next_date=next_date,
+            today_date=today_date.isoformat(),
+        )
+    except Exception as e:
+        print(f"[mark_attendance] ERROR: {repr(e)}")
+        flash("Attendance marking is temporarily unavailable.", "error")
+        return redirect(url_for("dashboard"))
+    finally:
+        if db:
+            try: db.close()
+            except: pass
 
 
 @app.route("/attendance/qr")
@@ -2023,6 +2061,32 @@ def attendance_scan():
         date=selected_date,
         message=message,
     )
+
+
+@app.route("/student/dashboard")
+@login_required
+def student_dashboard():
+    db = None
+    try:
+        db = get_db()
+        placeholder = get_placeholder()
+        student_id = session.get("student_id")
+        if not student_id:
+            flash("Student profile not found.", "error")
+            return redirect(url_for("logout"))
+
+        student = db.execute(f"SELECT * FROM students WHERE id = {placeholder}", (student_id,)).fetchone()
+        stats = db.execute(f"SELECT COUNT(*) as total, SUM(CASE WHEN status='Present' THEN 1 ELSE 0 END) as present FROM attendance WHERE student_id = {placeholder}", (student_id,)).fetchone()
+        
+        return render_template("student_dashboard.html", student=student, stats=stats)
+    except Exception as e:
+        print(f"[student_dashboard] ERROR: {repr(e)}")
+        flash("Student dashboard is temporarily unavailable.", "error")
+        return redirect(url_for("logout"))
+    finally:
+        if db:
+            try: db.close()
+            except: pass
 
 
 @app.route("/api/generate_qr_token")
@@ -2267,40 +2331,38 @@ def download_attendance():
         return redirect(url_for("dashboard"))
 
 
-@app.route("/reports", methods=["GET", "POST"])
+@app.route("/attendance/report")
 @login_required
 def attendance_report():
-    db = get_db()
-    branches = db.execute(f"SELECT * FROM branches ORDER BY name").fetchall()
-    subjects = []
-    records = []
-    filters = get_report_filters()
-    placeholder = get_placeholder()
-
-    if filters["branch_id"]:
-        subjects = db.execute(
-            f"SELECT * FROM subjects WHERE branch_id = {placeholder} ORDER BY name", (filters["branch_id"],)
-        ).fetchall()
-
-    records = fetch_report_records(db, filters)
-    students = []
-    if filters["branch_id"]:
-        students = db.execute(
-            f"SELECT * FROM students WHERE branch_id = {placeholder} ORDER BY name", (filters["branch_id"],)
-        ).fetchall()
-
-    stats = build_report_stats(records)
-
-    db.close()
-    return render_template(
-        "attendance_report.html",
-        branches=branches,
-        subjects=subjects,
-        students=students,
-        records=records,
-        filters=filters,
-        stats=stats,
-    )
+    db = None
+    try:
+        db = get_db()
+        placeholder = get_placeholder()
+        filters = {
+            "branch_id": request.args.get("branch_id"),
+            "subject_id": request.args.get("subject_id"),
+            "student_id": request.args.get("student_id"),
+            "from_date": request.args.get("from_date"),
+            "to_date": request.args.get("to_date"),
+            "search": request.args.get("search"),
+        }
+        
+        records = fetch_report_records(db, filters)
+        stats = build_report_stats(records)
+        
+        branches = db.execute("SELECT id, name FROM branches ORDER BY name").fetchall()
+        subjects = db.execute("SELECT id, name FROM subjects ORDER BY name").fetchall()
+        students = db.execute("SELECT id, name FROM students ORDER BY name").fetchall()
+        
+        return render_template("attendance_report.html", records=records, stats=stats, filters=filters, branches=branches, subjects=subjects, students=students)
+    except Exception as e:
+        print(f"[attendance_report] ERROR: {repr(e)}")
+        flash("Reports are temporarily unavailable.", "error")
+        return redirect(url_for("dashboard"))
+    finally:
+        if db:
+            try: db.close()
+            except: pass
 
 
 @app.route("/reports/export")
