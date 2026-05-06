@@ -2057,6 +2057,73 @@ def build_report_excel(records):
     return output.getvalue(), filename
 
 
+@app.route("/download_attendance")
+@login_required
+def download_attendance():
+    """Download attendance as an Excel file.
+
+    Optional filters (query params):
+    - branch_id
+    - subject_id
+    - from_date / to_date (or start_date / end_date)
+
+    For safety, if a student is logged in, the export is limited to that student.
+    """
+
+    filters = {
+        "branch_id": (request.args.get("branch_id") or "").strip() or None,
+        "subject_id": (request.args.get("subject_id") or "").strip() or None,
+        "from_date": (
+            (request.args.get("from_date") or request.args.get("start_date") or "").strip() or None
+        ),
+        "to_date": (
+            (request.args.get("to_date") or request.args.get("end_date") or "").strip() or None
+        ),
+    }
+
+    if session.get("role") == "student":
+        filters["student_id"] = session.get("student_id")
+
+    db = get_db()
+    try:
+        records = fetch_report_records(db, filters)
+
+        rows = []
+        for record in records:
+            rows.append(
+                {
+                    "Date": row_get(record, "date"),
+                    "Student": row_get(record, "student_name"),
+                    "Subject": row_get(record, "subject_name"),
+                    "Status": row_get(record, "status"),
+                }
+            )
+
+        import pandas as pd
+
+        output = BytesIO()
+        df = pd.DataFrame(rows)
+        if df.empty:
+            df = pd.DataFrame(columns=["Date", "Student", "Subject", "Status"])
+
+        with pd.ExcelWriter(output, engine="openpyxl") as writer:
+            df.to_excel(writer, index=False, sheet_name="Attendance")
+        output.seek(0)
+
+        filename = f"attendance_report_{date.today().isoformat()}.xlsx"
+        return send_file(
+            output,
+            as_attachment=True,
+            download_name=filename,
+            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass
+
+
 @app.route("/reports", methods=["GET", "POST"])
 @login_required
 def attendance_report():

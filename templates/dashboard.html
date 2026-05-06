@@ -163,6 +163,7 @@ document.head.appendChild(style);
         <h2><i class="fa-solid fa-bolt"></i> Quick Actions</h2>
         <div style="display: flex; flex-direction: column; gap: 12px;">
             <a href="{{ url_for('mark_attendance') }}" class="button"><i class="fa-solid fa-plus"></i> Mark Attendance</a>
+            <a href="{{ url_for('download_attendance') }}" class="button" style="background-color: var(--text-secondary);"><i class="fa-solid fa-file-excel"></i> Download Attendance Report</a>
             <a href="{{ url_for('attendance_report') }}" class="button" style="background-color: var(--text-secondary);"><i class="fa-solid fa-file-export"></i> Export Reports</a>
             <a href="{{ url_for('students') }}" class="button" style="background-color: var(--text-secondary);"><i class="fa-solid fa-user-plus"></i> Add Student</a>
         </div>
