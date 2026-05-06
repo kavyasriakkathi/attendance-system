@@ -18,7 +18,7 @@
             <img src="{{ url_for('static', filename='logo.jpg') }}" alt="Logo" style="height: 44px; border-radius: 8px;">
             Siddhartha Institute of Technology&Sciences
         </div>
-        {% if session.username %}
+        {% if session.username and not hide_nav %}
         <nav>
             {% if session.role == 'student' %}
             <a href="{{ url_for('student_dashboard') }}"><i class="fa-solid fa-user-graduate"></i> Dashboard</a>
