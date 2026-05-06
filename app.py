@@ -1258,17 +1258,66 @@ def upload_students():
             return redirect(url_for("upload_students"))
 
         try:
-            df = pd.read_excel(file)
+            import pandas as pd
+            # Read entire file first to find the header row
+            all_data = pd.read_excel(file, header=None)
+            
+            # Find the header row by searching for keywords
+            header_idx = 0
+            found_header = False
+            for i, row in all_data.iterrows():
+                row_str = [str(cell).lower() for cell in row]
+                if any(k in " ".join(row_str) for k in ["name", "enrollment", "h.t.no", "mail", "branch"]):
+                    header_idx = i
+                    found_header = True
+                    break
+            
+            # Re-read or just slice the dataframe
+            df = pd.read_excel(file, skiprows=header_idx)
         except Exception as e:
             print(f"[upload_students] Failed to read Excel: {repr(e)}")
             flash("Failed to read the Excel file. Please check the format.", "error")
             return redirect(url_for("upload_students"))
 
-        df.columns = [str(c).strip().lower() for c in df.columns]
+        # Map aliases to standard column names
+        column_mapping = {
+            'name': 'name',
+            'student name': 'name',
+            'name of the students': 'name',
+            'student': 'name',
+            'enrollment': 'enrollment',
+            'enrollment no': 'enrollment',
+            'h.t.no': 'enrollment',
+            'hall ticket no': 'enrollment',
+            'ten digits h.t.no': 'enrollment',
+            'roll no': 'enrollment',
+            'email': 'email',
+            'mail id': 'email',
+            'email id': 'email',
+            'branch_id': 'branch_id',
+            'branch id': 'branch_id',
+            'branch': 'branch_id'
+        }
+
+        # Normalize existing columns and rename based on mapping
+        current_cols = [str(c).strip().lower() for c in df.columns]
+        new_cols = []
+        for col in current_cols:
+            found = False
+            for alias, target in column_mapping.items():
+                if alias in col: # partial match for robustness
+                    new_cols.append(target)
+                    found = True
+                    break
+            if not found:
+                new_cols.append(col)
+        
+        df.columns = new_cols
         required = {"name", "enrollment", "email", "branch_id"}
         missing = required - set(df.columns)
+        
         if missing:
-            flash(f"Missing columns: {', '.join(sorted(missing))}", "error")
+            flash(f"Missing columns: {', '.join(sorted(missing))}. We searched for keywords like 'Name', 'Enrollment', 'Mail', and 'Branch'.", "error")
             return redirect(url_for("upload_students"))
 
         db = get_db()
