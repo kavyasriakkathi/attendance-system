@@ -1259,25 +1259,33 @@ def upload_students():
 
         try:
             import pandas as pd
-            # Read entire file first to find the header row
-            all_data = pd.read_excel(file, header=None)
+            # Read the file ONCE into memory to save RAM
+            df_full = pd.read_excel(file, header=None)
             
-            # Find the header row by searching for keywords
+            if df_full.empty:
+                flash("The Excel file is empty.", "error")
+                return redirect(url_for("upload_students"))
+
+            # Find the header row by searching for keywords in the first 50 rows
             header_idx = 0
             found_header = False
-            for i, row in all_data.iterrows():
-                row_str = [str(cell).lower() for cell in row]
-                if any(k in " ".join(row_str) for k in ["name", "enrollment", "h.t.no", "mail", "branch", "section"]):
+            for i, row in df_full.head(50).iterrows():
+                row_str = " ".join([str(cell).lower() for cell in row])
+                if any(k in row_str for k in ["name", "enrollment", "h.t.no", "mail", "branch", "section"]):
                     header_idx = i
                     found_header = True
                     break
             
-            # Reset file pointer before re-reading with correct header
-            file.seek(0)
-            df = pd.read_excel(file, skiprows=header_idx)
+            # Slice the existing dataframe instead of re-reading from disk
+            # This is much more memory-efficient on small servers
+            df = df_full.iloc[header_idx + 1:].copy()
+            df.columns = [str(c).strip() for c in df_full.iloc[header_idx].tolist()]
             
+            # Explicitly clear the full dataframe from memory
+            del df_full
+
             if df.empty:
-                flash("The Excel file seems to be empty after the header row.", "error")
+                flash("No data found after the header row.", "error")
                 return redirect(url_for("upload_students"))
         except Exception as e:
             print(f"[upload_students] Failed to read Excel: {repr(e)}")
