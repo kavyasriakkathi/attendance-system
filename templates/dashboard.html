@@ -138,8 +138,18 @@ document.head.appendChild(style);
     </div>
     <div class="stat-box" style="border-bottom: 4px solid var(--success-color);">
         <i class="fa-solid fa-list-check" style="font-size: 1.5rem; color: var(--text-secondary); margin-bottom: 15px;"></i>
-        <h3>Records</h3>
-        <p class="count">{{ attendance_count }}</p>
+        <h3>Total Classes</h3>
+        <p class="count">{{ total_classes }}</p>
+    </div>
+    <div class="stat-box" style="border-bottom: 4px solid var(--success-color);">
+        <i class="fa-solid fa-circle-check" style="font-size: 1.5rem; color: var(--text-secondary); margin-bottom: 15px;"></i>
+        <h3>Present</h3>
+        <p class="count">{{ present_count }}</p>
+    </div>
+    <div class="stat-box" style="border-bottom: 4px solid var(--danger-color);">
+        <i class="fa-solid fa-circle-xmark" style="font-size: 1.5rem; color: var(--text-secondary); margin-bottom: 15px;"></i>
+        <h3>Absent</h3>
+        <p class="count">{{ absent_count }}</p>
     </div>
     <div class="stat-box" style="border-bottom: 4px solid var(--warning-color); background: linear-gradient(135deg, #ffffff 0%, #fff9e6 100%);">
         <i class="fa-solid fa-chart-pie" style="font-size: 1.5rem; color: var(--text-secondary); margin-bottom: 15px;"></i>
@@ -149,13 +159,21 @@ document.head.appendChild(style);
 </div>
 
 <div class="grid" style="margin-bottom: 30px;">
-    <div class="card" style="grid-column: span 2;">
+    <div class="card">
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
-            <h2 style="margin: 0;"><i class="fa-solid fa-chart-line"></i> Attendance Trend</h2>
-            <span style="font-size: 0.85rem; color: var(--text-secondary);">Last 7 Days</span>
+            <h2 style="margin: 0;"><i class="fa-solid fa-chart-pie"></i> Present vs Absent</h2>
         </div>
         <div style="height: 300px; position: relative;">
-            <canvas id="attendanceChart"></canvas>
+            <canvas id="presentAbsentChart"></canvas>
+        </div>
+    </div>
+
+    <div class="card">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+            <h2 style="margin: 0;"><i class="fa-solid fa-chart-column"></i> Attendance per Subject</h2>
+        </div>
+        <div style="height: 300px; position: relative;">
+            <canvas id="subjectAttendanceChart"></canvas>
         </div>
     </div>
     
@@ -191,66 +209,88 @@ document.head.appendChild(style);
 
 <script>
 document.addEventListener('DOMContentLoaded', function() {
-    const ctx = document.getElementById('attendanceChart').getContext('2d');
-    const chartData = {{ chart_data | tojson }};
-    
-    // Render a bar chart where each bar is green if >=75%, else red.
-    const labels = chartData.map(d => d.date);
-    const values = chartData.map(d => d.percentage);
-    const threshold = 75;
+    const css = getComputedStyle(document.documentElement);
+    const successColor = css.getPropertyValue('--success-color').trim();
+    const dangerColor = css.getPropertyValue('--danger-color').trim();
+    const primaryColor = css.getPropertyValue('--primary-color').trim();
+    const borderColor = css.getPropertyValue('--border-color').trim();
+    const textSecondary = css.getPropertyValue('--text-secondary').trim();
 
-    const backgroundColors = values.map(v => v >= threshold ? 'rgba(22,163,74,0.85)' : 'rgba(239,68,68,0.85)');
-    const borderColors = values.map(v => v >= threshold ? 'rgba(16,148,56,1)' : 'rgba(220,38,38,1)');
+    // 1) Pie chart: Present vs Absent
+    const pieEl = document.getElementById('presentAbsentChart');
+    if (pieEl) {
+        const presentCount = {{ present_count | tojson }};
+        const absentCount = {{ absent_count | tojson }};
 
-    new Chart(ctx, {
-        type: 'bar',
-        data: {
-            labels: labels,
-            datasets: [{
-                label: 'Attendance %',
-                data: values,
-                backgroundColor: backgroundColors,
-                borderColor: borderColors,
-                borderWidth: 1,
-                maxBarThickness: 48,
-                order: 1
+        new Chart(pieEl.getContext('2d'), {
+            type: 'pie',
+            data: {
+                labels: ['Present', 'Absent'],
+                datasets: [{
+                    data: [presentCount, absentCount],
+                    backgroundColor: [successColor, dangerColor],
+                    borderColor: borderColor,
+                    borderWidth: 2,
+                }]
             },
-            {
-                // Threshold line dataset
-                label: 'Threshold',
-                type: 'line',
-                data: labels.map(() => threshold),
-                borderColor: '#f59e0b',
-                borderWidth: 2,
-                borderDash: [6, 4],
-                pointRadius: 0,
-                fill: false,
-                order: 2,
-                tension: 0
-            }]
-        },
-        options: {
-            responsive: true,
-            maintainAspectRatio: false,
-            plugins: {
-                legend: { display: false },
-                tooltip: {
-                    callbacks: {
-                        label: context => `${context.formattedValue}%`
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: {
+                        position: 'bottom',
+                        labels: { color: textSecondary }
                     }
                 }
-            },
-            scales: {
-                y: {
-                    beginAtZero: true,
-                    max: 100,
-                    grid: { color: '#f0f0f0' },
-                    ticks: { callback: value => value + '%' }
-                },
-                x: { grid: { display: false } }
             }
-        }
-    });
+        });
+    }
+
+    // 2) Bar chart: Attendance percentage per subject
+    const barEl = document.getElementById('subjectAttendanceChart');
+    if (barEl) {
+        const labels = {{ subject_chart_labels | tojson }};
+        const percentages = {{ subject_chart_percentages | tojson }};
+
+        new Chart(barEl.getContext('2d'), {
+            type: 'bar',
+            data: {
+                labels: labels,
+                datasets: [{
+                    label: 'Attendance %',
+                    data: percentages,
+                    backgroundColor: primaryColor,
+                    borderColor: primaryColor,
+                    borderWidth: 1,
+                    maxBarThickness: 48,
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: { display: false },
+                    tooltip: {
+                        callbacks: {
+                            label: (context) => `${context.formattedValue}%`
+                        }
+                    }
+                },
+                scales: {
+                    y: {
+                        beginAtZero: true,
+                        max: 100,
+                        grid: { color: borderColor },
+                        ticks: { callback: (value) => value + '%', color: textSecondary }
+                    },
+                    x: {
+                        grid: { display: false },
+                        ticks: { color: textSecondary }
+                    }
+                }
+            }
+        });
+    }
 });
 </script>
 

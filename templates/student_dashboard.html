@@ -1,28 +1,63 @@
 {% extends "layout.html" %}
 
 {% block content %}
-<div class="card">
-    <h1>Student Dashboard</h1>
-    <p><strong>Attendance Percentage:</strong> {{ percentage }}%</p>
+<div class="welcome-header" style="margin-bottom: 30px;">
+    <h1><i class="fa-solid fa-user-graduate"></i> {{ student.name }}'s Dashboard</h1>
+    <p style="color: var(--text-secondary);">Enrollment: {{ student.enrollment }} | Branch: {{ student.branch_name }}</p>
+</div>
+
+<div class="stats-grid">
+    <div class="stat-box" style="border-bottom: 4px solid var(--primary-color);">
+        <i class="fa-solid fa-calendar-check" style="font-size: 1.5rem; color: var(--text-secondary); margin-bottom: 15px;"></i>
+        <h3>Total Classes</h3>
+        <p class="count">{{ total_classes }}</p>
+    </div>
+    <div class="stat-box" style="border-bottom: 4px solid var(--success-color);">
+        <i class="fa-solid fa-circle-check" style="font-size: 1.5rem; color: var(--text-secondary); margin-bottom: 15px;"></i>
+        <h3>Present</h3>
+        <p class="count">{{ present_count }}</p>
+    </div>
+    <div class="stat-box" style="border-bottom: 4px solid var(--danger-color);">
+        <i class="fa-solid fa-circle-xmark" style="font-size: 1.5rem; color: var(--text-secondary); margin-bottom: 15px;"></i>
+        <h3>Absent</h3>
+        <p class="count">{{ absent_count }}</p>
+    </div>
+    <div class="stat-box" style="border-bottom: 4px solid var(--warning-color);">
+        <i class="fa-solid fa-chart-pie" style="font-size: 1.5rem; color: var(--text-secondary); margin-bottom: 15px;"></i>
+        <h3>Attendance</h3>
+        <p class="percentage">{{ percentage }}%</p>
+    </div>
+</div>
+
+<div class="grid" style="margin-bottom: 30px;">
+    <div class="card">
+        <h2 style="margin-bottom: 20px;"><i class="fa-solid fa-chart-pie"></i> Attendance Overview</h2>
+        <div style="height: 250px; position: relative;">
+            <canvas id="studentPieChart"></canvas>
+        </div>
+    </div>
+    <div class="card">
+        <h2 style="margin-bottom: 20px;"><i class="fa-solid fa-chart-column"></i> Subject-wise Analysis</h2>
+        <div style="height: 250px; position: relative;">
+            <canvas id="studentBarChart"></canvas>
+        </div>
+    </div>
 </div>
 
 {% if student_qr_data_uri %}
-<div class="card" style="display: flex; align-items: center; justify-content: space-between; gap: 20px; flex-wrap: wrap;">
+<div class="card" style="display: flex; align-items: center; justify-content: space-between; gap: 20px; flex-wrap: wrap; background: linear-gradient(135deg, #ffffff 0%, #f0f4ff 100%);">
     <div>
-        <h2 style="margin-bottom: 6px;">Your QR Code</h2>
-        <p style="margin: 0; color: var(--text-secondary);">Use this for quick identification.</p>
-        {% if student and student.enrollment %}
-        <p style="margin: 10px 0 0;"><strong>Enrollment:</strong> {{ student.enrollment }}</p>
-        {% endif %}
+        <h2 style="margin-bottom: 6px;"><i class="fa-solid fa-qrcode"></i> Your ID QR Code</h2>
+        <p style="margin: 0; color: var(--text-secondary);">Show this at the entrance or for quick check-ins.</p>
     </div>
-    <div style="background: white; border: 1px solid var(--border-color); border-radius: 12px; padding: 12px;">
-        <img src="{{ student_qr_data_uri }}" alt="Student QR" style="display:block; width: 180px; height: 180px;" />
+    <div style="background: white; border: 1px solid var(--border-color); border-radius: 12px; padding: 12px; box-shadow: var(--shadow-sm);">
+        <img src="{{ student_qr_data_uri }}" alt="Student QR" style="display:block; width: 140px; height: 140px;" />
     </div>
 </div>
 {% endif %}
 
 <div class="card">
-    <h2>Subject-wise Attendance</h2>
+    <h2><i class="fa-solid fa-list-ul"></i> Detailed Attendance Logs</h2>
 
     {% set icon_map = {
         'english': 'fa-pen-nib',
@@ -48,23 +83,97 @@
         {% endfor %}
     </div>
 
-    <table>
-        <thead>
-            <tr>
-                <th>Date</th>
-                <th>Subject</th>
-                <th>Status</th>
-            </tr>
-        </thead>
-        <tbody>
-            {% for record in attendance_records %}
-            <tr>
-                <td>{{ record.date }}</td>
-                <td>{{ record.subject_name }}</td>
-                <td>{{ record.status }}</td>
-            </tr>
-            {% endfor %}
-        </tbody>
-    </table>
+    <div class="table-responsive">
+        <table>
+            <thead>
+                <tr>
+                    <th>Date</th>
+                    <th>Subject</th>
+                    <th>Status</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for record in attendance_records %}
+                <tr>
+                    <td>{{ record.date }}</td>
+                    <td>{{ record.subject_name }}</td>
+                    <td>
+                        <span class="badge {% if record.status == 'Present' %}badge-success{% else %}badge-danger{% endif %}">
+                            {{ record.status }}
+                        </span>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
 </div>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const css = getComputedStyle(document.documentElement);
+    const primaryColor = css.getPropertyValue('--primary-color').trim();
+    const successColor = css.getPropertyValue('--success-color').trim();
+    const dangerColor = css.getPropertyValue('--danger-color').trim();
+    const textSecondary = css.getPropertyValue('--text-secondary').trim();
+    const borderColor = css.getPropertyValue('--border-color').trim();
+
+    // Pie Chart
+    const pieCtx = document.getElementById('studentPieChart').getContext('2d');
+    new Chart(pieCtx, {
+        type: 'doughnut',
+        data: {
+            labels: ['Present', 'Absent'],
+            datasets: [{
+                data: [{{ present_count }}, {{ absent_count }}],
+                backgroundColor: [successColor, dangerColor],
+                borderWidth: 0,
+                cutout: '70%'
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: { position: 'bottom', labels: { color: textSecondary, usePointStyle: true } }
+            }
+        }
+    });
+
+    // Bar Chart
+    const barCtx = document.getElementById('studentBarChart').getContext('2d');
+    new Chart(barCtx, {
+        type: 'bar',
+        data: {
+            labels: {{ subject_chart_labels | tojson }},
+            datasets: [{
+                label: 'Attendance %',
+                data: {{ subject_chart_percentages | tojson }},
+                backgroundColor: primaryColor,
+                borderRadius: 6,
+                maxBarThickness: 40
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            scales: {
+                y: {
+                    beginAtZero: true,
+                    max: 100,
+                    ticks: { callback: value => value + '%', color: textSecondary },
+                    grid: { color: borderColor, drawBorder: false }
+                },
+                x: {
+                    grid: { display: false },
+                    ticks: { color: textSecondary }
+                }
+            },
+            plugins: {
+                legend: { display: false }
+            }
+        }
+    });
+});
+</script>
 {% endblock %}

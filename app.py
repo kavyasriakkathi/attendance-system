@@ -702,22 +702,43 @@ def dashboard():
         FROM attendance
     """).fetchone()
 
+    total_classes = 0
+    present_count = 0
+    absent_count = 0
+    try:
+        total_classes = int(row_get(attendance_stats, "total_count") or 0)
+        present_count = int(row_get(attendance_stats, "present_count") or 0)
+        absent_count = max(total_classes - present_count, 0)
+    except Exception:
+        total_classes = 0
+        present_count = 0
+        absent_count = 0
+
     overall_percentage = 0
-    if attendance_stats["total_count"] > 0:
+    if total_classes > 0:
         overall_percentage = round(
-            (attendance_stats["present_count"] / attendance_stats["total_count"]) * 100, 1
+            (present_count / total_classes) * 100, 1
         )
 
-    subject_data = db.execute("""
-        SELECT subjects.name AS name,
-        ROUND(
-            COUNT(CASE WHEN attendance.status='Present' THEN 1 END)*100.0 / COUNT(*),
-            1
-        ) AS percentage
+    subject_data = db.execute(
+        """
+        SELECT
+            subjects.name AS name,
+            SUM(CASE WHEN attendance.status='Present' THEN 1 ELSE 0 END) AS present_count,
+            COUNT(*) AS total_count,
+            ROUND(
+                SUM(CASE WHEN attendance.status='Present' THEN 1 ELSE 0 END)*100.0 / NULLIF(COUNT(*), 0),
+                1
+            ) AS percentage
         FROM attendance
         JOIN subjects ON attendance.subject_id = subjects.id
-        GROUP BY subjects.id
-    """).fetchall()
+        GROUP BY subjects.id, subjects.name
+        ORDER BY subjects.name
+        """
+    ).fetchall()
+
+    subject_chart_labels = [row_get(r, "name") for r in subject_data]
+    subject_chart_percentages = [float(row_get(r, "percentage") or 0) for r in subject_data]
     branch_data = db.execute("""
         SELECT
             branches.name AS branch_name,
@@ -783,8 +804,13 @@ def dashboard():
         student_count=student_count,
         subject_count=subject_count,
         attendance_count=attendance_count,
+        total_classes=total_classes,
+        present_count=present_count,
+        absent_count=absent_count,
         overall_percentage=overall_percentage,
         subject_data=subject_data,
+        subject_chart_labels=subject_chart_labels,
+        subject_chart_percentages=subject_chart_percentages,
         branch_data=branch_data,
         chart_data=chart_data,
         database_info=database_info,
@@ -1530,7 +1556,24 @@ def student_dashboard():
 
     total = len(attendance_records)
     present = len([a for a in attendance_records if a["status"] == "Present"])
+    absent = total - present
     percentage = round((present / total) * 100, 1) if total > 0 else 0
+
+    # Subject-wise attendance for the chart
+    subject_stats = []
+    for sub in subjects:
+        sub_id = sub["id"]
+        sub_records = [r for r in attendance_records if r["subject_id"] == sub_id]
+        sub_total = len(sub_records)
+        sub_present = len([r for r in sub_records if r["status"] == "Present"])
+        sub_pct = round((sub_present / sub_total) * 100, 1) if sub_total > 0 else 0
+        subject_stats.append({
+            "name": sub["name"],
+            "percentage": sub_pct
+        })
+
+    subject_chart_labels = [s["name"] for s in subject_stats]
+    subject_chart_percentages = [s["percentage"] for s in subject_stats]
 
     student_qr_data_uri = None
     try:
@@ -1564,8 +1607,13 @@ def student_dashboard():
         "student_dashboard.html",
         student=student,
         attendance_records=attendance_records,
+        total_classes=total,
+        present_count=present,
+        absent_count=absent,
         percentage=percentage,
         subjects=subjects,
+        subject_chart_labels=subject_chart_labels,
+        subject_chart_percentages=subject_chart_percentages,
         selected_subject_id=selected_subject_id,
         student_qr_data_uri=student_qr_data_uri,
     )
