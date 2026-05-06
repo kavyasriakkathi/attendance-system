@@ -781,11 +781,12 @@ def dashboard():
     except Exception as e:
         print(f"[dashboard] CRITICAL ERROR: {repr(e)}")
         print(traceback.format_exc())
+        flash("Dashboard is temporarily unavailable due to a database error.", "error")
+        return render_template("dashboard.html", error_mode=True)
+    finally:
         if db:
             try: db.close()
             except: pass
-        flash("Dashboard is temporarily unavailable due to a database error.", "error")
-        return render_template("dashboard.html", error_mode=True)
 
 
 @app.route("/department-dashboard")
@@ -914,7 +915,6 @@ def department_dashboard():
                 "students": students_by_branch.get(dept_id, []),
             })
 
-        db.close()
         total_students_value = row_get(total_students, "count", 0) or 0
         total_subjects_value = row_get(total_subjects, "count", 0) or 0
         total_attendance_value = row_get(total_attendance, "count", 0) or 0
@@ -933,11 +933,12 @@ def department_dashboard():
     except Exception as e:
         print(f"[department_dashboard] ERROR: {repr(e)}")
         print(traceback.format_exc())
+        flash("Summary page is temporarily unavailable.", "error")
+        return redirect(url_for("dashboard"))
+    finally:
         if db:
             try: db.close()
             except: pass
-        flash("Summary page is temporarily unavailable.", "error")
-        return redirect(url_for("dashboard"))
 
 @app.route("/settings", methods=["GET", "POST"])
 @login_required
