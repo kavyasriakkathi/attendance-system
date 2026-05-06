@@ -93,89 +93,51 @@ app.config.from_mapping(
 
 def get_db():
     db_url = str(app.config.get("DATABASE", ""))
+    db = None
     if db_url.startswith("postgres"):
         try:
             import psycopg2
             from psycopg2.extras import DictCursor
         except Exception as e:
-            # If psycopg2 isn't installed in the environment, fail loudly with context.
-            # (This often shows up as "Internal Server Error" on Render.)
-            print("[DB] psycopg2 import failed. Is psycopg2-binary in requirements.txt?")
-            print(f"[DB] import_error={repr(e)}")
+            print("[DB] psycopg2 import failed.")
             raise
 
         def _ensure_sslmode(url: str) -> str:
-            """Render Postgres commonly requires SSL. Add sslmode=require if missing."""
-            # If user already provided sslmode in DATABASE_URL, keep it.
-            if "sslmode=" in url:
-                return url
-            # Only force SSL automatically on Render.
+            if "sslmode=" in url: return url
             is_render = bool(os.environ.get("RENDER") or os.environ.get("RENDER_INTERNAL_HOSTNAME"))
-            if not is_render:
-                return url
+            if not is_render: return url
             sep = "&" if "?" in url else "?"
             return f"{url}{sep}sslmode=require"
-
-        safe_db_url = _ensure_sslmode(db_url)
 
         class _PostgresDB:
             def __init__(self, conn):
                 self._conn = conn
-
             def execute(self, query, params=()):
-                # DictCursor returns DictRow which supports both index and key access
-                # (closer to sqlite3.Row behavior used throughout this codebase).
                 cur = self._conn.cursor(cursor_factory=DictCursor)
                 cur.execute(query, params)
                 return cur
-
-            def commit(self):
-                return self._conn.commit()
-
-            def rollback(self):
-                return self._conn.rollback()
-
-            def close(self):
-                return self._conn.close()
+            def commit(self): return self._conn.commit()
+            def rollback(self): return self._conn.rollback()
+            def close(self): return self._conn.close()
 
         try:
-            # connect_timeout prevents requests hanging forever during outages.
-            conn = psycopg2.connect(safe_db_url, connect_timeout=8)
+            conn = psycopg2.connect(_ensure_sslmode(db_url), connect_timeout=10)
+            db = _PostgresDB(conn)
         except Exception as e:
-            # Log a short, non-secret connection summary for Render.
-            try:
-                parsed = urlparse(db_url)
-                print(
-                    "[DB] PostgreSQL connection failed "
-                    f"host={parsed.hostname} port={parsed.port} db={parsed.path.lstrip('/')}"
-                )
-            except Exception:
-                print("[DB] PostgreSQL connection failed (unable to parse DATABASE_URL)")
-            print(f"[DB] error={repr(e)}")
+            print(f"[DB] PostgreSQL connection error: {repr(e)}")
             raise
-        db = _PostgresDB(conn)
+    else:
+        import sqlite3
+        conn = sqlite3.connect(db_url, timeout=20)
+        conn.row_factory = sqlite3.Row
+        db = conn
 
-        # Ensure schema exists (safe to call multiple times, but we guard for speed).
+    if db:
         try:
             ensure_db_initialized(db)
-        except Exception:
-            # Initialization failure should not crash every request handler.
-            # Individual routes will handle missing-table errors with user-friendly flashes.
+        except:
             pass
-
-        return db
-    else:
-        conn = sqlite3.connect(app.config["DATABASE"])
-        conn.row_factory = sqlite3.Row
-        print(f"Database connection opened: {app.config['DATABASE']}")
-
-        # SQLite schema init (no-op if already created)
-        try:
-            ensure_db_initialized(conn)
-        except Exception:
-            pass
-
-        return conn
+    return db
 
 
 def ensure_db_initialized(db) -> bool:
@@ -1440,77 +1402,67 @@ def upload_students():
 @app.route("/students", methods=["GET", "POST"])
 @login_required
 def students():
-    db = get_db()
-    placeholder = get_placeholder()
-    branches = db.execute(f"SELECT * FROM branches ORDER BY name").fetchall()
-    if request.method == "POST":
-        name = request.form["name"].strip()
-        enrollment = request.form["enrollment"].strip()
-        email = request.form["email"].strip()
-        branch_id = request.form.get("branch_id")
-        # Basic validation
-        if not (name and enrollment and branch_id):
-            flash("Student name, enrollment and branch are required.", "error")
-        elif email and not is_valid_email(email):
-            flash("Please enter a valid email address.", "error")
-        else:
-            # Check duplicates before attempting insert
-            existing = db.execute(
-                f"SELECT id FROM students WHERE enrollment = {placeholder}",
-                (enrollment,),
-            ).fetchone()
-            if existing:
-                flash("A student with this enrollment already exists.", "error")
+    db = None
+    try:
+        db = get_db()
+        placeholder = get_placeholder()
+        
+        if request.method == "POST":
+            name = request.form.get("name", "").strip()
+            enrollment = request.form.get("enrollment", "").strip()
+            branch_id = request.form.get("branch_id", "").strip()
+            email = request.form.get("email", "").strip()
+
+            if not name or not enrollment or not branch_id:
+                flash("Name, enrollment, and branch are required.", "error")
+            elif email and not is_valid_email(email):
+                flash("Please enter a valid email address.", "error")
             else:
-                try:
-                    if str(app.config.get("DATABASE", "")).startswith("postgres"):
-                        cursor = db.execute(
-                            f"INSERT INTO students (name, enrollment, email, branch_id) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}) RETURNING id",
-                            (name, enrollment, email, branch_id),
-                        )
-                        student_id = cursor.fetchone()[0]
-                    else:
-                        cursor = db.execute(
-                            f"INSERT INTO students (name, enrollment, email, branch_id) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder})",
-                            (name, enrollment, email, branch_id),
-                        )
-                        student_id = cursor.lastrowid
+                existing = db.execute(f"SELECT id FROM students WHERE enrollment = {placeholder}", (enrollment,)).fetchone()
+                if existing:
+                    flash("A student with this enrollment already exists.", "error")
+                else:
+                    try:
+                        if str(app.config.get("DATABASE", "")).startswith("postgres"):
+                            cur = db.execute(f"INSERT INTO students (name, enrollment, email, branch_id) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}) RETURNING id", (name, enrollment, email or None, branch_id))
+                            student_id = cur.fetchone()[0]
+                        else:
+                            cur = db.execute(f"INSERT INTO students (name, enrollment, email, branch_id) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder})", (name, enrollment, email or None, branch_id))
+                            student_id = cur.lastrowid
+                        
+                        db.execute(f"INSERT INTO users (username, password, role, student_id) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder})", (enrollment, generate_password_hash(enrollment[-4:]), "student", student_id))
+                        db.commit()
+                        flash("Student added successfully.", "success")
+                    except Exception as e:
+                        db.rollback()
+                        flash(f"Error adding student: {repr(e)}", "error")
 
-                    db.execute(
-                        f"INSERT INTO users (username, password, role, student_id) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder})",
-                        (enrollment, generate_password_hash(enrollment[-4:]), "student", student_id),
-                    )
-                    db.commit()
-                    flash("Student added successfully.", "success")
-                except Exception as e:
-                    db.rollback()
-                    print(f"Error adding student: {e}")
-                    flash("Enrollment or username already exists.", "error")
-
-    search = request.args.get("search", "").strip()
-    branch_filter = request.args.get("branch_id", "").strip()
-
-    query = "SELECT students.*, branches.name AS branch_name FROM students JOIN branches ON students.branch_id = branches.id"
-    clauses = []
-    params = []
-
-    if search:
-        like_op = "ILIKE" if str(app.config.get("DATABASE", "")).startswith("postgres") else "LIKE"
-        clauses.append(f"(students.name {like_op} {placeholder} OR students.enrollment {like_op} {placeholder})")
-        params.extend([f"%{search}%", f"%{search}%"])
-
-    if branch_filter:
-        clauses.append(f"students.branch_id = {placeholder}")
-        params.append(branch_filter)
-
-    if clauses:
-        query += " WHERE " + " AND ".join(clauses)
-
-    query += " ORDER BY students.name"
-    students = db.execute(query, params).fetchall()
-
-    db.close()
-    return render_template("students.html", students=students, branches=branches, search=search, selected_branch_id=branch_filter)
+        search = request.args.get("search", "").strip()
+        branch_filter = request.args.get("branch_id", "").strip()
+        
+        query = "SELECT students.*, branches.name AS branch_name FROM students JOIN branches ON students.branch_id = branches.id"
+        clauses, params = [], []
+        if search:
+            like_op = "ILIKE" if str(app.config.get("DATABASE", "")).startswith("postgres") else "LIKE"
+            clauses.append(f"(students.name {like_op} {placeholder} OR students.enrollment {like_op} {placeholder})")
+            params.extend([f"%{search}%", f"%{search}%"])
+        if branch_filter:
+            clauses.append(f"students.branch_id = {placeholder}")
+            params.append(branch_filter)
+        if clauses: query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY students.name"
+        
+        students_list = db.execute(query, params).fetchall()
+        branches_list = db.execute("SELECT id, name FROM branches ORDER BY name").fetchall()
+        db.close()
+        return render_template("students.html", students=students_list, branches=branches_list)
+    except Exception as e:
+        print(f"[students] ERROR: {repr(e)}")
+        if db:
+            try: db.close()
+            except: pass
+        flash("Student management is temporarily unavailable.", "error")
+        return redirect(url_for("dashboard"))
 
 
 @app.route("/student_login", methods=["GET", "POST"])
@@ -1605,113 +1557,73 @@ def teacher_login():
 @app.route("/student_dashboard")
 @login_required
 def student_dashboard():
-    if session.get("role") != "student":
-        return redirect(url_for("dashboard"))
-
     student_id = session.get("student_id")
     if not student_id:
+        flash("Student record not found.", "error")
         return redirect(url_for("student_login"))
 
-    db = get_db()
-    placeholder = get_placeholder()
-    student = db.execute(
-        f"""
-        SELECT students.*, branches.name AS branch_name
-        FROM students
-        JOIN branches ON students.branch_id = branches.id
-        WHERE students.id = {placeholder}
-        """,
-        (student_id,),
-    ).fetchone()
-
-    if not student:
-        db.close()
-        abort(404)
-
-    selected_subject_id = request.args.get("subject_id") or ""
-
-    subjects = db.execute(
-        f"SELECT id, name FROM subjects WHERE branch_id = {placeholder} ORDER BY name",
-        (student["branch_id"],),
-    ).fetchall()
-
-    attendance_query = (
-        f"SELECT attendance.date, attendance.status, subjects.name AS subject_name, subjects.id AS subject_id "
-        f"FROM attendance "
-        f"JOIN subjects ON attendance.subject_id = subjects.id "
-        f"WHERE attendance.student_id = {placeholder} "
-    )
-    params = [student_id]
-    if selected_subject_id:
-        attendance_query += f"AND attendance.subject_id = {placeholder} "
-        params.append(selected_subject_id)
-    attendance_query += "ORDER BY attendance.date DESC"
-
-    attendance_records = db.execute(attendance_query, tuple(params)).fetchall()
-
-    total = len(attendance_records)
-    present = len([a for a in attendance_records if a["status"] == "Present"])
-    absent = total - present
-    percentage = round((present / total) * 100, 1) if total > 0 else 0
-
-    # Subject-wise attendance for the chart
-    subject_stats = []
-    for sub in subjects:
-        sub_id = sub["id"]
-        sub_records = [r for r in attendance_records if r["subject_id"] == sub_id]
-        sub_total = len(sub_records)
-        sub_present = len([r for r in sub_records if r["status"] == "Present"])
-        sub_pct = round((sub_present / sub_total) * 100, 1) if sub_total > 0 else 0
-        subject_stats.append({
-            "name": sub["name"],
-            "percentage": sub_pct
-        })
-
-    subject_chart_labels = [s["name"] for s in subject_stats]
-    subject_chart_percentages = [s["percentage"] for s in subject_stats]
-
-    student_qr_data_uri = None
+    db = None
     try:
-        # Generate a small QR for quick student identification.
-        # Payload is intentionally simple so it remains stable.
-        import base64
-        from io import BytesIO
+        db = get_db()
+        placeholder = get_placeholder()
+        student = db.execute(f"SELECT students.*, branches.name AS branch_name FROM students JOIN branches ON students.branch_id = branches.id WHERE students.id = {placeholder}", (student_id,)).fetchone()
+        
+        if not student:
+            db.close()
+            abort(404)
 
-        import qrcode
+        selected_subject_id = request.args.get("subject_id") or ""
+        subjects = db.execute(f"SELECT id, name FROM subjects WHERE branch_id = {placeholder} ORDER BY name", (row_get(student, "branch_id"),)).fetchall()
+        
+        attendance_query = f"SELECT attendance.date, attendance.status, subjects.name AS subject_name, subjects.id AS subject_id FROM attendance JOIN subjects ON attendance.subject_id = subjects.id WHERE attendance.student_id = {placeholder} "
+        params = [student_id]
+        if selected_subject_id:
+            attendance_query += f"AND attendance.subject_id = {placeholder} "
+            params.append(selected_subject_id)
+        attendance_query += "ORDER BY attendance.date DESC"
+        
+        attendance_records = db.execute(attendance_query, tuple(params)).fetchall()
+        total = len(attendance_records)
+        present = len([a for a in attendance_records if row_get(a, "status") == "Present"])
+        absent = total - present
+        percentage = round((present / total) * 100, 1) if total > 0 else 0
 
-        enrollment = str(student.get("enrollment") or "")
-        payload = f"ENROLLMENT:{enrollment}" if enrollment else f"STUDENT_ID:{student_id}"
-        qr = qrcode.QRCode(
-            version=None,
-            error_correction=qrcode.constants.ERROR_CORRECT_M,
-            box_size=6,
-            border=2,
-        )
-        qr.add_data(payload)
-        qr.make(fit=True)
-        img = qr.make_image(fill_color="black", back_color="white")
-        buf = BytesIO()
-        img.save(buf, format="PNG")
-        student_qr_data_uri = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+        subject_stats = []
+        for sub in subjects:
+            sub_id = row_get(sub, "id")
+            sub_records = [r for r in attendance_records if row_get(r, "subject_id") == sub_id]
+            sub_total = len(sub_records)
+            sub_present = len([r for r in sub_records if row_get(r, "status") == "Present"])
+            sub_pct = round((sub_present / sub_total) * 100, 1) if sub_total > 0 else 0
+            subject_stats.append({"name": row_get(sub, "name"), "percentage": sub_pct})
+
+        subject_chart_labels = [s["name"] for s in subject_stats]
+        subject_chart_percentages = [s["percentage"] for s in subject_stats]
+
+        student_qr_data_uri = None
+        try:
+            import base64, qrcode
+            from io import BytesIO
+            enrollment = str(row_get(student, "enrollment") or "")
+            payload = f"ENROLLMENT:{enrollment}" if enrollment else f"STUDENT_ID:{student_id}"
+            qr = qrcode.QRCode(version=None, error_correction=qrcode.constants.ERROR_CORRECT_M, box_size=6, border=2)
+            qr.add_data(payload)
+            qr.make(fit=True)
+            img = qr.make_image(fill_color="black", back_color="white")
+            buf = BytesIO()
+            img.save(buf, format="PNG")
+            student_qr_data_uri = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+        except: pass
+
+        db.close()
+        return render_template("student_dashboard.html", student=student, attendance_records=attendance_records, total_classes=total, present_count=present, absent_count=absent, percentage=percentage, subjects=subjects, subject_chart_labels=subject_chart_labels, subject_chart_percentages=subject_chart_percentages, selected_subject_id=selected_subject_id, student_qr_data_uri=student_qr_data_uri)
     except Exception as e:
-        # QR is a convenience feature; do not fail the dashboard if it can't be generated.
-        print(f"[student_dashboard] QR generation skipped: {repr(e)}")
-
-    db.close()
-    return render_template(
-        "student_dashboard.html",
-        student=student,
-        attendance_records=attendance_records,
-        total_classes=total,
-        present_count=present,
-        absent_count=absent,
-        percentage=percentage,
-        subjects=subjects,
-        subject_chart_labels=subject_chart_labels,
-        subject_chart_percentages=subject_chart_percentages,
-        selected_subject_id=selected_subject_id,
-        student_qr_data_uri=student_qr_data_uri,
-    )
+        print(f"[student_dashboard] ERROR: {repr(e)}")
+        if db:
+            try: db.close()
+            except: pass
+        flash("Your dashboard is temporarily unavailable.", "error")
+        return redirect(url_for("student_login"))
 
 
 @app.route("/student_dashboard/<int:student_id>")
