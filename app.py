@@ -650,7 +650,11 @@ def index():
 @app.route("/dashboard")
 @login_required
 def dashboard():
+    """Main admin dashboard with stats and charts."""
+    db = None
     try:
+        db = get_db()
+        placeholder = get_placeholder()
         branch_count = db.execute("SELECT COUNT(*) FROM branches").fetchone()[0]
         student_count = db.execute("SELECT COUNT(*) FROM students").fetchone()[0]
         subject_count = db.execute("SELECT COUNT(*) FROM subjects").fetchone()[0]
