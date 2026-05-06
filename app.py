@@ -2121,68 +2121,56 @@ def build_report_excel(records):
 @app.route("/download_attendance")
 @login_required
 def download_attendance():
-    """Download attendance as an Excel file.
-
-    Optional filters (query params):
-    - branch_id
-    - subject_id
-    - from_date / to_date (or start_date / end_date)
-
-    For safety, if a student is logged in, the export is limited to that student.
-    """
-
-    filters = {
-        "branch_id": (request.args.get("branch_id") or "").strip() or None,
-        "subject_id": (request.args.get("subject_id") or "").strip() or None,
-        "from_date": (
-            (request.args.get("from_date") or request.args.get("start_date") or "").strip() or None
-        ),
-        "to_date": (
-            (request.args.get("to_date") or request.args.get("end_date") or "").strip() or None
-        ),
-    }
-
-    if session.get("role") == "student":
-        filters["student_id"] = session.get("student_id")
-
-    db = get_db()
+    """Download attendance as an Excel file. Robust and memory efficient."""
+    db = None
     try:
-        records = fetch_report_records(db, filters)
+        db = get_db()
+        filters = {
+            "branch_id": request.args.get("branch_id"),
+            "subject_id": request.args.get("subject_id"),
+            "from_date": request.args.get("from_date"),
+            "to_date": request.args.get("to_date")
+        }
+        
+        if session.get("role") == "student":
+            filters["student_id"] = session.get("student_id")
 
+        records = fetch_report_records(db, filters)
+        
         rows = []
-        for record in records:
-            rows.append(
-                {
-                    "Date": row_get(record, "date"),
-                    "Student": row_get(record, "student_name"),
-                    "Subject": row_get(record, "subject_name"),
-                    "Status": row_get(record, "status"),
-                }
-            )
+        for r in records:
+            rows.append({
+                "Date": row_get(r, "date"),
+                "Student": row_get(r, "student_name"),
+                "Subject": row_get(r, "subject_name"),
+                "Branch": row_get(r, "branch_name"),
+                "Status": row_get(r, "status")
+            })
 
         import pandas as pd
-
-        output = BytesIO()
         df = pd.DataFrame(rows)
         if df.empty:
-            df = pd.DataFrame(columns=["Date", "Student", "Subject", "Status"])
+            df = pd.DataFrame(columns=["Date", "Student", "Subject", "Branch", "Status"])
 
+        output = BytesIO()
         with pd.ExcelWriter(output, engine="openpyxl") as writer:
             df.to_excel(writer, index=False, sheet_name="Attendance")
         output.seek(0)
 
-        filename = f"attendance_report_{date.today().isoformat()}.xlsx"
+        db.close()
         return send_file(
             output,
             as_attachment=True,
-            download_name=filename,
-            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            download_name=f"attendance_report_{date.today()}.xlsx",
+            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
-    finally:
-        try:
-            db.close()
-        except Exception:
-            pass
+    except Exception as e:
+        print(f"[DOWNLOAD] Error: {repr(e)}")
+        if db:
+            try: db.close()
+            except: pass
+        flash("Failed to generate Excel report.", "error")
+        return redirect(url_for("dashboard"))
 
 
 @app.route("/reports", methods=["GET", "POST"])
@@ -2656,5 +2644,63 @@ with app.app_context():
     except Exception as e:
         print(f"Database initialization failed: {repr(e)}")
         print(traceback.format_exc())
+
+@app.route("/admin/notify-low-attendance", methods=["POST"])
+@login_required
+def trigger_low_attendance_scan():
+    """Admin route to scan and notify students with < 75% attendance."""
+    if session.get("role") != "admin":
+        abort(403)
+        
+    db = None
+    try:
+        db = get_db()
+        # Query for all students with low attendance
+        query = """
+            SELECT 
+                s.id, s.name, s.email,
+                COUNT(a.id) as total,
+                SUM(CASE WHEN a.status = 'Present' THEN 1 ELSE 0 END) as present
+            FROM students s
+            LEFT JOIN attendance a ON s.id = a.student_id
+            GROUP BY s.id, s.name, s.email
+            HAVING COUNT(a.id) >= 5
+        """
+        rows = db.execute(query).fetchall()
+        count = 0
+        for row in rows:
+            total = row_get(row, "total")
+            present = row_get(row, "present")
+            pct = (present / total) * 100
+            if pct < 75:
+                email = row_get(row, "email")
+                if email and is_valid_email(email):
+                    subject = "Attendance Warning (<75%)"
+                    body = f"Dear {row_get(row, 'name')},\n\nYour current attendance is {round(pct, 1)}%. This is below the required 75% threshold.\n\nPlease attend classes regularly.\n\nRegards,\nAdministration"
+                    if safe_send_email(subject, email, body):
+                        count += 1
+        
+        db.close()
+        flash(f"Scan complete. Notified {count} students with low attendance.", "success")
+        return redirect(url_for("dashboard"))
+    except Exception as e:
+        print(f"[ALERT] Error during scan: {repr(e)}")
+        if db:
+            try: db.close()
+            except: pass
+        flash("An error occurred during the attendance scan.", "error")
+        return redirect(url_for("dashboard"))
+
+@app.errorhandler(500)
+def internal_error(error):
+    """Global handler for Internal Server Errors."""
+    print(f"[CRITICAL] 500 ERROR: {repr(error)}")
+    print(traceback.format_exc())
+    return "<h1>Internal Server Error</h1><p>Our team has been notified. Please try again later.</p>", 500
+
+@app.errorhandler(404)
+def not_found_error(error):
+    return "<h1>404 Not Found</h1><p>The page you requested does not exist.</p>", 404
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
