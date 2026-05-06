@@ -1272,8 +1272,13 @@ def upload_students():
                     found_header = True
                     break
             
-            # Re-read or just slice the dataframe
+            # Reset file pointer before re-reading with correct header
+            file.seek(0)
             df = pd.read_excel(file, skiprows=header_idx)
+            
+            if df.empty:
+                flash("The Excel file seems to be empty after the header row.", "error")
+                return redirect(url_for("upload_students"))
         except Exception as e:
             print(f"[upload_students] Failed to read Excel: {repr(e)}")
             flash("Failed to read the Excel file. Please check the format.", "error")
