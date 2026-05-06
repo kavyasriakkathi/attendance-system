@@ -1404,6 +1404,92 @@ def upload_students():
     return render_template("upload_students.html")
 
 
+@app.route("/upload_students_csv", methods=["GET", "POST"])
+@login_required
+def upload_students_csv():
+    """Simple CSV upload for students with automatic login creation."""
+    if request.method == "POST":
+        file = request.files.get("file")
+        if not file or not file.filename.endswith(".csv"):
+            flash("Please upload a valid CSV file.", "error")
+            return redirect(url_for("upload_students_csv"))
+
+        try:
+            import pandas as pd
+            # Use pandas to read CSV for better handling of delimiters and whitespace
+            df = pd.read_csv(file)
+            
+            # Standardize column names to lowercase
+            df.columns = [str(c).strip().lower() for c in df.columns]
+            
+            required = {"name", "enrollment", "email", "branch_id"}
+            if not required.issubset(set(df.columns)):
+                flash(f"CSV must contain: {', '.join(required)}", "error")
+                return redirect(url_for("upload_students_csv"))
+
+            db = get_db()
+            placeholder = get_placeholder()
+            is_postgres = str(app.config.get("DATABASE", "")).startswith("postgres")
+            
+            inserted = 0
+            skipped = 0
+
+            for _, row in df.iterrows():
+                name = str(row["name"]).strip()
+                enrollment = str(row["enrollment"]).strip()
+                email = str(row["email"]).strip()
+                branch_id = str(row["branch_id"]).strip()
+
+                if not name or not enrollment or not branch_id:
+                    continue
+
+                # 1) Duplicate Check
+                existing = db.execute(f"SELECT id FROM students WHERE enrollment = {placeholder}", (enrollment,)).fetchone()
+                if existing:
+                    skipped += 1
+                    continue
+
+                try:
+                    # 2) Insert Student
+                    if is_postgres:
+                        cur = db.execute(
+                            f"INSERT INTO students (name, enrollment, email, branch_id) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}) RETURNING id",
+                            (name, enrollment, email or None, branch_id)
+                        )
+                        student_id = cur.fetchone()[0]
+                    else:
+                        cur = db.execute(
+                            f"INSERT INTO students (name, enrollment, email, branch_id) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder})",
+                            (name, enrollment, email or None, branch_id)
+                        )
+                        student_id = cur.lastrowid
+
+                    # 3) Create User Account (Password = last 4 digits of enrollment)
+                    password_plain = enrollment[-4:] if len(enrollment) >= 4 else enrollment
+                    password_hash = generate_password_hash(password_plain)
+                    
+                    db.execute(
+                        f"INSERT INTO users (username, password, role, student_id) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder})",
+                        (enrollment, password_hash, "student", student_id)
+                    )
+                    inserted += 1
+                except Exception as e:
+                    print(f"[CSV Upload Error] Row {enrollment}: {repr(e)}")
+                    continue
+
+            db.commit()
+            db.close()
+            flash(f"Upload complete! {inserted} students added, {skipped} skipped.", "success")
+            return redirect(url_for("students"))
+
+        except Exception as e:
+            print(f"[CSV CRITICAL] {repr(e)}")
+            flash("Failed to process CSV file. Ensure it is correctly formatted.", "error")
+            return redirect(url_for("upload_students_csv"))
+
+    return render_template("upload_students_csv.html")
+
+
 @app.route("/students", methods=["GET", "POST"])
 @login_required
 def students():
