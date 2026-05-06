@@ -1,5 +1,6 @@
 import os
 from datetime import date, timedelta
+from io import BytesIO
 import sqlite3
 import smtplib
 import ssl
@@ -10,7 +11,7 @@ from urllib.parse import urlparse
 from email.message import EmailMessage
 from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 
-from flask import Flask, abort, redirect, render_template, request, session, url_for, flash, jsonify
+from flask import Flask, abort, redirect, render_template, request, session, url_for, flash, jsonify, send_file
 from functools import wraps
 from werkzeug.security import check_password_hash, generate_password_hash
 from werkzeug.exceptions import HTTPException
@@ -1606,15 +1607,8 @@ def attendance_success():
     )
 
 
-@app.route("/reports", methods=["GET", "POST"])
-@login_required
-def attendance_report():
-    db = get_db()
-    placeholder = get_placeholder()
-    branches = db.execute(f"SELECT * FROM branches ORDER BY name").fetchall()
-    subjects = []
-    records = []
-    filters = {
+def get_report_filters():
+    return {
         "branch_id": request.args.get("branch_id") or request.form.get("branch_id"),
         "subject_id": request.args.get("subject_id") or request.form.get("subject_id"),
         "student_id": request.args.get("student_id") or request.form.get("student_id"),
@@ -1622,28 +1616,33 @@ def attendance_report():
         "to_date": request.args.get("to_date") or request.form.get("to_date"),
     }
 
-    if filters["branch_id"]:
-        subjects = db.execute(
-            f"SELECT * FROM subjects WHERE branch_id = {placeholder} ORDER BY name", (filters["branch_id"],)
-        ).fetchall()
 
-    query = f"SELECT attendance.*, students.name AS student_name, students.enrollment, branches.name AS branch_name, subjects.name AS subject_name FROM attendance JOIN students ON attendance.student_id = students.id JOIN branches ON attendance.branch_id = branches.id JOIN subjects ON attendance.subject_id = subjects.id"
+def fetch_report_records(db, filters):
+    placeholder = get_placeholder()
+    query = (
+        "SELECT attendance.*, students.name AS student_name, students.enrollment, "
+        "branches.name AS branch_name, subjects.name AS subject_name "
+        "FROM attendance "
+        "JOIN students ON attendance.student_id = students.id "
+        "JOIN branches ON attendance.branch_id = branches.id "
+        "JOIN subjects ON attendance.subject_id = subjects.id"
+    )
     clauses = []
     params = []
 
-    if filters["branch_id"]:
+    if filters.get("branch_id"):
         clauses.append(f"attendance.branch_id = {placeholder}")
         params.append(filters["branch_id"])
-    if filters["subject_id"]:
+    if filters.get("subject_id"):
         clauses.append(f"attendance.subject_id = {placeholder}")
         params.append(filters["subject_id"])
-    if filters["student_id"]:
+    if filters.get("student_id"):
         clauses.append(f"attendance.student_id = {placeholder}")
         params.append(filters["student_id"])
-    if filters["from_date"]:
+    if filters.get("from_date"):
         clauses.append(f"attendance.date >= {placeholder}")
         params.append(filters["from_date"])
-    if filters["to_date"]:
+    if filters.get("to_date"):
         clauses.append(f"attendance.date <= {placeholder}")
         params.append(filters["to_date"])
 
@@ -1651,58 +1650,88 @@ def attendance_report():
         query += " WHERE " + " AND ".join(clauses)
 
     query += " ORDER BY attendance.date DESC, students.name"
-    records = db.execute(query, params).fetchall()
+    return db.execute(query, params).fetchall()
+
+
+def build_report_stats(records):
+    stats = {}
+    if not records:
+        return stats
+
+    student_stats = {}
+    subject_stats = {}
+    total_records = len(records)
+
+    for record in records:
+        student_id = row_get(record, "student_id")
+        subject_id = row_get(record, "subject_id")
+        status = row_get(record, "status")
+
+        if student_id not in student_stats:
+            student_stats[student_id] = {
+                "total": 0,
+                "present": 0,
+                "name": row_get(record, "student_name"),
+                "enrollment": row_get(record, "enrollment"),
+            }
+        student_stats[student_id]["total"] += 1
+        if status == "Present":
+            student_stats[student_id]["present"] += 1
+
+        if subject_id not in subject_stats:
+            subject_stats[subject_id] = {
+                "total": 0,
+                "present": 0,
+                "name": row_get(record, "subject_name"),
+            }
+        subject_stats[subject_id]["total"] += 1
+        if status == "Present":
+            subject_stats[subject_id]["present"] += 1
+
+    for student_id, data in student_stats.items():
+        data["percentage"] = round((data["present"] / data["total"]) * 100, 1) if data["total"] > 0 else 0
+
+    for subject_id, data in subject_stats.items():
+        data["percentage"] = round((data["present"] / data["total"]) * 100, 1) if data["total"] > 0 else 0
+
+    stats = {
+        "student_stats": list(student_stats.values()),
+        "subject_stats": list(subject_stats.values()),
+        "total_records": total_records,
+        "overall_present": sum(s["present"] for s in student_stats.values()),
+        "overall_total": sum(s["total"] for s in student_stats.values()),
+    }
+    if stats["overall_total"] > 0:
+        stats["overall_percentage"] = round((stats["overall_present"] / stats["overall_total"]) * 100, 1)
+    else:
+        stats["overall_percentage"] = 0
+
+    return stats
+
+
+@app.route("/reports", methods=["GET", "POST"])
+@login_required
+def attendance_report():
+    db = get_db()
+    branches = db.execute(f"SELECT * FROM branches ORDER BY name").fetchall()
+    subjects = []
+    records = []
+    filters = get_report_filters()
+    placeholder = get_placeholder()
+
+    if filters["branch_id"]:
+        subjects = db.execute(
+            f"SELECT * FROM subjects WHERE branch_id = {placeholder} ORDER BY name", (filters["branch_id"],)
+        ).fetchall()
+
+    records = fetch_report_records(db, filters)
     students = []
     if filters["branch_id"]:
         students = db.execute(
             f"SELECT * FROM students WHERE branch_id = {placeholder} ORDER BY name", (filters["branch_id"],)
         ).fetchall()
 
-    # Calculate attendance percentages
-    stats = {}
-    if records:
-        # Student-wise attendance
-        student_stats = {}
-        subject_stats = {}
-        total_records = len(records)
-
-        for record in records:
-            student_id = record["student_id"]
-            subject_id = record["subject_id"]
-            status = record["status"]
-
-            # Student stats
-            if student_id not in student_stats:
-                student_stats[student_id] = {"total": 0, "present": 0, "name": record["student_name"], "enrollment": record["enrollment"]}
-            student_stats[student_id]["total"] += 1
-            if status == "Present":
-                student_stats[student_id]["present"] += 1
-
-            # Subject stats
-            if subject_id not in subject_stats:
-                subject_stats[subject_id] = {"total": 0, "present": 0, "name": record["subject_name"]}
-            subject_stats[subject_id]["total"] += 1
-            if status == "Present":
-                subject_stats[subject_id]["present"] += 1
-
-        # Calculate percentages
-        for student_id, data in student_stats.items():
-            data["percentage"] = round((data["present"] / data["total"]) * 100, 1) if data["total"] > 0 else 0
-
-        for subject_id, data in subject_stats.items():
-            data["percentage"] = round((data["present"] / data["total"]) * 100, 1) if data["total"] > 0 else 0
-
-        stats = {
-            "student_stats": list(student_stats.values()),
-            "subject_stats": list(subject_stats.values()),
-            "total_records": total_records,
-            "overall_present": sum(s["present"] for s in student_stats.values()),
-            "overall_total": sum(s["total"] for s in student_stats.values())
-        }
-        if stats["overall_total"] > 0:
-            stats["overall_percentage"] = round((stats["overall_present"] / stats["overall_total"]) * 100, 1)
-        else:
-            stats["overall_percentage"] = 0
+    stats = build_report_stats(records)
 
     db.close()
     return render_template(
@@ -1714,6 +1743,136 @@ def attendance_report():
         filters=filters,
         stats=stats,
     )
+
+
+@app.route("/reports/export")
+@login_required
+def export_excel():
+    db = get_db()
+    try:
+        filters = get_report_filters()
+        records = fetch_report_records(db, filters)
+
+        rows = []
+        for record in records:
+            rows.append(
+                {
+                    "Date": row_get(record, "date"),
+                    "Student": row_get(record, "student_name"),
+                    "Enrollment": row_get(record, "enrollment"),
+                    "Branch": row_get(record, "branch_name"),
+                    "Subject": row_get(record, "subject_name"),
+                    "Status": row_get(record, "status"),
+                    "Note": row_get(record, "note"),
+                }
+            )
+
+        import pandas as pd
+
+        output = BytesIO()
+        df = pd.DataFrame(rows)
+        if df.empty:
+            df = pd.DataFrame(columns=["Date", "Student", "Enrollment", "Branch", "Subject", "Status", "Note"])
+        with pd.ExcelWriter(output, engine="openpyxl") as writer:
+            df.to_excel(writer, index=False, sheet_name="Attendance")
+        output.seek(0)
+
+        filename = f"attendance_report_{date.today().isoformat()}.xlsx"
+        return send_file(
+            output,
+            as_attachment=True,
+            download_name=filename,
+            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass
+
+
+@app.route("/reports/email", methods=["POST"])
+@login_required
+def report_email():
+    filters = get_report_filters()
+    redirect_params = {k: v for k, v in filters.items() if v}
+
+    if not is_mail_configured():
+        flash("Email is not configured. Please set MAIL_USERNAME and MAIL_PASSWORD.", "error")
+        return redirect(url_for("attendance_report", **redirect_params))
+
+    recipient = (app.config.get("MAIL_USERNAME") or app.config.get("MAIL_FROM") or "").strip()
+    if not recipient:
+        flash("Email recipient is not configured.", "error")
+        return redirect(url_for("attendance_report", **redirect_params))
+
+    db = get_db()
+    try:
+        placeholder = get_placeholder()
+        branch_name = "All branches"
+        subject_name = "All subjects"
+        student_name = "All students"
+
+        if filters.get("branch_id"):
+            branch_row = db.execute(
+                f"SELECT name FROM branches WHERE id = {placeholder}",
+                (filters["branch_id"],),
+            ).fetchone()
+            branch_name = row_get(branch_row, "name") or branch_name
+
+        if filters.get("subject_id"):
+            subject_row = db.execute(
+                f"SELECT name FROM subjects WHERE id = {placeholder}",
+                (filters["subject_id"],),
+            ).fetchone()
+            subject_name = row_get(subject_row, "name") or subject_name
+
+        if filters.get("student_id"):
+            student_row = db.execute(
+                f"SELECT name FROM students WHERE id = {placeholder}",
+                (filters["student_id"],),
+            ).fetchone()
+            student_name = row_get(student_row, "name") or student_name
+
+        records = fetch_report_records(db, filters)
+        stats = build_report_stats(records)
+
+        body_lines = [
+            "Attendance Report",
+            "",
+            f"Branch: {branch_name}",
+            f"Subject: {subject_name}",
+            f"Student: {student_name}",
+        ]
+        if filters.get("from_date") or filters.get("to_date"):
+            body_lines.append(
+                f"Date range: {filters.get('from_date') or 'Any'} to {filters.get('to_date') or 'Any'}"
+            )
+        body_lines.extend(
+            [
+                "",
+                f"Total records: {stats.get('total_records', 0)}",
+                f"Overall attendance: {stats.get('overall_percentage', 0)}%",
+            ]
+        )
+
+        email_sent = safe_send_email(
+            subject="Attendance Report",
+            recipient=recipient,
+            body="\n".join(body_lines),
+        )
+
+        if email_sent:
+            flash("Report emailed successfully.", "success")
+        else:
+            flash("Failed to send the report email.", "error")
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass
+
+    return redirect(url_for("attendance_report", **redirect_params))
 
 
 # # SocketIO Event Handlers for Real-time Updates (disabled for Render)

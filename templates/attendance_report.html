@@ -46,12 +46,15 @@
     <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
         <h2 style="margin: 0;"><i class="fa-solid fa-chart-simple"></i> Attendance Statistics</h2>
         <div style="display: flex; gap: 10px;">
-            <a href="{{ url_for('export_excel') }}" class="button" style="padding: 8px 16px; font-size: 0.85rem; background-color: var(--success-color);">
+            <a href="{{ url_for('export_excel', branch_id=filters.branch_id or '', subject_id=filters.subject_id or '', student_id=filters.student_id or '', from_date=filters.from_date or '', to_date=filters.to_date or '') }}" class="button" style="padding: 8px 16px; font-size: 0.85rem; background-color: var(--success-color);">
                 <i class="fa-solid fa-file-excel"></i> Export Excel
             </a>
             <form action="{{ url_for('report_email') }}" method="post" style="display: inline;">
                 <input type="hidden" name="branch_id" value="{{ filters.branch_id or '' }}">
                 <input type="hidden" name="subject_id" value="{{ filters.subject_id or '' }}">
+                <input type="hidden" name="student_id" value="{{ filters.student_id or '' }}">
+                <input type="hidden" name="from_date" value="{{ filters.from_date or '' }}">
+                <input type="hidden" name="to_date" value="{{ filters.to_date or '' }}">
                 <button type="submit" class="button" style="padding: 8px 16px; font-size: 0.85rem; background-color: var(--primary-color);">
                     <i class="fa-solid fa-envelope"></i> Email Report
                 </button>
