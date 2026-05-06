@@ -86,6 +86,7 @@ app.config.from_mapping(
     MAIL_PASSWORD=mail_password,
     MAIL_USE_TLS=os.environ.get("MAIL_USE_TLS", "True").lower() in ("true", "1", "yes"),
     MAIL_FROM=os.environ.get("MAIL_FROM", mail_username),
+    REPORT_ADMIN_EMAIL=os.environ.get("REPORT_ADMIN_EMAIL", "instituteattendanceapp@gmail.com"),
     LOW_ATTENDANCE_THRESHOLD=int(os.environ.get("LOW_ATTENDANCE_THRESHOLD", 75)),
 )
 
@@ -261,7 +262,7 @@ def set_setting(db, key, value):
         )
 
 
-def send_email(subject, recipient, body):
+def send_email(subject, recipient, body, attachments=None):
     # If credentials are not configured, allow a local dev fallback when explicitly enabled
     dev_fallback_enabled = os.environ.get("MAIL_DEV_FALLBACK", "False").lower() in ("1", "true", "yes")
     if not is_mail_configured():
@@ -284,6 +285,19 @@ def send_email(subject, recipient, body):
         msg["From"] = from_addr
         msg["To"] = recipient
         msg.set_content(body)
+
+        if attachments:
+            for attachment in attachments:
+                filename = (attachment.get("filename") or "attachment").strip()
+                content = attachment.get("content", b"")
+                if isinstance(content, str):
+                    content = content.encode("utf-8")
+                mimetype = attachment.get("mimetype") or "application/octet-stream"
+                if "/" in mimetype:
+                    maintype, subtype = mimetype.split("/", 1)
+                else:
+                    maintype, subtype = "application", "octet-stream"
+                msg.add_attachment(content, maintype=maintype, subtype=subtype, filename=filename)
     except Exception as e:
         print(f"Email not sent: failed to build message: {repr(e)}")
         return False
@@ -355,10 +369,10 @@ def send_email(subject, recipient, body):
         return False
 
 
-def safe_send_email(subject: str, recipient: str, body: str) -> bool:
+def safe_send_email(subject: str, recipient: str, body: str, attachments=None) -> bool:
     """Wrapper around send_email() that guarantees no exception escapes."""
     try:
-        return bool(send_email(subject=subject, recipient=recipient, body=body))
+        return bool(send_email(subject=subject, recipient=recipient, body=body, attachments=attachments))
     except Exception as e:
         print(f"safe_send_email: unexpected error: {repr(e)}")
         return False
@@ -1709,6 +1723,35 @@ def build_report_stats(records):
     return stats
 
 
+def build_report_excel(records):
+    rows = []
+    for record in records:
+        rows.append(
+            {
+                "Date": row_get(record, "date"),
+                "Student": row_get(record, "student_name"),
+                "Enrollment": row_get(record, "enrollment"),
+                "Branch": row_get(record, "branch_name"),
+                "Subject": row_get(record, "subject_name"),
+                "Status": row_get(record, "status"),
+                "Note": row_get(record, "note"),
+            }
+        )
+
+    import pandas as pd
+
+    output = BytesIO()
+    df = pd.DataFrame(rows)
+    if df.empty:
+        df = pd.DataFrame(columns=["Date", "Student", "Enrollment", "Branch", "Subject", "Status", "Note"])
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="Attendance")
+    output.seek(0)
+
+    filename = f"attendance_report_{date.today().isoformat()}.xlsx"
+    return output.getvalue(), filename
+
+
 @app.route("/reports", methods=["GET", "POST"])
 @login_required
 def attendance_report():
@@ -1752,34 +1795,9 @@ def export_excel():
     try:
         filters = get_report_filters()
         records = fetch_report_records(db, filters)
-
-        rows = []
-        for record in records:
-            rows.append(
-                {
-                    "Date": row_get(record, "date"),
-                    "Student": row_get(record, "student_name"),
-                    "Enrollment": row_get(record, "enrollment"),
-                    "Branch": row_get(record, "branch_name"),
-                    "Subject": row_get(record, "subject_name"),
-                    "Status": row_get(record, "status"),
-                    "Note": row_get(record, "note"),
-                }
-            )
-
-        import pandas as pd
-
-        output = BytesIO()
-        df = pd.DataFrame(rows)
-        if df.empty:
-            df = pd.DataFrame(columns=["Date", "Student", "Enrollment", "Branch", "Subject", "Status", "Note"])
-        with pd.ExcelWriter(output, engine="openpyxl") as writer:
-            df.to_excel(writer, index=False, sheet_name="Attendance")
-        output.seek(0)
-
-        filename = f"attendance_report_{date.today().isoformat()}.xlsx"
+        content, filename = build_report_excel(records)
         return send_file(
-            output,
+            BytesIO(content),
             as_attachment=True,
             download_name=filename,
             mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -1801,9 +1819,13 @@ def report_email():
         flash("Email is not configured. Please set MAIL_USERNAME and MAIL_PASSWORD.", "error")
         return redirect(url_for("attendance_report", **redirect_params))
 
-    recipient = (app.config.get("MAIL_USERNAME") or app.config.get("MAIL_FROM") or "").strip()
+    recipient = (app.config.get("REPORT_ADMIN_EMAIL") or "").strip()
     if not recipient:
         flash("Email recipient is not configured.", "error")
+        return redirect(url_for("attendance_report", **redirect_params))
+
+    if not is_valid_email(recipient):
+        flash("Email recipient is invalid.", "error")
         return redirect(url_for("attendance_report", **redirect_params))
 
     db = get_db()
@@ -1836,6 +1858,7 @@ def report_email():
 
         records = fetch_report_records(db, filters)
         stats = build_report_stats(records)
+        content, filename = build_report_excel(records)
 
         body_lines = [
             "Attendance Report",
@@ -1860,10 +1883,17 @@ def report_email():
             subject="Attendance Report",
             recipient=recipient,
             body="\n".join(body_lines),
+            attachments=[
+                {
+                    "filename": filename,
+                    "content": content,
+                    "mimetype": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                }
+            ],
         )
 
         if email_sent:
-            flash("Report emailed successfully.", "success")
+            flash(f"Report emailed successfully to {recipient}.", "success")
         else:
             flash("Failed to send the report email.", "error")
     finally:
