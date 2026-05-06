@@ -1411,11 +1411,30 @@ def students():
                     print(f"Error adding student: {e}")
                     flash("Enrollment or username already exists.", "error")
 
-    students = db.execute(
-        f"SELECT students.*, branches.name AS branch_name FROM students JOIN branches ON students.branch_id = branches.id ORDER BY students.name"
-    ).fetchall()
+    search = request.args.get("search", "").strip()
+    branch_filter = request.args.get("branch_id", "").strip()
+
+    query = "SELECT students.*, branches.name AS branch_name FROM students JOIN branches ON students.branch_id = branches.id"
+    clauses = []
+    params = []
+
+    if search:
+        like_op = "ILIKE" if str(app.config.get("DATABASE", "")).startswith("postgres") else "LIKE"
+        clauses.append(f"(students.name {like_op} {placeholder} OR students.enrollment {like_op} {placeholder})")
+        params.extend([f"%{search}%", f"%{search}%"])
+
+    if branch_filter:
+        clauses.append(f"students.branch_id = {placeholder}")
+        params.append(branch_filter)
+
+    if clauses:
+        query += " WHERE " + " AND ".join(clauses)
+
+    query += " ORDER BY students.name"
+    students = db.execute(query, params).fetchall()
+
     db.close()
-    return render_template("students.html", students=students, branches=branches)
+    return render_template("students.html", students=students, branches=branches, search=search, selected_branch_id=branch_filter)
 
 
 @app.route("/student_login", methods=["GET", "POST"])
@@ -1981,6 +2000,7 @@ def get_report_filters():
         "student_id": request.args.get("student_id") or request.form.get("student_id"),
         "from_date": request.args.get("from_date") or request.form.get("from_date"),
         "to_date": request.args.get("to_date") or request.form.get("to_date"),
+        "search": request.args.get("search") or request.form.get("search"),
     }
 
 
@@ -2012,6 +2032,11 @@ def fetch_report_records(db, filters):
     if filters.get("to_date"):
         clauses.append(f"attendance.date <= {placeholder}")
         params.append(filters["to_date"])
+    if filters.get("search"):
+        s = f"%{filters['search']}%"
+        like_op = "ILIKE" if str(app.config.get("DATABASE", "")).startswith("postgres") else "LIKE"
+        clauses.append(f"(students.name {like_op} {placeholder} OR students.enrollment {like_op} {placeholder})")
+        params.extend([s, s])
 
     if clauses:
         query += " WHERE " + " AND ".join(clauses)

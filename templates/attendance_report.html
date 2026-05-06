@@ -2,7 +2,11 @@
 {% block content %}
 <div class="card">
     <h1>Attendance Report</h1>
-    <form method="post" class="form-row wrap">
+    <form method="get" class="form-row wrap">
+        <div style="flex-basis: 100%; margin-bottom: 15px;">
+            <label>Search Student</label>
+            <input type="text" name="search" placeholder="Name or Enrollment..." value="{{ filters.search or '' }}" style="width: 100%;" />
+        </div>
         <div>
             <label>Branch</label>
             <select name="branch_id" onchange="this.form.submit()">
@@ -39,6 +43,7 @@
             <input type="date" name="to_date" value="{{ filters.to_date or '' }}" />
         </div>
         <button type="submit">Filter Report</button>
+        <a href="{{ url_for('attendance_report') }}" class="button" style="background-color: var(--text-secondary);">Clear</a>
     </form>
 </div>
 {% if stats %}

@@ -28,7 +28,28 @@
     </form>
 </div>
 <div class="card">
-    <input type="text" id="searchInput" placeholder="Search student by name or enrollment" class="form-control mb-3">
+    <h2 style="margin-bottom: 20px;"><i class="fa-solid fa-magnifying-glass"></i> Search & Filter Students</h2>
+    <form method="get" class="form-row">
+        <div>
+            <label>Search</label>
+            <input type="text" name="search" placeholder="Name or Enrollment..." value="{{ search }}" />
+        </div>
+        <div>
+            <label>Branch</label>
+            <select name="branch_id">
+                <option value="">All Branches</option>
+                {% for branch in branches %}
+                <option value="{{ branch.id }}" {% if selected_branch_id and branch.id|string == selected_branch_id|string %}selected{% endif %}>{{ branch.name }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div style="display: flex; gap: 10px; align-items: flex-end;">
+            <button type="submit">Search</button>
+            <a href="{{ url_for('students') }}" class="button" style="background-color: var(--text-secondary);">Clear</a>
+        </div>
+    </form>
+</div>
+<div class="card">
     <table>
         <thead>
             <tr>
@@ -52,20 +73,4 @@
         </tbody>
     </table>
 </div>
-<script>
-document.getElementById("searchInput").addEventListener("keyup", function() {
-    let filter = this.value.toLowerCase();
-    let rows = document.querySelectorAll("table tbody tr");
-
-    rows.forEach(function(row) {
-        let text = row.textContent.toLowerCase();
-
-        if (text.includes(filter)) {
-            row.style.display = "";
-        } else {
-            row.style.display = "none";
-        }
-    });
-});
-</script>
 {% endblock %}
