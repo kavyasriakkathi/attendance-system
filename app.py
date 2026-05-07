@@ -574,7 +574,8 @@ def init_db(db=None):
             name TEXT NOT NULL,
             enrollment TEXT UNIQUE NOT NULL,
             branch_id INTEGER NOT NULL,
-            email TEXT
+            email TEXT,
+            import_order INTEGER
         );
         """)
 
@@ -660,7 +661,8 @@ def init_db(db=None):
             name TEXT NOT NULL,
             enrollment TEXT UNIQUE NOT NULL,
             branch_id INTEGER NOT NULL,
-            email TEXT
+            email TEXT,
+            import_order INTEGER
         );
 
         CREATE TABLE IF NOT EXISTS attendance (
@@ -689,6 +691,23 @@ def init_db(db=None):
     try:
         _ensure_column(db, "attendance", "teacher_id", "INTEGER")
         _ensure_column(db, "attendance", "subject_name", "TEXT")
+        _ensure_column(db, "students", "import_order", "INTEGER")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_students_import_order ON students(import_order, id)")
+
+        # Backfill import_order once for legacy rows (keeps existing relative order by id).
+        max_row = db.execute("SELECT COALESCE(MAX(import_order), 0) AS max_import_order FROM students").fetchone()
+        next_import_order = int(row_get(max_row, "max_import_order", 0) or 0) + 1
+        missing_order_rows = db.execute("SELECT id FROM students WHERE import_order IS NULL ORDER BY id").fetchall()
+        for row in missing_order_rows:
+            student_id = row_get(row, "id")
+            if student_id is None:
+                continue
+            db.execute(
+                f"UPDATE students SET import_order = {placeholder} WHERE id = {placeholder}",
+                (next_import_order, student_id),
+            )
+            next_import_order += 1
+
         if str(app.config.get("DATABASE", "")).startswith("postgres"):
             db.execute("""
                 CREATE TABLE IF NOT EXISTS teachers (
@@ -1155,7 +1174,7 @@ def department_dashboard():
             FROM students
             LEFT JOIN attendance ON attendance.student_id = students.id
             GROUP BY students.id, students.branch_id, students.name, students.enrollment, students.email
-            ORDER BY students.name
+            ORDER BY COALESCE(students.import_order, students.id), students.id
         """).fetchall():
             branch_id = row_get(row, "branch_id")
             total = row_get(row, "total_count", 0) or 0
@@ -1581,6 +1600,8 @@ def upload_students():
         inserted = 0
         skipped = 0
         errors = 0
+        max_order_row = db.execute("SELECT COALESCE(MAX(import_order), 0) AS max_import_order FROM students").fetchone()
+        next_import_order = int(row_get(max_order_row, "max_import_order", 0) or 0) + 1
 
         try:
             # Pre-fetch branches for name matching
@@ -1631,12 +1652,12 @@ def upload_students():
                 if is_postgres:
                     student_row = db.execute(
                         f"""
-                        INSERT INTO students (name, enrollment, email, branch_id)
-                        VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder})
+                        INSERT INTO students (name, enrollment, email, branch_id, import_order)
+                        VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})
                         ON CONFLICT (enrollment) DO NOTHING
                         RETURNING id
                         """,
-                        (name, enrollment, email_value, branch_id),
+                        (name, enrollment, email_value, branch_id, next_import_order),
                     ).fetchone()
                     student_id = row_get(student_row, "id")
                     if not student_id:
@@ -1644,13 +1665,15 @@ def upload_students():
                         continue
                 else:
                     cur = db.execute(
-                        f"INSERT OR IGNORE INTO students (name, enrollment, email, branch_id) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder})",
-                        (name, enrollment, email_value, branch_id),
+                        f"INSERT OR IGNORE INTO students (name, enrollment, email, branch_id, import_order) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})",
+                        (name, enrollment, email_value, branch_id, next_import_order),
                     )
                     if getattr(cur, "rowcount", 0) == 0:
                         skipped += 1
                         continue
                     student_id = cur.lastrowid
+
+                next_import_order += 1
 
                 default_password = enrollment[-4:] if len(enrollment) >= 4 else enrollment
                 if is_postgres:
@@ -1901,6 +1924,8 @@ def upload_students_csv():
             password_hash_cache = {}
             pending_rows = []
             enrollments_by_prefix = {}
+            max_order_row = db.execute("SELECT COALESCE(MAX(import_order), 0) AS max_import_order FROM students").fetchone()
+            next_import_order = int(row_get(max_order_row, "max_import_order", 0) or 0) + 1
 
             for row_number, row_values in enumerate(reader, start=2):
                 try:
@@ -2002,9 +2027,11 @@ def upload_students_csv():
                             "enrollment": enrollment,
                             "email": email,
                             "branch_id": branch_id,
+                            "import_order": next_import_order,
                             "password_hash": password_hash,
                         }
                     )
+                    next_import_order += 1
                     print(f"[CSV Upload] Row {row_number}: validated")
 
                 except Exception as row_error:
@@ -2062,7 +2089,7 @@ def upload_students_csv():
                     raise RuntimeError("PostgreSQL connection is not available")
 
                 student_values = [
-                    (row["name"], row["enrollment"], row["email"], row["branch_id"])
+                    (row["name"], row["enrollment"], row["email"], row["branch_id"], row["import_order"])
                     for row in pending_rows
                 ]
 
@@ -2070,7 +2097,7 @@ def upload_students_csv():
                     inserted_students = execute_values(
                         cur,
                         """
-                        INSERT INTO students (name, enrollment, email, branch_id)
+                        INSERT INTO students (name, enrollment, email, branch_id, import_order)
                         VALUES %s
                         ON CONFLICT (enrollment) DO NOTHING
                         RETURNING enrollment, id
@@ -2109,8 +2136,8 @@ def upload_students_csv():
                 for row in pending_rows:
                     try:
                         cur = db.execute(
-                            f"INSERT OR IGNORE INTO students (name, enrollment, email, branch_id) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder})",
-                            (row["name"], row["enrollment"], row["email"], row["branch_id"]),
+                            f"INSERT OR IGNORE INTO students (name, enrollment, email, branch_id, import_order) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})",
+                            (row["name"], row["enrollment"], row["email"], row["branch_id"], row["import_order"]),
                         )
                         if getattr(cur, "rowcount", 0) == 0:
                             duplicates += 1
@@ -2207,10 +2234,14 @@ def students():
                 else:
                     try:
                         if str(app.config.get("DATABASE", "")).startswith("postgres"):
-                            cur = db.execute(f"INSERT INTO students (name, enrollment, email, branch_id) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}) RETURNING id", (name, enrollment, email or None, branch_id))
+                            max_order_row = db.execute("SELECT COALESCE(MAX(import_order), 0) AS max_import_order FROM students").fetchone()
+                            next_import_order = int(row_get(max_order_row, "max_import_order", 0) or 0) + 1
+                            cur = db.execute(f"INSERT INTO students (name, enrollment, email, branch_id, import_order) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}) RETURNING id", (name, enrollment, email or None, branch_id, next_import_order))
                             student_id = cur.fetchone()[0]
                         else:
-                            cur = db.execute(f"INSERT INTO students (name, enrollment, email, branch_id) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder})", (name, enrollment, email or None, branch_id))
+                            max_order_row = db.execute("SELECT COALESCE(MAX(import_order), 0) AS max_import_order FROM students").fetchone()
+                            next_import_order = int(row_get(max_order_row, "max_import_order", 0) or 0) + 1
+                            cur = db.execute(f"INSERT INTO students (name, enrollment, email, branch_id, import_order) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})", (name, enrollment, email or None, branch_id, next_import_order))
                             student_id = cur.lastrowid
                         
                         db.execute(f"INSERT INTO users (username, password, role, student_id) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder})", (enrollment, generate_password_hash(enrollment[-4:]), "student", student_id))
@@ -2233,7 +2264,7 @@ def students():
             clauses.append(f"students.branch_id = {placeholder}")
             params.append(branch_filter)
         if clauses: query += " WHERE " + " AND ".join(clauses)
-        query += " ORDER BY students.name"
+        query += " ORDER BY COALESCE(students.import_order, students.id), students.id"
         
         students_list = db.execute(query, params).fetchall()
         branches_list = db.execute("SELECT id, name FROM branches ORDER BY name").fetchall()
@@ -2503,7 +2534,7 @@ def teacher_dashboard():
             JOIN students ON attendance.student_id = students.id
             WHERE attendance.branch_id = {placeholder}
               AND attendance.subject_name = {placeholder}
-            ORDER BY attendance.date DESC, students.name
+                        ORDER BY COALESCE(students.import_order, students.id), students.id, attendance.id
             LIMIT 20
             """,
             (branch_id, subject_name),
@@ -2589,7 +2620,7 @@ def teacher_mark_attendance():
                     flash("Failed to save attendance.", "error")
 
         students = db.execute(
-            f"SELECT id, name, enrollment FROM students WHERE branch_id = {placeholder} ORDER BY name",
+            f"SELECT id, name, enrollment FROM students WHERE branch_id = {placeholder} ORDER BY COALESCE(import_order, id), id",
             (branch_id,),
         ).fetchall()
 
@@ -2656,7 +2687,7 @@ def teacher_attendance_records():
             like_op = "ILIKE" if str(app.config.get("DATABASE", "")).startswith("postgres") else "LIKE"
             query += f" AND (students.name {like_op} {placeholder} OR students.enrollment {like_op} {placeholder})"
             params.extend([f"%{search}%", f"%{search}%"])
-        query += " ORDER BY attendance.date DESC, students.name"
+        query += " ORDER BY COALESCE(students.import_order, students.id), students.id, attendance.id"
 
         records = db.execute(query, params).fetchall()
         return render_template(
@@ -2858,7 +2889,7 @@ def mark_attendance():
         students = []
         attendance_map = {}
         if branch_id and subject_id:
-            students = db.execute(f"SELECT id, name, enrollment FROM students WHERE branch_id = {placeholder} ORDER BY name", (branch_id,)).fetchall()
+            students = db.execute(f"SELECT id, name, enrollment FROM students WHERE branch_id = {placeholder} ORDER BY COALESCE(import_order, id), id", (branch_id,)).fetchall()
             att_rows = db.execute(f"SELECT student_id, status, note FROM attendance WHERE subject_id = {placeholder} AND date = {placeholder}", (subject_id, selected_date)).fetchall()
             attendance_map = {str(row_get(r, "student_id")): r for r in att_rows}
 
@@ -3087,7 +3118,7 @@ def fetch_report_records(db, filters):
     if clauses:
         query += " WHERE " + " AND ".join(clauses)
 
-    query += " ORDER BY attendance.date DESC, students.name"
+    query += " ORDER BY COALESCE(students.import_order, students.id), students.id, attendance.id"
     return db.execute(query, params).fetchall()
 
 
@@ -3317,7 +3348,7 @@ def attendance_report():
         
         branches = db.execute("SELECT id, name FROM branches ORDER BY name").fetchall()
         subjects = db.execute("SELECT id, name FROM subjects ORDER BY name").fetchall()
-        students = db.execute("SELECT id, name FROM students ORDER BY name").fetchall()
+        students = db.execute("SELECT id, name FROM students ORDER BY COALESCE(import_order, id), id").fetchall()
         
         return render_template("attendance_report.html", records=records, stats=stats, filters=filters, branches=branches, subjects=subjects, students=students)
     except Exception as e:
