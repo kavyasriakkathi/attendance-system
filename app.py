@@ -607,11 +607,8 @@ def login_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
         if "user_id" not in session:
-            flash("You must be logged in to view this page.", "warning")
+            flash("Please login first.", "warning")
             return redirect(url_for("login"))
-        if session.get("role") == "student":
-            flash("You do not have permission to access this page.", "danger")
-            return redirect(url_for("student_dashboard"))
         return f(*args, **kwargs)
     return decorated_function
 
@@ -619,11 +616,13 @@ def login_required(f):
 def admin_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
+        # If not logged in, send to admin login with the required message.
         if "user_id" not in session:
-            flash("Please log in as admin to continue.", "warning")
+            flash("Please login first.", "warning")
             return redirect(url_for("login"))
+        # If logged in but not an admin, force re-authentication via admin login.
         if session.get("role") != "admin":
-            flash("Admin access required.", "danger")
+            flash("Please login first.", "warning")
             return redirect(url_for("login"))
         return f(*args, **kwargs)
 
@@ -674,7 +673,7 @@ def login():
             except Exception:
                 pass
 
-    return render_template("login.html")
+    return render_template("login.html", hide_nav=True)
 
 
 @app.route("/logout")
@@ -685,11 +684,12 @@ def logout():
 
 @app.route("/")
 def index():
-    return render_template("index.html")
+    return render_template("index.html", hide_nav=True)
 
 
 @app.route("/dashboard")
 @login_required
+@admin_required
 def dashboard():
     """Main admin dashboard with stats and charts."""
     db = None
@@ -1050,6 +1050,7 @@ def department_dashboard():
 
 @app.route("/settings", methods=["GET", "POST"])
 @login_required
+@admin_required
 def settings():
     if session.get("role") != "admin":
         return redirect(url_for("dashboard"))
@@ -1243,6 +1244,7 @@ def admin_import_data():
 
 @app.route("/branches", methods=["GET", "POST"])
 @login_required
+@admin_required
 def branches():
     db = None
     try:
@@ -1272,6 +1274,7 @@ def branches():
 
 @app.route("/subjects", methods=["GET", "POST"])
 @login_required
+@admin_required
 def subjects():
     db = None
     try:
@@ -1302,6 +1305,7 @@ def subjects():
 
 @app.route("/upload_students", methods=["GET", "POST"])
 @login_required
+@admin_required
 def upload_students():
     if session.get("role") != "admin":
         return redirect(url_for("dashboard"))
@@ -2061,6 +2065,69 @@ def delete_student():
             except: pass
 
 
+@app.route('/bulk_delete_students', methods=['POST'])
+@login_required
+@admin_required
+def bulk_delete_students():
+    """Delete multiple students by a list of enrollments or IDs."""
+    db = None
+    try:
+        raw_data = (request.form.get('bulk_data') or '').strip()
+        if not raw_data:
+            flash('No student data provided for bulk deletion.', 'error')
+            return redirect(url_for('students'))
+
+        import re
+        # Split by comma, space, or newline
+        items = re.split(r'[,\s\n]+', raw_data)
+        items = [i.strip() for i in items if i.strip()]
+
+        if not items:
+            flash('No valid student IDs or enrollments found.', 'error')
+            return redirect(url_for('students'))
+
+        db = get_db()
+        placeholder = get_placeholder()
+        
+        deleted_count = 0
+        skipped_count = 0
+        
+        for item in items:
+            # Try to find by enrollment first
+            target = db.execute(f"SELECT id, enrollment FROM students WHERE enrollment = {placeholder}", (item,)).fetchone()
+            # If not found by enrollment, try by numeric ID if the input is numeric
+            if not target and item.isdigit():
+                target = db.execute(f"SELECT id, enrollment FROM students WHERE id = {placeholder}", (item,)).fetchone()
+            
+            if target:
+                sid = row_get(target, 'id')
+                try:
+                    db.execute(f"DELETE FROM users WHERE student_id = {placeholder}", (sid,))
+                    db.execute(f"DELETE FROM students WHERE id = {placeholder}", (sid,))
+                    deleted_count += 1
+                except Exception as e:
+                    print(f"[bulk_delete] Could not delete {item}: {repr(e)}")
+                    skipped_count += 1
+            else:
+                skipped_count += 1
+        
+        db.commit()
+        if deleted_count > 0:
+            flash(f"Successfully deleted {deleted_count} students.", 'success')
+        if skipped_count > 0:
+            flash(f"Skipped {skipped_count} items (not found or error).", 'warning')
+            
+        return redirect(url_for('students'))
+    except Exception as e:
+        print(f"[bulk_delete_students] ERROR: {repr(e)}")
+        flash('Bulk deletion failed.', 'error')
+        return redirect(url_for('students'))
+    finally:
+        if db:
+            try: db.close()
+            except: pass
+
+
 @app.route("/student_login", methods=["GET", "POST"])
 def student_login():
     next_url = request.args.get("next") or request.form.get("next")
@@ -2105,7 +2172,7 @@ def student_login():
             except Exception:
                 pass
 
-    return render_template("student_login.html", next=next_url)
+    return render_template("student_login.html", next=next_url, hide_nav=True)
 
 
 @app.route("/teacher_login", methods=["GET", "POST"])
@@ -2147,7 +2214,7 @@ def teacher_login():
             except Exception:
                 pass
 
-    return render_template("teacher_login.html")
+    return render_template("teacher_login.html", hide_nav=True)
 
 
 @app.route("/student_dashboard")
@@ -2770,6 +2837,7 @@ def download_attendance():
 
 @app.route("/attendance/report")
 @login_required
+@admin_required
 def attendance_report():
     db = None
     try:
@@ -2804,6 +2872,7 @@ def attendance_report():
 
 @app.route("/reports/export")
 @login_required
+@admin_required
 def export_excel():
     db = get_db()
     try:
@@ -2829,6 +2898,7 @@ def export_excel():
 
 @app.route("/reports/export/pdf")
 @login_required
+@admin_required
 def export_pdf():
     db = get_db()
     filters = get_report_filters()
