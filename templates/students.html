@@ -54,6 +54,17 @@
         </div>
     </form>
 </div>
+
+<div class="card">
+    <h2 style="margin-bottom: 20px; color: #ef4444;"><i class="fa-solid fa-trash-can"></i> Bulk Delete Students</h2>
+    <p style="font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 15px;">Enter student enrollments or IDs separated by spaces, commas, or new lines (e.g., 65 67 68 69).</p>
+    <form method="post" action="{{ url_for('bulk_delete_students') }}" onsubmit="return confirm('Are you sure you want to permanently delete these students?');">
+        <div style="margin-bottom: 15px;">
+            <textarea name="bulk_data" rows="3" style="width: 100%; border-radius: 8px; border: 1px solid var(--border-color); padding: 10px; font-family: inherit;" placeholder="Paste IDs or enrollments here..."></textarea>
+        </div>
+        <button type="submit" style="background: #ef4444;"><i class="fa-solid fa-trash-can"></i> Bulk Delete</button>
+    </form>
+</div>
 <div class="card">
     <table>
         <thead>
