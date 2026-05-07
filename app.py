@@ -272,7 +272,7 @@ def _ensure_column(db, table_name: str, column_name: str, column_definition: str
     if column_name in columns:
         return
     if str(app.config.get("DATABASE", "")).startswith("postgres"):
-        db.execute(f"ALTER TABLE {table_name} ADD COLUMN IF NOT EXISTS {column_name} {column_definition}")
+        db.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}")
     else:
         db.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}")
 
@@ -651,11 +651,7 @@ def init_db(db=None):
         );
         """)
 
-        db.execute("DROP INDEX IF EXISTS idx_attendance_student_subject_date")
-        db.execute("""
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_attendance_student_subject_date_period
-        ON attendance(student_id, subject_id, date, period);
-        """)
+        # Index creation moved to upgrade section to ensure columns exist first.
     else:
         # SQLite
         db.executescript("""
@@ -716,9 +712,7 @@ def init_db(db=None):
             value TEXT NOT NULL
         );
 
-        DROP INDEX IF EXISTS idx_attendance_student_subject_date;
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_attendance_student_subject_date_period
-        ON attendance(student_id, subject_id, date, period);
+        -- Index creation moved to upgrade section to ensure columns exist first.
         """)
 
     # Best-effort schema upgrades for existing databases.
@@ -730,14 +724,22 @@ def init_db(db=None):
         _ensure_column(db, "users", "student_id", "INTEGER")
         _ensure_column(db, "branches", "location", "TEXT")
         
+        db.commit() # Clear transaction state before index creation
+        
         # Upgrade index if it doesn't support period
         try:
             db.execute("DROP INDEX IF EXISTS idx_attendance_student_subject_date")
             db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_attendance_student_subject_date_period ON attendance(student_id, subject_id, date, period)")
+            db.commit()
+        except Exception as idx_error:
+            print(f"[DB] index upgrade failed: {repr(idx_error)}")
+            if hasattr(db, 'rollback'): db.rollback()
+        
+        try:
+            db.execute("CREATE INDEX IF NOT EXISTS idx_students_import_order ON students(import_order, id)")
+            db.commit()
         except:
-            pass
-
-        db.execute("CREATE INDEX IF NOT EXISTS idx_students_import_order ON students(import_order, id)")
+            if hasattr(db, 'rollback'): db.rollback()
 
         # Backfill import_order once for legacy rows (keeps existing relative order by id).
         max_row = db.execute("SELECT COALESCE(MAX(import_order), 0) AS max_import_order FROM students").fetchone()
