@@ -225,7 +225,7 @@ def set_setting(db, key, value):
         )
 
 
-def send_email(subject, recipient, body, attachments=None):
+def send_email(subject, recipient, body, attachments=None, html_body=None):
     # If credentials are not configured, allow a local dev fallback when explicitly enabled
     dev_fallback_enabled = os.environ.get("MAIL_DEV_FALLBACK", "False").lower() in ("1", "true", "yes")
     if not is_mail_configured():
@@ -248,6 +248,8 @@ def send_email(subject, recipient, body, attachments=None):
         msg["From"] = from_addr
         msg["To"] = recipient
         msg.set_content(body)
+        if html_body:
+            msg.add_alternative(html_body, subtype="html")
 
         if attachments:
             for attachment in attachments:
@@ -332,10 +334,18 @@ def send_email(subject, recipient, body, attachments=None):
         return False
 
 
-def safe_send_email(subject: str, recipient: str, body: str, attachments=None) -> bool:
+def safe_send_email(subject: str, recipient: str, body: str, attachments=None, html_body=None) -> bool:
     """Wrapper around send_email() that guarantees no exception escapes."""
     try:
-        return bool(send_email(subject=subject, recipient=recipient, body=body, attachments=attachments))
+        return bool(
+            send_email(
+                subject=subject,
+                recipient=recipient,
+                body=body,
+                attachments=attachments,
+                html_body=html_body,
+            )
+        )
     except Exception as e:
         print(f"safe_send_email: unexpected error: {repr(e)}")
         return False
@@ -401,10 +411,20 @@ def notify_low_attendance(db, student_ids):
                 "Best regards,\n"
                 "Attendance Management Team"
             )
+            html_body = (
+                f"<div style='font-family:Arial,sans-serif;line-height:1.6;color:#1f2937'>"
+                f"<h2 style='margin-bottom:8px;color:#ef476f'>Low Attendance Alert</h2>"
+                f"<p>Hello <strong>{row['student_name']}</strong>,</p>"
+                f"<p>Your current attendance is <strong>{row['percentage']}%</strong>, which is below the required threshold of <strong>{threshold}%</strong>.</p>"
+                "<p>Please attend classes regularly and check your dashboard for details.</p>"
+                "<p style='margin-top:16px'>Best regards,<br>Attendance Management Team</p>"
+                "</div>"
+            )
             if send_email(
                 subject=f"Low Attendance Alert: {row['percentage']}%",
                 recipient=row["email"],
                 body=body,
+                html_body=html_body,
             ):
                 emailed_students.append({
                     "name": row["student_name"],
@@ -585,11 +605,25 @@ def login_required(f):
     def decorated_function(*args, **kwargs):
         if "user_id" not in session:
             flash("You must be logged in to view this page.", "warning")
-            return redirect(url_for("teacher_login"))
+            return redirect(url_for("login"))
         if session.get("role") == "student":
             flash("You do not have permission to access this page.", "danger")
             return redirect(url_for("student_dashboard"))
         return f(*args, **kwargs)
+    return decorated_function
+
+
+def admin_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if "user_id" not in session:
+            flash("Please log in as admin to continue.", "warning")
+            return redirect(url_for("login"))
+        if session.get("role") != "admin":
+            flash("Admin access required.", "danger")
+            return redirect(url_for("login"))
+        return f(*args, **kwargs)
+
     return decorated_function
 @app.route("/login", methods=["GET", "POST"])
 @app.route("/admin_login", methods=["GET", "POST"])  # compatibility URL
@@ -728,6 +762,27 @@ def dashboard():
             subject_chart_labels.append(row_get(row, "subject_name", "") or "")
             subject_chart_percentages.append(pct)
 
+        trend_rows = _safe_fetchall(
+            """
+            SELECT
+                date,
+                COUNT(*) AS total_count,
+                SUM(CASE WHEN status = 'Present' THEN 1 ELSE 0 END) AS present_count
+            FROM attendance
+            GROUP BY date
+            ORDER BY date DESC
+            LIMIT 14
+            """
+        )
+        trend_labels = []
+        trend_percentages = []
+        for row in reversed(trend_rows):
+            total = int(row_get(row, "total_count", 0) or 0)
+            present = int(row_get(row, "present_count", 0) or 0)
+            pct = round((present / total) * 100, 1) if total > 0 else 0
+            trend_labels.append(str(row_get(row, "date", "") or ""))
+            trend_percentages.append(pct)
+
         branch_data = _safe_fetchall(
             """
             SELECT
@@ -797,6 +852,8 @@ def dashboard():
             overall_percentage=overall_percentage,
             subject_chart_labels=subject_chart_labels,
             subject_chart_percentages=subject_chart_percentages,
+            trend_labels=trend_labels,
+            trend_percentages=trend_percentages,
             branch_data=branch_data,
             database_info=database_info,
             mail_info=mail_info,
@@ -818,6 +875,8 @@ def dashboard():
             overall_percentage=0,
             subject_chart_labels=[],
             subject_chart_percentages=[],
+            trend_labels=[],
+            trend_percentages=[],
             branch_data=[],
             database_info={"storage": "Unknown", "path": "Unavailable"},
             mail_info={
@@ -836,6 +895,7 @@ def dashboard():
 
 @app.route("/department-dashboard")
 @login_required
+@admin_required
 def department_dashboard():
     db = None
     try:
@@ -1454,6 +1514,7 @@ def upload_students():
 
 @app.route("/upload_students_csv", methods=["GET", "POST"])
 @login_required
+@admin_required
 def upload_students_csv():
     """CSV upload for students with clear validation, logs, and safe transaction handling."""
     if request.method == "POST":
@@ -2325,6 +2386,70 @@ def build_report_excel(records):
     return output.getvalue(), filename
 
 
+def build_report_pdf(records):
+    """Build a simple PDF attendance report with professional table styling."""
+    try:
+        from reportlab.lib import colors
+        from reportlab.lib.pagesizes import A4, landscape
+        from reportlab.lib.units import mm
+        from reportlab.lib.styles import getSampleStyleSheet
+        from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+    except Exception as e:
+        raise RuntimeError("PDF export requires reportlab. Add reportlab to requirements.txt") from e
+
+    output = BytesIO()
+    doc = SimpleDocTemplate(
+        output,
+        pagesize=landscape(A4),
+        rightMargin=12 * mm,
+        leftMargin=12 * mm,
+        topMargin=10 * mm,
+        bottomMargin=10 * mm,
+    )
+    styles = getSampleStyleSheet()
+
+    table_data = [["Name", "Enrollment", "Subject", "Date", "Status"]]
+    for r in records:
+        table_data.append(
+            [
+                str(row_get(r, "student_name") or ""),
+                str(row_get(r, "enrollment") or ""),
+                str(row_get(r, "subject_name") or ""),
+                str(row_get(r, "date") or ""),
+                str(row_get(r, "status") or ""),
+            ]
+        )
+
+    elements = [
+        Paragraph("Attendance Report", styles["Title"]),
+        Paragraph(f"Generated on: {date.today().isoformat()}", styles["Normal"]),
+        Spacer(1, 8),
+    ]
+
+    table = Table(table_data, repeatRows=1)
+    table.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#4361ee")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#d9dce3")),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f7f9fc")]),
+                ("ALIGN", (0, 0), (-1, -1), "LEFT"),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("FONTSIZE", (0, 0), (-1, -1), 9),
+                ("BOTTOMPADDING", (0, 0), (-1, 0), 8),
+                ("TOPPADDING", (0, 0), (-1, 0), 8),
+            ]
+        )
+    )
+    elements.append(table)
+    doc.build(elements)
+    output.seek(0)
+    filename = f"attendance_report_{date.today().isoformat()}.pdf"
+    return output.getvalue(), filename
+
+
 @app.route("/download_attendance")
 @login_required
 def download_attendance():
@@ -2428,6 +2553,36 @@ def export_excel():
             download_name=filename,
             mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
+    except Exception as e:
+        print(f"[export_excel] ERROR: {repr(e)}")
+        flash("Failed to export Excel report.", "error")
+        return redirect(url_for("attendance_report", **{k: v for k, v in get_report_filters().items() if v}))
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass
+
+
+@app.route("/reports/export/pdf")
+@login_required
+def export_pdf():
+    db = get_db()
+    filters = get_report_filters()
+    redirect_params = {k: v for k, v in filters.items() if v}
+    try:
+        records = fetch_report_records(db, filters)
+        content, filename = build_report_pdf(records)
+        return send_file(
+            BytesIO(content),
+            as_attachment=True,
+            download_name=filename,
+            mimetype="application/pdf",
+        )
+    except Exception as e:
+        print(f"[export_pdf] ERROR: {repr(e)}")
+        flash("Failed to export PDF report. Ensure reportlab is installed.", "error")
+        return redirect(url_for("attendance_report", **redirect_params))
     finally:
         try:
             db.close()
@@ -2505,10 +2660,23 @@ def report_email():
             ]
         )
 
+        html_summary = (
+            "<div style='font-family:Arial,sans-serif;line-height:1.6;color:#1f2937'>"
+            "<h2 style='margin-bottom:8px;color:#4361ee'>Attendance Report</h2>"
+            f"<p><strong>Branch:</strong> {branch_name}<br>"
+            f"<strong>Subject:</strong> {subject_name}<br>"
+            f"<strong>Student:</strong> {student_name}<br>"
+            f"<strong>Total records:</strong> {stats.get('total_records', 0)}<br>"
+            f"<strong>Overall attendance:</strong> {stats.get('overall_percentage', 0)}%</p>"
+            "<p>The detailed report is attached as an Excel file.</p>"
+            "</div>"
+        )
+
         email_sent = safe_send_email(
             subject="Attendance Report",
             recipient=recipient,
             body="\n".join(body_lines),
+            html_body=html_summary,
             attachments=[
                 {
                     "filename": filename,
@@ -2522,6 +2690,10 @@ def report_email():
             flash(f"Report emailed successfully to {recipient}.", "success")
         else:
             flash("Failed to send the report email.", "error")
+    except Exception as e:
+        print(f"[report_email] ERROR: {repr(e)}")
+        print(traceback.format_exc())
+        flash("Failed to build or send the report email.", "error")
     finally:
         try:
             db.close()
@@ -2693,10 +2865,21 @@ def forgot_password():
                     "Regards,\n"
                     "Attendance Management Team"
                 )
+                html_body = (
+                    "<div style='font-family:Arial,sans-serif;line-height:1.6;color:#1f2937'>"
+                    "<h2 style='margin-bottom:8px;color:#4361ee'>Reset Your Password</h2>"
+                    "<p>We received a request to reset your password.</p>"
+                    f"<p><a href='{reset_link}' style='display:inline-block;padding:10px 14px;background:#4361ee;color:#fff;text-decoration:none;border-radius:6px'>Reset Password</a></p>"
+                    f"<p>If the button does not work, use this link:<br><a href='{reset_link}'>{reset_link}</a></p>"
+                    "<p>If you did not request this, you can ignore this email.</p>"
+                    "<p>Regards,<br>Attendance Management Team</p>"
+                    "</div>"
+                )
                 email_sent = safe_send_email(
                     subject="Reset your password",
                     recipient=student_email,
                     body=body,
+                    html_body=html_body,
                 )
                 print(f"[forgot_password] email_attempted=True email_sent={email_sent}")
             else:

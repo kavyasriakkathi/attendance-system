@@ -176,6 +176,15 @@ document.head.appendChild(style);
             <canvas id="subjectAttendanceChart"></canvas>
         </div>
     </div>
+
+    <div class="card">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+            <h2 style="margin: 0;"><i class="fa-solid fa-wave-square"></i> Attendance Trend</h2>
+        </div>
+        <div style="height: 300px; position: relative;">
+            <canvas id="attendanceTrendChart"></canvas>
+        </div>
+    </div>
     
     <div class="card">
         <h2><i class="fa-solid fa-bolt"></i> Quick Actions</h2>
@@ -263,6 +272,54 @@ document.addEventListener('DOMContentLoaded', function() {
                     borderColor: primaryColor,
                     borderWidth: 1,
                     maxBarThickness: 48,
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: { display: false },
+                    tooltip: {
+                        callbacks: {
+                            label: (context) => `${context.formattedValue}%`
+                        }
+                    }
+                },
+                scales: {
+                    y: {
+                        beginAtZero: true,
+                        max: 100,
+                        grid: { color: borderColor },
+                        ticks: { callback: (value) => value + '%', color: textSecondary }
+                    },
+                    x: {
+                        grid: { display: false },
+                        ticks: { color: textSecondary }
+                    }
+                }
+            }
+        });
+    }
+
+    // 3) Line chart: Attendance trend by date
+    const trendEl = document.getElementById('attendanceTrendChart');
+    if (trendEl) {
+        const trendLabels = {{ trend_labels | default([]) | tojson }};
+        const trendPercentages = {{ trend_percentages | default([]) | tojson }};
+
+        new Chart(trendEl.getContext('2d'), {
+            type: 'line',
+            data: {
+                labels: trendLabels,
+                datasets: [{
+                    label: 'Attendance %',
+                    data: trendPercentages,
+                    borderColor: primaryColor,
+                    backgroundColor: 'rgba(67, 97, 238, 0.15)',
+                    fill: true,
+                    tension: 0.3,
+                    pointRadius: 3,
+                    pointHoverRadius: 5,
                 }]
             },
             options: {
