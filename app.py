@@ -90,6 +90,7 @@ app.config.from_mapping(
     REPORT_ADMIN_EMAIL=os.environ.get("REPORT_ADMIN_EMAIL", "instituteattendanceapp@gmail.com"),
     LOW_ATTENDANCE_THRESHOLD=int(os.environ.get("LOW_ATTENDANCE_THRESHOLD", 75)),
 )
+app.config.setdefault("MAX_CONTENT_LENGTH", int(os.environ.get("MAX_CONTENT_LENGTH", 25 * 1024 * 1024)))
 
 def get_db():
     db_url = str(app.config.get("DATABASE", ""))
@@ -1516,39 +1517,28 @@ def upload_students():
 @login_required
 @admin_required
 def upload_students_csv():
-    """
-    CSV upload for students with optimized performance, memory efficiency, and production safety.
-    
-    Features:
-    - Streams CSV data to prevent memory exhaustion
-    - Validates all fields before database operations
-    - Single database commit after all rows processed
-    - Detailed logging for debugging
-    - Graceful error handling (continues on row errors)
-    - Prevents duplicate enrollment insertions
-    - Limits file size to prevent worker timeout
-    - Compatible with both PostgreSQL and SQLite
-    """
+    """CSV upload for students with Render-safe streaming, validation, and batched inserts."""
     if request.method == "POST":
         file = request.files.get("file")
         if not file or not str(file.filename).lower().endswith(".csv"):
             flash("Please upload a valid CSV file.", "error")
             return redirect(url_for("upload_students_csv"))
 
-        # ============================================================================
-        # STEP 1: Validate file size to prevent worker timeout
-        # ============================================================================
-        max_size_mb = 50  # Limit to 50MB for Render compatibility
+        max_size_mb = int(os.environ.get("CSV_UPLOAD_MAX_MB", 20))
         try:
-            # Get file size by seeking to end
-            file.seek(0, 2)
-            file_size = file.tell()
-            file.seek(0)
-            
-            if file_size > max_size_mb * 1024 * 1024:
+            stream = file.stream
+            if hasattr(stream, "seek"):
+                stream.seek(0, 2)
+                file_size = stream.tell()
+                stream.seek(0)
+            else:
+                file_size = 0
+
+            if file_size and file_size > max_size_mb * 1024 * 1024:
                 flash(f"File is too large ({file_size / 1024 / 1024:.1f}MB). Maximum is {max_size_mb}MB.", "error")
                 return redirect(url_for("upload_students_csv"))
-            print(f"[CSV Upload] File size OK: {file_size / 1024:.1f}KB")
+            if file_size:
+                print(f"[CSV Upload] File size OK: {file_size / 1024:.1f}KB")
         except Exception as size_error:
             print(f"[CSV Upload] Could not check file size: {repr(size_error)}")
 
@@ -1558,48 +1548,39 @@ def upload_students_csv():
             import io
             import re
 
-            # ====================================================================
-            # Helper: Normalize header names (case-insensitive, ignore whitespace)
-            # ====================================================================
-            def _canon_header(value: object) -> str:
-                """Canonicalize header: remove BOM, spaces, underscores, hyphens."""
-                text = str(value).lstrip("\ufeff").strip().lower()
-                text = re.sub(r"[\s_\-]+", "", text)
-                return text
+            try:
+                from psycopg2.extras import execute_values
+            except Exception:
+                execute_values = None
 
-            # ====================================================================
-            # Helper: Clean cell values (strip whitespace)
-            # ====================================================================
+            def _canon_header(value: object) -> str:
+                text = str(value).lstrip("\ufeff").strip().lower()
+                return re.sub(r"[\s_\-]+", "", text)
+
             def _clean_cell(value: object) -> str:
-                """Convert value to string and strip whitespace."""
-                if value is None or (isinstance(value, float) and pd.isna(value)) if 'pd' in dir() else False:
+                if value is None:
                     return ""
                 text = str(value).strip()
-                # Skip common "nan" markers from Excel
-                if text.lower() in ("nan", "none", "n/a", ""):
+                if text.lower() in ("", "nan", "none", "n/a"):
                     return ""
                 return text
 
-            # ====================================================================
-            # Helper: Validate email format
-            # ====================================================================
             def _is_valid_email(email: str) -> bool:
-                """Simple email validation."""
-                if not email or not "@" in email:
+                if not email:
                     return False
-                email = email.strip()
                 pattern = r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$"
-                return re.match(pattern, email) is not None
+                return re.match(pattern, email.strip()) is not None
 
-            # ====================================================================
-            # STEP 2: Detect CSV dialect (comma, semicolon, tab, pipe)
-            # ====================================================================
+            def _row_value(row_values, index):
+                if index is None or index < 0 or index >= len(row_values):
+                    return ""
+                return _clean_cell(row_values[index])
+
             dialect = csv.excel
             try:
                 stream = file.stream
                 if hasattr(stream, "seek"):
                     stream.seek(0)
-                # Read small sample for dialect detection (4KB max)
                 sample_bytes = stream.read(4096)
                 if hasattr(stream, "seek"):
                     stream.seek(0)
@@ -1614,127 +1595,114 @@ def upload_students_csv():
                 except Exception:
                     pass
 
-            # ====================================================================
-            # STEP 3: Open CSV stream and read headers
-            # ====================================================================
             text_stream = io.TextIOWrapper(file.stream, encoding="utf-8-sig", newline="")
-            reader = csv.DictReader(text_stream, dialect=dialect)
+            reader = csv.reader(text_stream, dialect=dialect)
 
-            fieldnames = reader.fieldnames or []
-            print(f"[CSV Upload] Raw headers detected: {fieldnames}")
-            
-            if not fieldnames:
+            headers = next(reader, None)
+            print(f"[CSV Upload] Raw headers detected: {headers}")
+            if not headers:
                 flash("The uploaded CSV file is empty or unreadable.", "error")
                 return redirect(url_for("upload_students_csv"))
 
-            # ====================================================================
-            # STEP 4: Map CSV headers to required columns (case-insensitive)
-            # ====================================================================
-            col_map = {}
-            for header in fieldnames:
+            header_map = {}
+            for index, header in enumerate(headers):
                 key = _canon_header(header)
-                if key and key not in col_map:
-                    col_map[key] = header
+                if key and key not in header_map:
+                    header_map[key] = index
 
-            print(f"[CSV Upload] Canonicalized header map: {col_map}")
+            print(f"[CSV Upload] Canonicalized header map: {header_map}")
 
-            # Require: name, enrollment, email, branch_id
-            required = {
-                "name": "name",
-                "enrollment": "enrollment",
-                "email": "email",
-                "branch_id": "branchid",
+            required_aliases = {
+                "name": {"name", "studentname", "student"},
+                "enrollment": {"enrollment", "enrollmentno", "h.t.no", "hallticketno", "tendigitsh.t.no", "rollno"},
+                "email": {"email", "mailid", "emailid", "mail"},
+                "branch_id": {"branchid", "branch", "section"},
             }
-            missing = [label for label, key in required.items() if key not in col_map]
+
+            column_indexes = {}
+            missing = []
+            for field_name, aliases in required_aliases.items():
+                found_index = None
+                for alias in aliases:
+                    if alias in header_map:
+                        found_index = header_map[alias]
+                        break
+                if found_index is None:
+                    missing.append(field_name)
+                else:
+                    column_indexes[field_name] = found_index
+
             if missing:
                 flash(
-                    f"Missing required columns: {', '.join(missing)}. "
-                    "CSV must include: Name, Enrollment, Email, and Branch_ID.",
-                    "error"
+                    f"Missing required columns: {', '.join(sorted(missing))}. CSV must include Name, Enrollment, Email, and Branch_ID.",
+                    "error",
                 )
                 return redirect(url_for("upload_students_csv"))
 
-            print(f"[CSV Upload] All required columns found. Starting row processing...")
-
-            # ====================================================================
-            # STEP 5: Initialize database and counters
-            # ====================================================================
             db = get_db()
             placeholder = get_placeholder()
             is_postgres = str(app.config.get("DATABASE", "")).startswith("postgres")
+            if is_postgres and execute_values is None:
+                raise RuntimeError("psycopg2.extras.execute_values is required for PostgreSQL CSV uploads")
+
+            valid_branch_ids = set()
+            for branch_row in db.execute("SELECT id FROM branches").fetchall():
+                branch_id_value = row_get(branch_row, "id")
+                if branch_id_value is not None:
+                    try:
+                        valid_branch_ids.add(int(branch_id_value))
+                    except Exception:
+                        pass
+
+            existing_enrollments = set()
+            for student_row in db.execute("SELECT enrollment FROM students").fetchall():
+                enrollment_value = _clean_cell(row_get(student_row, "enrollment"))
+                if enrollment_value:
+                    existing_enrollments.add(enrollment_value.lower())
+
+            print(f"[CSV Upload] Loaded {len(valid_branch_ids)} branch IDs and {len(existing_enrollments)} existing enrollments")
 
             inserted = 0
             skipped = 0
             failed = 0
             seen_enrollments = set()
             failed_rows_log = []
+            password_hash_cache = {}
+            pending_rows = []
 
-            # ====================================================================
-            # STEP 6: Pre-fetch valid branch IDs to avoid repeated DB queries
-            # ====================================================================
-            valid_branch_ids = set()
-            try:
-                for b_row in db.execute("SELECT id FROM branches").fetchall():
-                    try:
-                        bid = row_get(b_row, "id")
-                        if bid:
-                            valid_branch_ids.add(int(bid))
-                    except Exception:
-                        pass
-                print(f"[CSV Upload] Valid branch IDs: {sorted(valid_branch_ids)}")
-            except Exception as branch_error:
-                print(f"[CSV Upload] ERROR fetching branches: {repr(branch_error)}")
-                flash("Failed to fetch branch list. Check database.", "error")
-                return redirect(url_for("upload_students_csv"))
-
-            # ====================================================================
-            # STEP 7: Process each row with individual error handling
-            # ====================================================================
-            for row_number, row in enumerate(reader, start=2):  # Start at 2 (header is row 1)
+            for row_number, row_values in enumerate(reader, start=2):
                 try:
-                    # Log current row for debugging
-                    print(f"[CSV Upload] Processing row {row_number}: {dict(row)}")
+                    row_values = list(row_values)
+                    print(f"[CSV Upload] Processing row {row_number}: {row_values}")
 
-                    # ============================================================
-                    # Extract and clean values
-                    # ============================================================
-                    name = _clean_cell(row.get(col_map[required["name"]], ""))
-                    enrollment = _clean_cell(row.get(col_map[required["enrollment"]], ""))
-                    email = _clean_cell(row.get(col_map[required["email"]], ""))
-                    branch_id_raw = _clean_cell(row.get(col_map[required["branch_id"]], ""))
-
-                    # ============================================================
-                    # Skip completely empty rows
-                    # ============================================================
-                    if not name and not enrollment and not email and not branch_id_raw:
-                        print(f"[CSV Upload] Row {row_number}: Skipped (completely empty)")
+                    if not row_values or not any(_clean_cell(value) for value in row_values):
                         skipped += 1
+                        print(f"[CSV Upload] Row {row_number}: skipped empty row")
                         continue
 
-                    # ============================================================
-                    # Validate required fields are not empty
-                    # ============================================================
+                    name = _row_value(row_values, column_indexes["name"])
+                    enrollment = _row_value(row_values, column_indexes["enrollment"])
+                    email = _row_value(row_values, column_indexes["email"])
+                    branch_id_raw = _row_value(row_values, column_indexes["branch_id"])
+
                     if not name:
                         msg = f"Row {row_number}: Name is required"
                         print(f"[CSV Upload] {msg}")
                         failed_rows_log.append(msg)
                         failed += 1
                         continue
-
                     if not enrollment:
                         msg = f"Row {row_number}: Enrollment is required"
                         print(f"[CSV Upload] {msg}")
                         failed_rows_log.append(msg)
                         failed += 1
                         continue
-
                     if not email:
                         msg = f"Row {row_number}: Email is required"
                         print(f"[CSV Upload] {msg}")
                         failed_rows_log.append(msg)
                         failed += 1
                         continue
-
                     if not branch_id_raw:
                         msg = f"Row {row_number}: Branch_ID is required"
                         print(f"[CSV Upload] {msg}")
@@ -1742,21 +1710,15 @@ def upload_students_csv():
                         failed += 1
                         continue
 
-                    # ============================================================
-                    # Validate branch_id is a valid integer
-                    # ============================================================
                     try:
                         branch_id = int(branch_id_raw)
-                    except (ValueError, TypeError):
-                        msg = f"Row {row_number}: Invalid branch_id '{branch_id_raw}' (not an integer)"
+                    except (TypeError, ValueError):
+                        msg = f"Row {row_number}: Invalid branch_id '{branch_id_raw}'"
                         print(f"[CSV Upload] {msg}")
                         failed_rows_log.append(msg)
                         failed += 1
                         continue
 
-                    # ============================================================
-                    # Validate branch_id exists in database
-                    # ============================================================
                     if branch_id not in valid_branch_ids:
                         msg = f"Row {row_number}: Branch_ID {branch_id} does not exist"
                         print(f"[CSV Upload] {msg}")
@@ -1764,9 +1726,6 @@ def upload_students_csv():
                         failed += 1
                         continue
 
-                    # ============================================================
-                    # Validate email format
-                    # ============================================================
                     if not _is_valid_email(email):
                         msg = f"Row {row_number}: Invalid email format '{email}'"
                         print(f"[CSV Upload] {msg}")
@@ -1774,128 +1733,136 @@ def upload_students_csv():
                         failed += 1
                         continue
 
-                    # ============================================================
-                    # Check for duplicate enrollment in CSV (same file)
-                    # ============================================================
                     enrollment_key = enrollment.lower()
                     if enrollment_key in seen_enrollments:
-                        msg = f"Row {row_number}: Duplicate enrollment in CSV '{enrollment}'"
-                        print(f"[CSV Upload] {msg}")
-                        failed_rows_log.append(msg)
-                        failed += 1
+                        skipped += 1
+                        print(f"[CSV Upload] Row {row_number}: skipped duplicate enrollment in CSV ({enrollment})")
                         continue
+                    if enrollment_key in existing_enrollments:
+                        skipped += 1
+                        print(f"[CSV Upload] Row {row_number}: skipped existing enrollment in database ({enrollment})")
+                        continue
+
                     seen_enrollments.add(enrollment_key)
 
-                    # ============================================================
-                    # Check for duplicate enrollment in database
-                    # ============================================================
-                    existing = db.execute(
-                        f"SELECT id FROM students WHERE enrollment = {placeholder}",
-                        (enrollment,),
-                    ).fetchone()
-                    if existing:
-                        msg = f"Row {row_number}: Enrollment '{enrollment}' already exists in database"
-                        print(f"[CSV Upload] {msg}")
-                        failed_rows_log.append(msg)
-                        failed += 1
-                        continue
-
-                    # ============================================================
-                    # Insert student (with conflict handling)
-                    # ============================================================
-                    student_id = None
-                    if is_postgres:
-                        cur = db.execute(
-                            f"""
-                            INSERT INTO students (name, enrollment, email, branch_id)
-                            VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder})
-                            ON CONFLICT (enrollment) DO NOTHING
-                            RETURNING id
-                            """,
-                            (name, enrollment, email, branch_id),
-                        )
-                        result = cur.fetchone()
-                        if not result:
-                            msg = f"Row {row_number}: Failed to insert student (enrollment conflict?)"
-                            print(f"[CSV Upload] {msg}")
-                            failed_rows_log.append(msg)
-                            failed += 1
-                            continue
-                        student_id = row_get(result, "id") or result[0]
-                    else:
-                        # SQLite: Use INSERT OR IGNORE
-                        cur = db.execute(
-                            f"""
-                            INSERT OR IGNORE INTO students (name, enrollment, email, branch_id)
-                            VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder})
-                            """,
-                            (name, enrollment, email, branch_id),
-                        )
-                        if getattr(cur, "rowcount", 0) == 0:
-                            msg = f"Row {row_number}: Failed to insert student (enrollment conflict?)"
-                            print(f"[CSV Upload] {msg}")
-                            failed_rows_log.append(msg)
-                            failed += 1
-                            continue
-                        student_id = getattr(cur, "lastrowid", None)
-
-                    if not student_id:
-                        msg = f"Row {row_number}: Could not retrieve student ID after insert"
-                        print(f"[CSV Upload] {msg}")
-                        failed_rows_log.append(msg)
-                        failed += 1
-                        continue
-
-                    # ============================================================
-                    # Create user account for student
-                    # ============================================================
                     password_plain = enrollment[-4:] if len(enrollment) >= 4 else enrollment
-                    if is_postgres:
-                        db.execute(
-                            f"""
-                            INSERT INTO users (username, password, role, student_id)
-                            VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder})
-                            ON CONFLICT (username) DO NOTHING
-                            """,
-                            (enrollment, generate_password_hash(password_plain), "student", student_id),
-                        )
-                    else:
-                        db.execute(
-                            f"""
-                            INSERT OR IGNORE INTO users (username, password, role, student_id)
-                            VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder})
-                            """,
-                            (enrollment, generate_password_hash(password_plain), "student", student_id),
-                        )
+                    password_hash = password_hash_cache.get(password_plain)
+                    if password_hash is None:
+                        password_hash = generate_password_hash(password_plain, method="pbkdf2:sha256:120000")
+                        password_hash_cache[password_plain] = password_hash
 
-                    inserted += 1
-                    print(f"[CSV Upload] Row {row_number}: SUCCESS (student_id={student_id})")
+                    pending_rows.append(
+                        {
+                            "row_number": row_number,
+                            "name": name,
+                            "enrollment": enrollment,
+                            "email": email,
+                            "branch_id": branch_id,
+                            "password_hash": password_hash,
+                        }
+                    )
+                    print(f"[CSV Upload] Row {row_number}: validated")
 
                 except Exception as row_error:
-                    # ============================================================
-                    # Handle unexpected row errors without crashing
-                    # ============================================================
                     failed += 1
                     msg = f"Row {row_number}: {repr(row_error)}"
+                    print(f"[CSV Upload] FAILED ROW {row_number}: {row_values}")
                     print(f"[CSV Upload] EXCEPTION: {msg}")
                     print(traceback.format_exc())
                     failed_rows_log.append(msg)
                     continue
 
-            # ====================================================================
-            # STEP 8: Commit all changes at once (SINGLE COMMIT)
-            # ====================================================================
-            print(f"[CSV Upload] All rows processed. Committing {inserted} insertions...")
+            if not pending_rows:
+                summary = f"Upload complete! 0 students added, {skipped} skipped, {failed} failed."
+                print(f"[CSV Upload] {summary}")
+                flash(summary, "warning" if (skipped or failed) else "success")
+                return redirect(url_for("students"))
+
+            print(f"[CSV Upload] Valid rows ready for insert: {len(pending_rows)}")
+
+            if is_postgres:
+                conn = getattr(db, "_conn", None)
+                if conn is None:
+                    raise RuntimeError("PostgreSQL connection is not available")
+
+                student_values = [
+                    (row["name"], row["enrollment"], row["email"], row["branch_id"])
+                    for row in pending_rows
+                ]
+
+                with conn.cursor() as cur:
+                    inserted_students = execute_values(
+                        cur,
+                        f"""
+                        INSERT INTO students (name, enrollment, email, branch_id)
+                        VALUES %s
+                        ON CONFLICT (enrollment) DO NOTHING
+                        RETURNING enrollment, id
+                        """,
+                        student_values,
+                        page_size=200,
+                        fetch=True,
+                    ) or []
+
+                    inserted_student_map = {row[0].lower(): row[1] for row in inserted_students}
+                    existing_enrollments.update(inserted_student_map.keys())
+
+                    user_values = []
+                    for row in pending_rows:
+                        student_id = inserted_student_map.get(row["enrollment"].lower())
+                        if not student_id:
+                            skipped += 1
+                            print(f"[CSV Upload] Row {row['row_number']}: skipped because student insert returned no id")
+                            continue
+                        user_values.append((row["enrollment"], row["password_hash"], "student", student_id))
+
+                    if user_values:
+                        execute_values(
+                            cur,
+                            f"""
+                            INSERT INTO users (username, password, role, student_id)
+                            VALUES %s
+                            ON CONFLICT (username) DO NOTHING
+                            """,
+                            user_values,
+                            page_size=200,
+                        )
+
+                inserted = len(inserted_students)
+            else:
+                for row in pending_rows:
+                    try:
+                        cur = db.execute(
+                            f"INSERT OR IGNORE INTO students (name, enrollment, email, branch_id) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder})",
+                            (row["name"], row["enrollment"], row["email"], row["branch_id"]),
+                        )
+                        if getattr(cur, "rowcount", 0) == 0:
+                            skipped += 1
+                            print(f"[CSV Upload] Row {row['row_number']}: skipped at insert stage (duplicate enrollment)")
+                            continue
+
+                        student_id = getattr(cur, "lastrowid", None)
+                        if not student_id:
+                            raise RuntimeError("Could not retrieve student ID after insert")
+
+                        db.execute(
+                            f"INSERT OR IGNORE INTO users (username, password, role, student_id) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder})",
+                            (row["enrollment"], row["password_hash"], "student", student_id),
+                        )
+                        inserted += 1
+                    except Exception as insert_error:
+                        failed += 1
+                        msg = f"Row {row['row_number']}: {repr(insert_error)}"
+                        print(f"[CSV Upload] FAILED ROW {row['row_number']}: {row}")
+                        print(f"[CSV Upload] EXCEPTION: {msg}")
+                        print(traceback.format_exc())
+                        failed_rows_log.append(msg)
+
             db.commit()
 
-            # ====================================================================
-            # STEP 9: Build upload summary and display to user
-            # ====================================================================
             summary = f"Upload complete! {inserted} students added, {skipped} skipped, {failed} failed."
             print(f"[CSV Upload] {summary}")
-            
             if failed_rows_log:
-                # Show first 5 failed rows to user
                 failed_preview = "\n".join(failed_rows_log[:5])
                 if len(failed_rows_log) > 5:
                     failed_preview += f"\n... and {len(failed_rows_log) - 5} more errors"
@@ -1907,30 +1874,20 @@ def upload_students_csv():
             return redirect(url_for("students"))
 
         except Exception as e:
-            # ====================================================================
-            # STEP 10: Global error handling (never crash the app)
-            # ====================================================================
             print(f"[CSV Upload CRITICAL] Unhandled exception: {repr(e)}")
             print(traceback.format_exc())
-            
             if db:
                 try:
                     db.rollback()
                     print("[CSV Upload] Database rolled back after critical error")
                 except Exception as rollback_error:
                     print(f"[CSV Upload] Rollback failed: {repr(rollback_error)}")
-
             flash(
-                "Failed to process CSV file due to a critical error. "
-                "Please check the file format and try again. See server logs for details.",
-                "error"
+                "Failed to process CSV file due to a critical error. Please check the file format and try again.",
+                "error",
             )
             return redirect(url_for("upload_students_csv"))
-
         finally:
-            # ====================================================================
-            # STEP 11: Cleanup (close database connection)
-            # ====================================================================
             if db:
                 try:
                     db.close()
