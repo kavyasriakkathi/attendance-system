@@ -1751,41 +1751,58 @@ def upload_students_csv():
                 pattern = r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$"
                 return re.match(pattern, email.strip()) is not None
 
+            def _base36_char_to_int(ch: str):
+                if not ch or len(ch) != 1:
+                    return None
+                if '0' <= ch <= '9':
+                    return ord(ch) - ord('0')
+                if 'A' <= ch <= 'Z':
+                    return ord(ch) - ord('A') + 10
+                return None
+
+            def _int_to_base36_char(value: int):
+                if value < 0 or value > 35:
+                    return None
+                if value < 10:
+                    return chr(ord('0') + value)
+                return chr(ord('A') + (value - 10))
+
             def _parse_enrollment_enhanced(enrollment: str):
                 """
-                Parse an enrollment into (prefix, suffix_str, suffix_int, width).
-                Suffix is the trailing alphanumeric run interpreted as a base36 counter
-                (0-9, A-Z). Returns (prefix, suffix_str, suffix_int, width) or (None, None, None, None)
-                on invalid format.
+                Expected format support (as requested):
+                - Prefix + 2-char sequence token where:
+                  token[0] in 0-9,A-Z and token[1] in 0-9
+                Examples:
+                ...65, ...69, ...70, ...99, ...A0, ...A9, ...B0, ...C8
+
+                Returns (prefix, sequence_index, sequence_token, mode)
+                where sequence_index = base36(token[0]) * 10 + int(token[1]).
                 """
                 if not enrollment:
                     return None, None, None, None
-                m = re.search(r"([0-9A-Z]+)$", enrollment)
-                if not m:
-                    return None, None, None, None
-                suffix = m.group(1)
-                prefix = enrollment[: -len(suffix)]
+                enrollment = enrollment.upper().strip()
 
-                # Validate suffix characters
-                if not re.fullmatch(r"[0-9A-Z]+", suffix):
+                if len(enrollment) < 3:
                     return None, None, None, None
 
-                def base36_to_int(s: str) -> int:
-                    val = 0
-                    for ch in s:
-                        if '0' <= ch <= '9':
-                            digit = ord(ch) - ord('0')
-                        else:
-                            digit = ord(ch) - ord('A') + 10
-                        val = val * 36 + digit
-                    return val
+                prefix = enrollment[:-2]
+                token_first = enrollment[-2]
+                token_last = enrollment[-1]
 
-                try:
-                    suffix_int = base36_to_int(suffix)
-                except Exception:
+                if not re.fullmatch(r"[A-Z0-9]+", prefix):
+                    return None, None, None, None
+                if not re.fullmatch(r"[0-9A-Z]", token_first):
+                    return None, None, None, None
+                if not re.fullmatch(r"[0-9]", token_last):
                     return None, None, None, None
 
-                return prefix, suffix, suffix_int, len(suffix)
+                first_val = _base36_char_to_int(token_first)
+                if first_val is None:
+                    return None, None, None, None
+
+                sequence_index = first_val * 10 + int(token_last)
+                sequence_token = f"{token_first}{token_last}"
+                return prefix, sequence_index, sequence_token, "tail2_alnum_digit"
 
             def _row_value(row_values, index):
                 if index is None or index < 0 or index >= len(row_values):
@@ -1926,7 +1943,7 @@ def upload_students_csv():
                         failed += 1
                         continue
 
-                    prefix, suffix_str, sequence_number, suffix_width = _parse_enrollment_enhanced(enrollment)
+                    prefix, sequence_number, sequence_token, sequence_mode = _parse_enrollment_enhanced(enrollment)
                     if prefix is None:
                         msg = f"Row {row_number}: Invalid enrollment format '{enrollment}'"
                         print(f"[CSV Upload] {msg}")
@@ -1963,9 +1980,14 @@ def upload_students_csv():
                         continue
 
                     seen_enrollments.add(enrollment)
-                    # Group by (prefix, suffix_width) to preserve padding and sequence semantics
-                    key = (prefix, suffix_width)
-                    enrollments_by_prefix.setdefault(key, []).append({"number": sequence_number, "enrollment": enrollment, "suffix": suffix_str})
+                    key = (prefix, sequence_mode)
+                    enrollments_by_prefix.setdefault(key, []).append(
+                        {
+                            "number": sequence_number,
+                            "enrollment": enrollment,
+                            "token": sequence_token,
+                        }
+                    )
 
                     password_plain = enrollment[-4:] if len(enrollment) >= 4 else enrollment
                     password_hash = password_hash_cache.get(password_plain)
@@ -1993,26 +2015,17 @@ def upload_students_csv():
                     print(traceback.format_exc())
                     failed_rows_log.append(msg)
 
-            def int_to_base36(n: int, width: int) -> str:
-                if n < 0:
-                    raise ValueError("n must be non-negative")
-                chars = []
-                while n > 0:
-                    d = n % 36
-                    if d < 10:
-                        chars.append(chr(ord('0') + d))
-                    else:
-                        chars.append(chr(ord('A') + (d - 10)))
-                    n //= 36
-                if not chars:
-                    chars = ['0']
-                s = ''.join(reversed(chars))
-                # pad to width
-                if len(s) < width:
-                    s = s.rjust(width, '0')
-                return s
+            def _format_tail2_token_from_index(index_value: int):
+                if index_value < 0:
+                    return None
+                first_val = index_value // 10
+                last_digit = index_value % 10
+                first_ch = _int_to_base36_char(first_val)
+                if first_ch is None:
+                    return None
+                return f"{first_ch}{last_digit}"
 
-            for (prefix, width), items in enrollments_by_prefix.items():
+            for (prefix, mode), items in enrollments_by_prefix.items():
                 numbers = sorted({item["number"] for item in items})
                 if len(numbers) < 2:
                     continue
@@ -2021,11 +2034,14 @@ def upload_students_csv():
                 present = set(numbers)
                 missing_numbers = sorted(full_range - present)
                 for missing_number in missing_numbers:
-                    try:
-                        missing_suffix = int_to_base36(missing_number, width)
-                        warning = f"Enrollment {prefix}{missing_suffix} is missing."
-                    except Exception:
-                        warning = f"Enrollment {prefix}? (missing numeric {missing_number}) is missing."
+                    if mode == "tail2_alnum_digit":
+                        missing_suffix = _format_tail2_token_from_index(missing_number)
+                        if missing_suffix is not None:
+                            warning = f"Enrollment {prefix}{missing_suffix} is missing."
+                        else:
+                            warning = f"Enrollment {prefix}? is missing."
+                    else:
+                        warning = f"Enrollment {prefix}? is missing."
                     print(f"[CSV Upload] {warning}")
                     missing_sequence_messages.append(warning)
 
