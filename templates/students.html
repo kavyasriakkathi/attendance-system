@@ -72,10 +72,31 @@
                 <td>{{ student.enrollment }}</td>
                 <td>{{ student.email or '-' }}</td>
                 <td>{{ student.branch_name }}</td>
-                <td><a href="{{ url_for('student_dashboard_by_id', student_id=student.id) }}">View</a></td>
+                <td style="display:flex;gap:8px;align-items:center;">
+                    <a class="button" href="{{ url_for('student_dashboard_by_id', student_id=student.id) }}">View</a>
+
+                    <!-- Delete form: admin-only route. Confirmation handled by onsubmit JS. -->
+                    <form method="post" action="{{ url_for('delete_student') }}" onsubmit="return confirmDelete(this);" style="display:inline;margin:0;">
+                        <input type="hidden" name="student_id" value="{{ student.id }}" />
+                        <input type="hidden" name="enrollment" value="{{ student.enrollment }}" />
+                        <button type="submit" class="button" style="background:#ef4444;color:white;border:0;padding:6px 10px;border-radius:4px;">Delete</button>
+                    </form>
+                </td>
             </tr>
             {% endfor %}
         </tbody>
     </table>
 </div>
+    <script>
+        // Confirm deletion with explicit student info to avoid accidents
+        function confirmDelete(form) {
+            try {
+                var enroll = form.querySelector('input[name="enrollment"]').value || '';
+                var msg = 'Are you sure you want to permanently delete student ' + (enroll || 'this student') + '? This action cannot be undone.';
+                return confirm(msg);
+            } catch (e) {
+                return confirm('Are you sure you want to permanently delete this student?');
+            }
+        }
+    </script>
 {% endblock %}

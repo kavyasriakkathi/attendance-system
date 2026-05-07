@@ -2002,6 +2002,65 @@ def students():
             except: pass
 
 
+@app.route('/delete_student', methods=['POST'])
+@login_required
+@admin_required
+def delete_student():
+    """Delete a student and associated user record.
+
+    Accepts either `student_id` or `enrollment` in form data. Requires admin.
+    """
+    db = None
+    try:
+        student_id = (request.form.get('student_id') or '').strip()
+        enrollment = (request.form.get('enrollment') or '').strip()
+
+        if not student_id and not enrollment:
+            flash('No student specified for deletion.', 'error')
+            return redirect(url_for('students'))
+
+        db = get_db()
+        placeholder = get_placeholder()
+
+        # Lookup target student
+        if student_id:
+            target = db.execute(f"SELECT id, enrollment FROM students WHERE id = {placeholder}", (student_id,)).fetchone()
+        else:
+            target = db.execute(f"SELECT id, enrollment FROM students WHERE enrollment = {placeholder}", (enrollment,)).fetchone()
+
+        if not target:
+            flash('Student not found.', 'error')
+            return redirect(url_for('students'))
+
+        sid = row_get(target, 'id')
+        enroll_val = row_get(target, 'enrollment') or ''
+
+        # Perform deletion inside a transaction. Remove dependent user first.
+        try:
+            db.execute(f"DELETE FROM users WHERE student_id = {placeholder}", (sid,))
+            db.execute(f"DELETE FROM students WHERE id = {placeholder}", (sid,))
+            db.commit()
+            flash(f"Student {enroll_val} deleted successfully.", 'success')
+        except Exception as e:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            print(f"[delete_student] ERROR: {repr(e)}")
+            flash('Failed to delete student. See server logs for details.', 'error')
+
+        return redirect(url_for('students'))
+
+    except Exception as e:
+        print(f"[delete_student] Unexpected error: {repr(e)}")
+        flash('An unexpected error occurred while deleting the student.', 'error')
+        return redirect(url_for('students'))
+    finally:
+        if db:
+            try: db.close()
+            except: pass
+
+
 @app.route("/student_login", methods=["GET", "POST"])
 def student_login():
     next_url = request.args.get("next") or request.form.get("next")
