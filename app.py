@@ -2406,6 +2406,36 @@ def bulk_delete_students():
             except: pass
 
 
+@app.route('/delete_all_students', methods=['POST'])
+@login_required
+@admin_required
+def delete_all_students():
+    """Permanently delete every student record in the system."""
+    db = None
+    try:
+        db = get_db()
+        # 1. Clear attendance first
+        db.execute("DELETE FROM attendance")
+        # 2. Clear student user accounts
+        db.execute("DELETE FROM users WHERE role = 'student' OR student_id IS NOT NULL")
+        # 3. Clear students table
+        db.execute("DELETE FROM students")
+        
+        db.commit()
+        flash("All student records have been permanently cleared.", "success")
+        return redirect(url_for('students'))
+    except Exception as e:
+        if db:
+            db.rollback()
+        print(f"[delete_all_students] ERROR: {repr(e)}")
+        flash("Failed to delete all students.", "error")
+        return redirect(url_for('students'))
+    finally:
+        if db:
+            try: db.close()
+            except: pass
+
+
 @app.route("/student_login", methods=["GET", "POST"])
 def student_login():
     next_url = request.args.get("next") or request.form.get("next")

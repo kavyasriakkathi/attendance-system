@@ -62,8 +62,12 @@
         <div style="margin-bottom: 15px;">
             <textarea name="bulk_data" rows="3" style="width: 100%; border-radius: 8px; border: 1px solid var(--border-color); padding: 10px; font-family: inherit;" placeholder="Paste IDs or enrollments here..."></textarea>
         </div>
-        <button type="submit" style="background: #ef4444;"><i class="fa-solid fa-trash-can"></i> Bulk Delete</button>
+        <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+            <button type="submit" style="background: #ef4444;"><i class="fa-solid fa-trash-can"></i> Bulk Delete</button>
+            <button type="button" onclick="confirmDeleteAll()" style="background: #991b1b;"><i class="fa-solid fa-fire"></i> Delete All Students</button>
+        </div>
     </form>
+    <form id="deleteAllForm" method="post" action="{{ url_for('delete_all_students') }}" style="display:none;"></form>
 </div>
 <div class="card">
     <table>
@@ -107,6 +111,17 @@
                 return confirm(msg);
             } catch (e) {
                 return confirm('Are you sure you want to permanently delete this student?');
+            }
+        }
+
+        function confirmDeleteAll() {
+            if (confirm('CRITICAL WARNING: This will permanently delete EVERY student, their attendance history, and their login accounts.\n\nAre you absolutely sure?')) {
+                if (confirm('SECOND CONFIRMATION: Type "DELETE" in the next prompt if you are sure.')) {
+                    const check = prompt('Type DELETE to confirm:');
+                    if (check === 'DELETE') {
+                        document.getElementById('deleteAllForm').submit();
+                    }
+                }
             }
         }
     </script>
