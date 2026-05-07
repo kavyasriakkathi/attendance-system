@@ -601,6 +601,8 @@ def init_db(db=None):
             db.close()
         except Exception:
             pass
+
+
 def login_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
@@ -1517,7 +1519,8 @@ def upload_students():
 @login_required
 @admin_required
 def upload_students_csv():
-    """CSV upload for students with Render-safe streaming, validation, and batched inserts."""
+    """CSV upload for students with enrollment sequence validation and safe batched inserts."""
+
     if request.method == "POST":
         file = request.files.get("file")
         if not file or not str(file.filename).lower().endswith(".csv"):
@@ -1553,11 +1556,7 @@ def upload_students_csv():
             except Exception:
                 execute_values = None
 
-            def _canon_header(value: object) -> str:
-                text = str(value).lstrip("\ufeff").strip().lower()
-                return re.sub(r"[\s_\-]+", "", text)
-
-            def _clean_cell(value: object) -> str:
+            def _clean_text(value: object) -> str:
                 if value is None:
                     return ""
                 text = str(value).strip()
@@ -1565,16 +1564,31 @@ def upload_students_csv():
                     return ""
                 return text
 
+            def _normalize_enrollment(value: object) -> str:
+                return re.sub(r"\s+", "", _clean_text(value)).upper()
+
+            def _canon_header(value: object) -> str:
+                return re.sub(r"[\s_\-]+", "", _clean_text(value).lstrip("\ufeff").lower())
+
             def _is_valid_email(email: str) -> bool:
                 if not email:
                     return False
                 pattern = r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$"
                 return re.match(pattern, email.strip()) is not None
 
+            def _parse_enrollment(enrollment: str):
+                match = re.fullmatch(r"([A-Z0-9]+?)(\d+)$", enrollment)
+                if not match:
+                    return None, None
+                prefix, number = match.group(1), match.group(2)
+                if not prefix:
+                    return None, None
+                return prefix, int(number)
+
             def _row_value(row_values, index):
                 if index is None or index < 0 or index >= len(row_values):
                     return ""
-                return _clean_cell(row_values[index])
+                return _clean_text(row_values[index])
 
             dialect = csv.excel
             try:
@@ -1610,17 +1624,15 @@ def upload_students_csv():
                 if key and key not in header_map:
                     header_map[key] = index
 
-            print(f"[CSV Upload] Canonicalized header map: {header_map}")
-
             required_aliases = {
                 "name": {"name", "studentname", "student"},
-                "enrollment": {"enrollment", "enrollmentno", "h.t.no", "hallticketno", "tendigitsh.t.no", "rollno"},
+                "enrollment": {"enrollment", "enrollmentno", "htno", "hallticketno", "tendigitsh.t.no", "rollno"},
                 "email": {"email", "mailid", "emailid", "mail"},
                 "branch_id": {"branchid", "branch", "section"},
             }
 
             column_indexes = {}
-            missing = []
+            missing_columns = []
             for field_name, aliases in required_aliases.items():
                 found_index = None
                 for alias in aliases:
@@ -1628,13 +1640,13 @@ def upload_students_csv():
                         found_index = header_map[alias]
                         break
                 if found_index is None:
-                    missing.append(field_name)
+                    missing_columns.append(field_name)
                 else:
                     column_indexes[field_name] = found_index
 
-            if missing:
+            if missing_columns:
                 flash(
-                    f"Missing required columns: {', '.join(sorted(missing))}. CSV must include Name, Enrollment, Email, and Branch_ID.",
+                    f"Missing required columns: {', '.join(sorted(missing_columns))}. CSV must include Name, Enrollment, Email, and Branch_ID.",
                     "error",
                 )
                 return redirect(url_for("upload_students_csv"))
@@ -1656,32 +1668,34 @@ def upload_students_csv():
 
             existing_enrollments = set()
             for student_row in db.execute("SELECT enrollment FROM students").fetchall():
-                enrollment_value = _clean_cell(row_get(student_row, "enrollment"))
+                enrollment_value = _normalize_enrollment(row_get(student_row, "enrollment"))
                 if enrollment_value:
-                    existing_enrollments.add(enrollment_value.lower())
-
-            print(f"[CSV Upload] Loaded {len(valid_branch_ids)} branch IDs and {len(existing_enrollments)} existing enrollments")
+                    existing_enrollments.add(enrollment_value)
 
             inserted = 0
             skipped = 0
+            duplicates = 0
             failed = 0
-            seen_enrollments = set()
+            missing_sequence_messages = []
             failed_rows_log = []
+            seen_enrollments = set()
             password_hash_cache = {}
             pending_rows = []
+            enrollments_by_prefix = {}
 
             for row_number, row_values in enumerate(reader, start=2):
                 try:
                     row_values = list(row_values)
                     print(f"[CSV Upload] Processing row {row_number}: {row_values}")
 
-                    if not row_values or not any(_clean_cell(value) for value in row_values):
+                    if not row_values or not any(_clean_text(value) for value in row_values):
                         skipped += 1
                         print(f"[CSV Upload] Row {row_number}: skipped empty row")
                         continue
 
                     name = _row_value(row_values, column_indexes["name"])
-                    enrollment = _row_value(row_values, column_indexes["enrollment"])
+                    raw_enrollment = _row_value(row_values, column_indexes["enrollment"])
+                    enrollment = _normalize_enrollment(raw_enrollment)
                     email = _row_value(row_values, column_indexes["email"])
                     branch_id_raw = _row_value(row_values, column_indexes["branch_id"])
 
@@ -1710,6 +1724,14 @@ def upload_students_csv():
                         failed += 1
                         continue
 
+                    prefix, sequence_number = _parse_enrollment(enrollment)
+                    if prefix is None or sequence_number is None:
+                        msg = f"Row {row_number}: Invalid enrollment format '{enrollment}'"
+                        print(f"[CSV Upload] {msg}")
+                        failed_rows_log.append(msg)
+                        failed += 1
+                        continue
+
                     try:
                         branch_id = int(branch_id_raw)
                     except (TypeError, ValueError):
@@ -1733,17 +1755,13 @@ def upload_students_csv():
                         failed += 1
                         continue
 
-                    enrollment_key = enrollment.lower()
-                    if enrollment_key in seen_enrollments:
-                        skipped += 1
-                        print(f"[CSV Upload] Row {row_number}: skipped duplicate enrollment in CSV ({enrollment})")
-                        continue
-                    if enrollment_key in existing_enrollments:
-                        skipped += 1
-                        print(f"[CSV Upload] Row {row_number}: skipped existing enrollment in database ({enrollment})")
+                    if enrollment in seen_enrollments or enrollment in existing_enrollments:
+                        duplicates += 1
+                        print(f"[CSV Upload] Row {row_number}: duplicate enrollment skipped ({enrollment})")
                         continue
 
-                    seen_enrollments.add(enrollment_key)
+                    seen_enrollments.add(enrollment)
+                    enrollments_by_prefix.setdefault(prefix, []).append({"number": sequence_number, "enrollment": enrollment})
 
                     password_plain = enrollment[-4:] if len(enrollment) >= 4 else enrollment
                     password_hash = password_hash_cache.get(password_plain)
@@ -1770,15 +1788,27 @@ def upload_students_csv():
                     print(f"[CSV Upload] EXCEPTION: {msg}")
                     print(traceback.format_exc())
                     failed_rows_log.append(msg)
+
+            for prefix, items in enrollments_by_prefix.items():
+                numbers = sorted({item["number"] for item in items})
+                if len(numbers) < 2:
                     continue
+                missing_numbers = sorted(set(range(numbers[0], numbers[-1] + 1)) - set(numbers))
+                for missing_number in missing_numbers:
+                    warning = f"Enrollment {prefix}{missing_number} is missing."
+                    print(f"[CSV Upload] {warning}")
+                    missing_sequence_messages.append(warning)
 
             if not pending_rows:
-                summary = f"Upload complete! 0 students added, {skipped} skipped, {failed} failed."
+                summary = (
+                    f"Upload complete! inserted 0, skipped {skipped}, duplicates {duplicates}, "
+                    f"missing sequence numbers {len(missing_sequence_messages)}, failed rows {failed}."
+                )
                 print(f"[CSV Upload] {summary}")
-                flash(summary, "warning" if (skipped or failed) else "success")
+                if missing_sequence_messages:
+                    print("[CSV Upload] Sequence warnings:\n" + "\n".join(missing_sequence_messages[:20]))
+                flash(summary, "warning" if (duplicates or missing_sequence_messages or failed) else "success")
                 return redirect(url_for("students"))
-
-            print(f"[CSV Upload] Valid rows ready for insert: {len(pending_rows)}")
 
             if is_postgres:
                 conn = getattr(db, "_conn", None)
@@ -1793,7 +1823,7 @@ def upload_students_csv():
                 with conn.cursor() as cur:
                     inserted_students = execute_values(
                         cur,
-                        f"""
+                        """
                         INSERT INTO students (name, enrollment, email, branch_id)
                         VALUES %s
                         ON CONFLICT (enrollment) DO NOTHING
@@ -1804,14 +1834,12 @@ def upload_students_csv():
                         fetch=True,
                     ) or []
 
-                    inserted_student_map = {row[0].lower(): row[1] for row in inserted_students}
-                    existing_enrollments.update(inserted_student_map.keys())
-
+                    inserted_student_map = {row[0].upper(): row[1] for row in inserted_students}
                     user_values = []
                     for row in pending_rows:
-                        student_id = inserted_student_map.get(row["enrollment"].lower())
+                        student_id = inserted_student_map.get(row["enrollment"].upper())
                         if not student_id:
-                            skipped += 1
+                            duplicates += 1
                             print(f"[CSV Upload] Row {row['row_number']}: skipped because student insert returned no id")
                             continue
                         user_values.append((row["enrollment"], row["password_hash"], "student", student_id))
@@ -1819,7 +1847,7 @@ def upload_students_csv():
                     if user_values:
                         execute_values(
                             cur,
-                            f"""
+                            """
                             INSERT INTO users (username, password, role, student_id)
                             VALUES %s
                             ON CONFLICT (username) DO NOTHING
@@ -1829,6 +1857,8 @@ def upload_students_csv():
                         )
 
                 inserted = len(inserted_students)
+                if inserted < len(pending_rows):
+                    duplicates += len(pending_rows) - inserted
             else:
                 for row in pending_rows:
                     try:
@@ -1837,8 +1867,8 @@ def upload_students_csv():
                             (row["name"], row["enrollment"], row["email"], row["branch_id"]),
                         )
                         if getattr(cur, "rowcount", 0) == 0:
-                            skipped += 1
-                            print(f"[CSV Upload] Row {row['row_number']}: skipped at insert stage (duplicate enrollment)")
+                            duplicates += 1
+                            print(f"[CSV Upload] Row {row['row_number']}: duplicate enrollment skipped at insert stage ({row['enrollment']})")
                             continue
 
                         student_id = getattr(cur, "lastrowid", None)
@@ -1860,14 +1890,25 @@ def upload_students_csv():
 
             db.commit()
 
-            summary = f"Upload complete! {inserted} students added, {skipped} skipped, {failed} failed."
+            summary = (
+                f"Upload complete! inserted {inserted}, skipped {skipped}, duplicates {duplicates}, "
+                f"missing sequence numbers {len(missing_sequence_messages)}, failed rows {failed}."
+            )
             print(f"[CSV Upload] {summary}")
+
+            if missing_sequence_messages:
+                print("[CSV Upload] Sequence warnings:\n" + "\n".join(missing_sequence_messages[:20]))
+
             if failed_rows_log:
                 failed_preview = "\n".join(failed_rows_log[:5])
                 if len(failed_rows_log) > 5:
                     failed_preview += f"\n... and {len(failed_rows_log) - 5} more errors"
                 print(f"[CSV Upload] Failed rows:\n{failed_preview}")
-                flash(f"{summary}\n\nFailed rows:\n{failed_preview}", "warning")
+                flash(f"{summary}\n\nWarnings:\n" + "\n".join(missing_sequence_messages[:10]) if missing_sequence_messages else summary, "warning")
+                return redirect(url_for("students"))
+
+            if missing_sequence_messages or duplicates:
+                flash(summary + ("\n\n" + "\n".join(missing_sequence_messages[:10]) if missing_sequence_messages else ""), "warning")
             else:
                 flash(summary, "success")
 
@@ -1882,10 +1923,7 @@ def upload_students_csv():
                     print("[CSV Upload] Database rolled back after critical error")
                 except Exception as rollback_error:
                     print(f"[CSV Upload] Rollback failed: {repr(rollback_error)}")
-            flash(
-                "Failed to process CSV file due to a critical error. Please check the file format and try again.",
-                "error",
-            )
+            flash("Failed to process CSV file. Please check the file format and try again.", "error")
             return redirect(url_for("upload_students_csv"))
         finally:
             if db:
