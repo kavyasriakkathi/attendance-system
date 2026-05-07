@@ -26,6 +26,33 @@
     {% if students %}
     <form method="post">
         <input type="hidden" name="date" value="{{ selected_date }}" />
+
+        <!-- Bulk Mark Absent Section -->
+        <div class="card bulk-action-card" style="margin-bottom: 30px; background-color: #fff9f9; border-left: 6px solid var(--danger-color);">
+            <h3 style="color: var(--danger-color); display: flex; align-items: center; gap: 10px;">
+                <i class="fa-solid fa-users-slash"></i> Bulk Mark Absent
+            </h3>
+            <p style="margin-bottom: 15px; font-size: 0.95rem; color: #555;">
+                Enter last digits or full enrollment numbers (separated by space or comma):
+            </p>
+            <div style="display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 15px;">
+                <input type="text" id="bulk_absent_input" placeholder="e.g. 75 76 79 80" style="flex-grow: 1; min-width: 200px;">
+                <button type="button" onclick="bulkMarkAbsent()" style="background-color: var(--danger-color);">
+                    <i class="fa-solid fa-check-double"></i> Apply to Table
+                </button>
+                <button type="button" onclick="resetBulkStatus()" style="background-color: var(--text-secondary);">
+                    <i class="fa-solid fa-undo"></i> Reset All
+                </button>
+            </div>
+            <div id="bulk_result_msg" style="font-weight: 700; font-size: 0.9rem; display: none;"></div>
+        </div>
+
+        <div style="margin-bottom: 15px; display: flex; justify-content: flex-end;">
+            <button type="button" onclick="clearAllAttendance()" class="button" style="background-color: var(--text-secondary); padding: 8px 16px; font-size: 0.9rem;">
+                <i class="fa-solid fa-eraser"></i> Clear Selections
+            </button>
+        </div>
+
         <div class="table-responsive">
             <table>
                 <thead>
@@ -59,9 +86,121 @@
         </div>
         <div style="margin-top: 18px; display: flex; gap: 10px; flex-wrap: wrap; align-items: center;">
             <button type="submit">Save Attendance</button>
+            <a href="{{ url_for('generate_qr', branch_id=teacher.branch_id, subject_id=teacher.subject_id, date=selected_date) }}" class="button" style="background-color: #2196F3; text-decoration: none; display: inline-flex; align-items: center; justify-content: center;">Generate QR Code</a>
+            <button id="copyAttendanceLinkBtn" type="button" class="button" style="background-color: #4CAF50;">Copy Attendance Scan URL</button>
+            <span id="copyStatus" style="color: #4CAF50; display: none; font-weight: bold;">Link copied!</span>
             <a href="{{ url_for('teacher_dashboard') }}" class="button" style="background: var(--text-secondary); text-decoration: none;">Back to Dashboard</a>
         </div>
     </form>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            const copyBtn = document.getElementById('copyAttendanceLinkBtn');
+            const copyStatus = document.getElementById('copyStatus');
+            if (copyBtn) {
+                copyBtn.addEventListener('click', function() {
+                    const branchId = '{{ teacher.branch_id }}';
+                    const subjectId = '{{ teacher.subject_id }}';
+                    const date = '{{ selected_date }}';
+                    const url = `/api/generate_qr_token?branch_id=${encodeURIComponent(branchId)}&subject_id=${encodeURIComponent(subjectId)}&date=${encodeURIComponent(date)}`;
+                    fetch(url)
+                        .then(response => response.json())
+                        .then(data => {
+                            if (data.scan_url) {
+                                navigator.clipboard.writeText(data.scan_url)
+                                    .then(() => {
+                                        copyStatus.textContent = 'Link copied!';
+                                        copyStatus.style.color = '#4CAF50';
+                                        copyStatus.style.display = 'inline';
+                                        setTimeout(() => copyStatus.style.display = 'none', 3000);
+                                    })
+                                    .catch(() => {
+                                        copyStatus.textContent = 'Unable to copy automatically. Copy manually.';
+                                        copyStatus.style.color = '#f44336';
+                                        copyStatus.style.display = 'inline';
+                                        setTimeout(() => copyStatus.style.display = 'none', 4000);
+                                    });
+                            } else {
+                                copyStatus.textContent = 'Failed to get scan URL.';
+                                copyStatus.style.color = '#f44336';
+                                copyStatus.style.display = 'inline';
+                                setTimeout(() => copyStatus.style.display = 'none', 4000);
+                            }
+                        })
+                        .catch(() => {
+                            copyStatus.textContent = 'Failed to generate scan URL.';
+                            copyStatus.style.color = '#f44336';
+                            copyStatus.style.display = 'inline';
+                            setTimeout(() => copyStatus.style.display = 'none', 4000);
+                        });
+                });
+            }
+        });
+
+        function bulkMarkAbsent() {
+            const input = document.getElementById('bulk_absent_input').value;
+            const rollNos = input.split(/[\s,]+/).filter(x => x.trim() !== '');
+            
+            if (rollNos.length === 0) {
+                alert('Please enter at least one roll number.');
+                return;
+            }
+
+            const rows = document.querySelectorAll('tbody tr');
+            let count = 0;
+            
+            rows.forEach(row => {
+                const enrollment = row.cells[1].textContent.trim();
+                const select = row.querySelector('select');
+                
+                // Check if enrollment matches exactly or ends with the roll number
+                const match = rollNos.find(rn => enrollment === rn || enrollment.endsWith(rn));
+                
+                if (match) {
+                    if (select) {
+                        select.value = 'Absent';
+                        row.style.backgroundColor = '#fff0f0';
+                        row.style.transition = 'background-color 0.3s ease';
+                        count++;
+                    }
+                }
+            });
+            
+            const resultMsg = document.getElementById('bulk_result_msg');
+            resultMsg.style.display = 'block';
+            if (count > 0) {
+                resultMsg.textContent = `✓ Marked ${count} students as Absent. Click "Save Attendance" below to save.`;
+                resultMsg.style.color = '#d32f2f';
+            } else {
+                resultMsg.textContent = '⚠ No matching students found for the entered roll numbers.';
+                resultMsg.style.color = '#666';
+            }
+        }
+
+        function resetBulkStatus() {
+            const rows = document.querySelectorAll('tbody tr');
+            rows.forEach(row => {
+                const select = row.querySelector('select');
+                if (select) {
+                    select.value = 'Present';
+                    row.style.backgroundColor = '';
+                }
+            });
+            document.getElementById('bulk_result_msg').style.display = 'none';
+            document.getElementById('bulk_absent_input').value = '';
+        }
+
+        function clearAllAttendance() {
+            if (confirm('Are you sure you want to clear all selections for this class?')) {
+                const selects = document.querySelectorAll('tbody select');
+                selects.forEach(s => s.value = 'Present');
+                const rows = document.querySelectorAll('tbody tr');
+                rows.forEach(r => r.style.backgroundColor = '');
+                const inputs = document.querySelectorAll('tbody input[type="text"]');
+                inputs.forEach(i => i.value = '');
+            }
+        }
+    </script>
     {% else %}
     <div class="flash warning" style="display: block;">No students found for your assigned branch.</div>
     {% endif %}
