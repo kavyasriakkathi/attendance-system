@@ -659,10 +659,31 @@ def dashboard():
     try:
         db = get_db()
         placeholder = get_placeholder()
-        branch_count = db.execute("SELECT COUNT(*) FROM branches").fetchone()[0]
-        student_count = db.execute("SELECT COUNT(*) FROM students").fetchone()[0]
-        subject_count = db.execute("SELECT COUNT(*) FROM subjects").fetchone()[0]
-        attendance_count = db.execute("SELECT COUNT(*) FROM attendance").fetchone()[0]
+
+        def _safe_scalar(query, params=(), default=0):
+            try:
+                row = db.execute(query, params).fetchone()
+                if row is None:
+                    return default
+                try:
+                    return row[0]
+                except Exception:
+                    return default
+            except Exception as qe:
+                print(f"[dashboard] scalar query failed: {repr(qe)} | query={query}")
+                return default
+
+        def _safe_fetchall(query, params=()):
+            try:
+                return db.execute(query, params).fetchall()
+            except Exception as qe:
+                print(f"[dashboard] fetchall query failed: {repr(qe)} | query={query}")
+                return []
+
+        branch_count = int(_safe_scalar("SELECT COUNT(*) FROM branches", default=0) or 0)
+        student_count = int(_safe_scalar("SELECT COUNT(*) FROM students", default=0) or 0)
+        subject_count = int(_safe_scalar("SELECT COUNT(*) FROM subjects", default=0) or 0)
+        attendance_count = int(_safe_scalar("SELECT COUNT(*) FROM attendance", default=0) or 0)
 
         attendance_stats = db.execute("""
             SELECT
@@ -685,7 +706,7 @@ def dashboard():
         if total_classes > 0:
             overall_percentage = round((present_count / total_classes) * 100, 1)
 
-        subject_rows = db.execute(
+        subject_rows = _safe_fetchall(
             """
             SELECT
                 subjects.name AS subject_name,
@@ -696,7 +717,7 @@ def dashboard():
             GROUP BY subjects.id, subjects.name
             ORDER BY subjects.name
             """
-        ).fetchall()
+        )
 
         subject_chart_labels = []
         subject_chart_percentages = []
@@ -707,8 +728,8 @@ def dashboard():
             subject_chart_labels.append(row_get(row, "subject_name", "") or "")
             subject_chart_percentages.append(pct)
 
-
-        branch_data = db.execute("""
+        branch_data = _safe_fetchall(
+            """
             SELECT
                 branches.name AS branch_name,
                 branches.location AS location,
@@ -725,12 +746,35 @@ def dashboard():
             LEFT JOIN attendance ON branches.id = attendance.branch_id
             GROUP BY branches.id, branches.name, branches.location
             ORDER BY branches.name
-        """).fetchall()
+            """
+        )
+        if not branch_data:
+            # Backward-compatible fallback for old schemas that don't have branches.location.
+            branch_data = _safe_fetchall(
+                """
+                SELECT
+                    branches.name AS branch_name,
+                    '' AS location,
+                    COUNT(DISTINCT students.id) AS student_count,
+                    COUNT(DISTINCT subjects.id) AS subject_count,
+                    COUNT(attendance.id) AS attendance_count,
+                    ROUND(
+                        COUNT(CASE WHEN attendance.status='Present' THEN 1 END)*100.0 / NULLIF(COUNT(attendance.id),0),
+                        1
+                    ) AS attendance_percentage
+                FROM branches
+                LEFT JOIN students ON branches.id = students.branch_id
+                LEFT JOIN subjects ON branches.id = subjects.branch_id
+                LEFT JOIN attendance ON branches.id = attendance.branch_id
+                GROUP BY branches.id, branches.name
+                ORDER BY branches.name
+                """
+            )
 
         db.close()
         database_info = {
-            "storage": "PostgreSQL" if app.config["DATABASE"].startswith("postgresql") else "SQLite",
-            "path": app.config["DATABASE"],
+            "storage": "PostgreSQL" if str(app.config.get("DATABASE", "")).startswith("postgresql") else "SQLite",
+            "path": app.config.get("DATABASE", "unknown"),
         }
         mail_info = {
             "configured": is_mail_configured(),
