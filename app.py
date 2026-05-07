@@ -685,6 +685,28 @@ def dashboard():
         if total_classes > 0:
             overall_percentage = round((present_count / total_classes) * 100, 1)
 
+        subject_rows = db.execute(
+            """
+            SELECT
+                subjects.name AS subject_name,
+                COUNT(attendance.id) AS total_count,
+                SUM(CASE WHEN attendance.status = 'Present' THEN 1 ELSE 0 END) AS present_count
+            FROM subjects
+            LEFT JOIN attendance ON subjects.id = attendance.subject_id
+            GROUP BY subjects.id, subjects.name
+            ORDER BY subjects.name
+            """
+        ).fetchall()
+
+        subject_chart_labels = []
+        subject_chart_percentages = []
+        for row in subject_rows:
+            total = int(row_get(row, "total_count", 0) or 0)
+            present = int(row_get(row, "present_count", 0) or 0)
+            pct = round((present / total) * 100, 1) if total > 0 else 0
+            subject_chart_labels.append(row_get(row, "subject_name", "") or "")
+            subject_chart_percentages.append(pct)
+
 
         branch_data = db.execute("""
             SELECT
@@ -729,6 +751,8 @@ def dashboard():
             present_count=present_count,
             absent_count=absent_count,
             overall_percentage=overall_percentage,
+            subject_chart_labels=subject_chart_labels,
+            subject_chart_percentages=subject_chart_percentages,
             branch_data=branch_data,
             database_info=database_info,
             mail_info=mail_info,
@@ -737,7 +761,29 @@ def dashboard():
         print(f"[dashboard] CRITICAL ERROR: {repr(e)}")
         print(traceback.format_exc())
         flash("Dashboard is temporarily unavailable due to a database error.", "error")
-        return render_template("dashboard.html", error_mode=True)
+        return render_template(
+            "dashboard.html",
+            error_mode=True,
+            branch_count=0,
+            student_count=0,
+            subject_count=0,
+            attendance_count=0,
+            total_classes=0,
+            present_count=0,
+            absent_count=0,
+            overall_percentage=0,
+            subject_chart_labels=[],
+            subject_chart_percentages=[],
+            branch_data=[],
+            database_info={"storage": "Unknown", "path": "Unavailable"},
+            mail_info={
+                "configured": False,
+                "server": "Unavailable",
+                "port": "-",
+                "username": None,
+                "tls": False,
+            },
+        )
     finally:
         if db:
             try: db.close()

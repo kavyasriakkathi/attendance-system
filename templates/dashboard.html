@@ -219,8 +219,8 @@ document.addEventListener('DOMContentLoaded', function() {
     // 1) Pie chart: Present vs Absent
     const pieEl = document.getElementById('presentAbsentChart');
     if (pieEl) {
-        const presentCount = {{ present_count | tojson }};
-        const absentCount = {{ absent_count | tojson }};
+        const presentCount = {{ present_count | default(0) | tojson }};
+        const absentCount = {{ absent_count | default(0) | tojson }};
 
         new Chart(pieEl.getContext('2d'), {
             type: 'pie',
@@ -249,8 +249,8 @@ document.addEventListener('DOMContentLoaded', function() {
     // 2) Bar chart: Attendance percentage per subject
     const barEl = document.getElementById('subjectAttendanceChart');
     if (barEl) {
-        const labels = {{ subject_chart_labels | tojson }};
-        const percentages = {{ subject_chart_percentages | tojson }};
+        const labels = {{ subject_chart_labels | default([]) | tojson }};
+        const percentages = {{ subject_chart_percentages | default([]) | tojson }};
 
         new Chart(barEl.getContext('2d'), {
             type: 'bar',
