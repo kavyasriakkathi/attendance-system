@@ -727,6 +727,8 @@ def init_db(db=None):
         _ensure_column(db, "attendance", "subject_name", "TEXT")
         _ensure_column(db, "attendance", "period", "INTEGER DEFAULT 1")
         _ensure_column(db, "students", "import_order", "INTEGER")
+        _ensure_column(db, "users", "student_id", "INTEGER")
+        _ensure_column(db, "branches", "location", "TEXT")
         
         # Upgrade index if it doesn't support period
         try:
