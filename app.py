@@ -1751,14 +1751,41 @@ def upload_students_csv():
                 pattern = r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$"
                 return re.match(pattern, email.strip()) is not None
 
-            def _parse_enrollment(enrollment: str):
-                match = re.fullmatch(r"([A-Z0-9]+?)(\d+)$", enrollment)
-                if not match:
-                    return None, None
-                prefix, number = match.group(1), match.group(2)
-                if not prefix:
-                    return None, None
-                return prefix, int(number)
+            def _parse_enrollment_enhanced(enrollment: str):
+                """
+                Parse an enrollment into (prefix, suffix_str, suffix_int, width).
+                Suffix is the trailing alphanumeric run interpreted as a base36 counter
+                (0-9, A-Z). Returns (prefix, suffix_str, suffix_int, width) or (None, None, None, None)
+                on invalid format.
+                """
+                if not enrollment:
+                    return None, None, None, None
+                m = re.search(r"([0-9A-Z]+)$", enrollment)
+                if not m:
+                    return None, None, None, None
+                suffix = m.group(1)
+                prefix = enrollment[: -len(suffix)]
+
+                # Validate suffix characters
+                if not re.fullmatch(r"[0-9A-Z]+", suffix):
+                    return None, None, None, None
+
+                def base36_to_int(s: str) -> int:
+                    val = 0
+                    for ch in s:
+                        if '0' <= ch <= '9':
+                            digit = ord(ch) - ord('0')
+                        else:
+                            digit = ord(ch) - ord('A') + 10
+                        val = val * 36 + digit
+                    return val
+
+                try:
+                    suffix_int = base36_to_int(suffix)
+                except Exception:
+                    return None, None, None, None
+
+                return prefix, suffix, suffix_int, len(suffix)
 
             def _row_value(row_values, index):
                 if index is None or index < 0 or index >= len(row_values):
@@ -1899,8 +1926,8 @@ def upload_students_csv():
                         failed += 1
                         continue
 
-                    prefix, sequence_number = _parse_enrollment(enrollment)
-                    if prefix is None or sequence_number is None:
+                    prefix, suffix_str, sequence_number, suffix_width = _parse_enrollment_enhanced(enrollment)
+                    if prefix is None:
                         msg = f"Row {row_number}: Invalid enrollment format '{enrollment}'"
                         print(f"[CSV Upload] {msg}")
                         failed_rows_log.append(msg)
@@ -1936,7 +1963,9 @@ def upload_students_csv():
                         continue
 
                     seen_enrollments.add(enrollment)
-                    enrollments_by_prefix.setdefault(prefix, []).append({"number": sequence_number, "enrollment": enrollment})
+                    # Group by (prefix, suffix_width) to preserve padding and sequence semantics
+                    key = (prefix, suffix_width)
+                    enrollments_by_prefix.setdefault(key, []).append({"number": sequence_number, "enrollment": enrollment, "suffix": suffix_str})
 
                     password_plain = enrollment[-4:] if len(enrollment) >= 4 else enrollment
                     password_hash = password_hash_cache.get(password_plain)
@@ -1964,13 +1993,39 @@ def upload_students_csv():
                     print(traceback.format_exc())
                     failed_rows_log.append(msg)
 
-            for prefix, items in enrollments_by_prefix.items():
+            def int_to_base36(n: int, width: int) -> str:
+                if n < 0:
+                    raise ValueError("n must be non-negative")
+                chars = []
+                while n > 0:
+                    d = n % 36
+                    if d < 10:
+                        chars.append(chr(ord('0') + d))
+                    else:
+                        chars.append(chr(ord('A') + (d - 10)))
+                    n //= 36
+                if not chars:
+                    chars = ['0']
+                s = ''.join(reversed(chars))
+                # pad to width
+                if len(s) < width:
+                    s = s.rjust(width, '0')
+                return s
+
+            for (prefix, width), items in enrollments_by_prefix.items():
                 numbers = sorted({item["number"] for item in items})
                 if len(numbers) < 2:
                     continue
-                missing_numbers = sorted(set(range(numbers[0], numbers[-1] + 1)) - set(numbers))
+                start, end = numbers[0], numbers[-1]
+                full_range = set(range(start, end + 1))
+                present = set(numbers)
+                missing_numbers = sorted(full_range - present)
                 for missing_number in missing_numbers:
-                    warning = f"Enrollment {prefix}{missing_number} is missing."
+                    try:
+                        missing_suffix = int_to_base36(missing_number, width)
+                        warning = f"Enrollment {prefix}{missing_suffix} is missing."
+                    except Exception:
+                        warning = f"Enrollment {prefix}? (missing numeric {missing_number}) is missing."
                     print(f"[CSV Upload] {warning}")
                     missing_sequence_messages.append(warning)
 
