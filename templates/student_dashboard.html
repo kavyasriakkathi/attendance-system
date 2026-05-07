@@ -29,20 +29,6 @@
     </div>
 </div>
 
-<div class="grid" style="margin-bottom: 30px;">
-    <div class="card">
-        <h2 style="margin-bottom: 20px;"><i class="fa-solid fa-chart-pie"></i> Attendance Overview</h2>
-        <div style="height: 250px; position: relative;">
-            <canvas id="studentPieChart"></canvas>
-        </div>
-    </div>
-    <div class="card">
-        <h2 style="margin-bottom: 20px;"><i class="fa-solid fa-chart-column"></i> Subject-wise Analysis</h2>
-        <div style="height: 250px; position: relative;">
-            <canvas id="studentBarChart"></canvas>
-        </div>
-    </div>
-</div>
 
 {% if student_qr_data_uri %}
 <div class="card" style="display: flex; align-items: center; justify-content: space-between; gap: 20px; flex-wrap: wrap; background: linear-gradient(135deg, #ffffff 0%, #f0f4ff 100%);">
@@ -118,62 +104,6 @@ document.addEventListener('DOMContentLoaded', function() {
     const textSecondary = css.getPropertyValue('--text-secondary').trim();
     const borderColor = css.getPropertyValue('--border-color').trim();
 
-    // Pie Chart
-    const pieCtx = document.getElementById('studentPieChart').getContext('2d');
-    new Chart(pieCtx, {
-        type: 'doughnut',
-        data: {
-            labels: ['Present', 'Absent'],
-            datasets: [{
-                data: [{{ present_count }}, {{ absent_count }}],
-                backgroundColor: [successColor, dangerColor],
-                borderWidth: 0,
-                cutout: '70%'
-            }]
-        },
-        options: {
-            responsive: true,
-            maintainAspectRatio: false,
-            plugins: {
-                legend: { position: 'bottom', labels: { color: textSecondary, usePointStyle: true } }
-            }
-        }
-    });
-
-    // Bar Chart
-    const barCtx = document.getElementById('studentBarChart').getContext('2d');
-    new Chart(barCtx, {
-        type: 'bar',
-        data: {
-            labels: {{ subject_chart_labels | tojson }},
-            datasets: [{
-                label: 'Attendance %',
-                data: {{ subject_chart_percentages | tojson }},
-                backgroundColor: primaryColor,
-                borderRadius: 6,
-                maxBarThickness: 40
-            }]
-        },
-        options: {
-            responsive: true,
-            maintainAspectRatio: false,
-            scales: {
-                y: {
-                    beginAtZero: true,
-                    max: 100,
-                    ticks: { callback: value => value + '%', color: textSecondary },
-                    grid: { color: borderColor, drawBorder: false }
-                },
-                x: {
-                    grid: { display: false },
-                    ticks: { color: textSecondary }
-                }
-            },
-            plugins: {
-                legend: { display: false }
-            }
-        }
-    });
 });
 </script>
 {% endblock %}

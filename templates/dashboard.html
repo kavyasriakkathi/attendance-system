@@ -162,24 +162,6 @@ document.head.appendChild(style);
 <div class="grid" style="margin-bottom: 30px;">
     <div class="card">
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
-            <h2 style="margin: 0;"><i class="fa-solid fa-chart-pie"></i> Present vs Absent</h2>
-        </div>
-        <div style="height: 300px; position: relative;">
-            <canvas id="presentAbsentChart"></canvas>
-        </div>
-    </div>
-
-    <div class="card">
-        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
-            <h2 style="margin: 0;"><i class="fa-solid fa-chart-column"></i> Attendance per Subject</h2>
-        </div>
-        <div style="height: 300px; position: relative;">
-            <canvas id="subjectAttendanceChart"></canvas>
-        </div>
-    </div>
-
-    <div class="card">
-        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
             <h2 style="margin: 0;"><i class="fa-solid fa-wave-square"></i> Attendance Trend</h2>
         </div>
         <div style="height: 300px; position: relative;">
@@ -228,82 +210,6 @@ document.addEventListener('DOMContentLoaded', function() {
     const primaryColor = css.getPropertyValue('--primary-color').trim();
     const borderColor = css.getPropertyValue('--border-color').trim();
     const textSecondary = css.getPropertyValue('--text-secondary').trim();
-
-    // 1) Pie chart: Present vs Absent
-    const pieEl = document.getElementById('presentAbsentChart');
-    if (pieEl) {
-        const presentCount = {{ present_count | default(0) | tojson }};
-        const absentCount = {{ absent_count | default(0) | tojson }};
-
-        new Chart(pieEl.getContext('2d'), {
-            type: 'pie',
-            data: {
-                labels: ['Present', 'Absent'],
-                datasets: [{
-                    data: [presentCount, absentCount],
-                    backgroundColor: [successColor, dangerColor],
-                    borderColor: borderColor,
-                    borderWidth: 2,
-                }]
-            },
-            options: {
-                responsive: true,
-                maintainAspectRatio: false,
-                plugins: {
-                    legend: {
-                        position: 'bottom',
-                        labels: { color: textSecondary }
-                    }
-                }
-            }
-        });
-    }
-
-    // 2) Bar chart: Attendance percentage per subject
-    const barEl = document.getElementById('subjectAttendanceChart');
-    if (barEl) {
-        const labels = {{ subject_chart_labels | default([]) | tojson }};
-        const percentages = {{ subject_chart_percentages | default([]) | tojson }};
-
-        new Chart(barEl.getContext('2d'), {
-            type: 'bar',
-            data: {
-                labels: labels,
-                datasets: [{
-                    label: 'Attendance %',
-                    data: percentages,
-                    backgroundColor: primaryColor,
-                    borderColor: primaryColor,
-                    borderWidth: 1,
-                    maxBarThickness: 48,
-                }]
-            },
-            options: {
-                responsive: true,
-                maintainAspectRatio: false,
-                plugins: {
-                    legend: { display: false },
-                    tooltip: {
-                        callbacks: {
-                            label: (context) => `${context.formattedValue}%`
-                        }
-                    }
-                },
-                scales: {
-                    y: {
-                        beginAtZero: true,
-                        max: 100,
-                        grid: { color: borderColor },
-                        ticks: { callback: (value) => value + '%', color: textSecondary }
-                    },
-                    x: {
-                        grid: { display: false },
-                        ticks: { color: textSecondary }
-                    }
-                }
-            }
-        });
-    }
 
     // 3) Line chart: Attendance trend by date
     const trendEl = document.getElementById('attendanceTrendChart');

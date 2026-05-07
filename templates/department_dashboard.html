@@ -499,24 +499,6 @@
         </div>
     </div>
 
-    <!-- Department Comparison Bar Chart -->
-    <div class="chart-card" style="margin-bottom: 24px;">
-        <h3>📈 Department Attendance Comparison</h3>
-        <div class="bar-chart">
-            {% for dept in departments %}
-            <div class="bar-row">
-                <div class="bar-label" title="{{ dept.name }}">{{ dept.name }}</div>
-                <div class="bar-track">
-                    <div class="bar-fill {{ 'high' if dept.attendance_pct >= 75 else ('medium' if dept.attendance_pct >= 50 else 'low') }}"
-                         style="width: {{ dept.attendance_pct }}%;"
-                         data-pct="{{ dept.attendance_pct }}">
-                        {{ dept.attendance_pct }}%
-                    </div>
-                </div>
-            </div>
-            {% endfor %}
-        </div>
-    </div>
 
     <!-- Department Filter Tabs -->
     <div class="dept-filter" id="dept-tabs">
@@ -557,66 +539,6 @@
             </div>
         </div>
 
-        <!-- Attendance Ring + Subject Chart -->
-        <div class="charts-row">
-            <!-- Donut Ring -->
-            <div class="progress-ring-container">
-                <div class="progress-ring-wrap">
-                    <svg width="140" height="140">
-                        <circle cx="70" cy="70" r="58" fill="none" stroke="#f0f4f9" stroke-width="12"/>
-                        <circle cx="70" cy="70" r="58" fill="none"
-                                stroke="{% if dept.attendance_pct >= 75 %}#16a34a{% elif dept.attendance_pct >= 50 %}#d97706{% else %}#dc2626{% endif %}"
-                                stroke-width="12"
-                                stroke-linecap="round"
-                                stroke-dasharray="{{ (dept.attendance_pct / 100 * 364.42)|round(1) }} 364.42"
-                                class="ring-progress"/>
-                    </svg>
-                    <div class="ring-label">
-                        <span class="pct">{{ dept.attendance_pct }}%</span>
-                        <span class="sub">Attendance</span>
-                    </div>
-                </div>
-                <div class="ring-legend">
-                    <div class="ring-legend-item">
-                        <span class="ring-legend-dot" style="background: #16a34a;"></span>
-                        Present: {{ dept.present_count }}
-                    </div>
-                    <div class="ring-legend-item">
-                        <span class="ring-legend-dot" style="background: #dc2626;"></span>
-                        Absent: {{ dept.absent_count }}
-                    </div>
-                    <div class="ring-legend-item">
-                        <span class="ring-legend-dot" style="background: #6b7a8d;"></span>
-                        Location: {{ dept.location or 'N/A' }}
-                    </div>
-                </div>
-            </div>
-
-            <!-- Subject-wise Breakdown -->
-            <div class="chart-card">
-                <h3>📚 Subject-wise Attendance</h3>
-                {% if dept.subjects %}
-                <div class="bar-chart">
-                    {% for subj in dept.subjects %}
-                    <div class="bar-row">
-                        <div class="bar-label" title="{{ subj.name }}">{{ subj.name }}</div>
-                        <div class="bar-track">
-                            <div class="bar-fill {{ 'high' if subj.pct >= 75 else ('medium' if subj.pct >= 50 else 'low') }}"
-                                 style="width: {{ subj.pct }}%;">
-                                {{ subj.pct }}%
-                            </div>
-                        </div>
-                    </div>
-                    {% endfor %}
-                </div>
-                {% else %}
-                <div class="empty-state">
-                    <div class="empty-icon">📭</div>
-                    <p>No subjects found for this department</p>
-                </div>
-                {% endif %}
-            </div>
-        </div>
 
         <!-- Student Attendance Table -->
         <div class="dept-table-wrap">
@@ -707,47 +629,11 @@ function showDept(id) {
     const panel = document.getElementById('dept-' + id);
     if (panel) {
         panel.classList.add('active');
-        // Re-trigger bar animations
-        panel.querySelectorAll('.bar-fill').forEach(bar => {
-            const w = bar.style.width;
-            bar.style.width = '0%';
-            requestAnimationFrame(() => {
-                requestAnimationFrame(() => {
-                    bar.style.width = w;
-                });
-            });
-        });
     }
 
     // Activate tab
     document.querySelector(`.dept-tab[data-dept="${id}"]`).classList.add('active');
 }
 
-// Animate bars on initial load
-document.addEventListener('DOMContentLoaded', function() {
-    const activePanel = document.querySelector('.dept-panel.active');
-    if (activePanel) {
-        activePanel.querySelectorAll('.bar-fill').forEach(bar => {
-            const w = bar.style.width;
-            bar.style.width = '0%';
-            requestAnimationFrame(() => {
-                requestAnimationFrame(() => {
-                    bar.style.width = w;
-                });
-            });
-        });
-    }
-
-    // Also animate the comparison chart
-    document.querySelectorAll('.chart-card > .bar-chart .bar-fill').forEach(bar => {
-        const w = bar.style.width;
-        bar.style.width = '0%';
-        requestAnimationFrame(() => {
-            requestAnimationFrame(() => {
-                bar.style.width = w;
-            });
-        });
-    });
-});
 </script>
 {% endblock %}
