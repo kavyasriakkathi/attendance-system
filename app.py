@@ -21,7 +21,7 @@ from flask_socketio import SocketIO, emit, join_room
 app = Flask(__name__)
 
 # Initialize SocketIO after app creation
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode="eventlet")
 # Email sending is handled by the `send_email` helper defined later in the file.
 
 
