@@ -1,4 +1,5 @@
 import os
+import re
 from datetime import date, timedelta
 from io import BytesIO
 import sqlite3
@@ -230,6 +231,19 @@ def set_setting(db, key, value):
         )
 
 
+def _clean_text(value: object) -> str:
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if text.lower() in ("", "nan", "none", "n/a"):
+        return ""
+    return text
+
+
+def _normalize_enrollment(value: object) -> str:
+    return re.sub(r"\s+", "", _clean_text(value)).upper()
+
+
 def _clean_identifier(value: object) -> str:
     import re
     text = re.sub(r"[^a-zA-Z0-9]+", "_", (str(value) if value is not None else "").strip().lower())
@@ -406,35 +420,16 @@ def send_email(subject, recipient, body, attachments=None, html_body=None):
     attempts = max(1, int(os.environ.get("MAIL_SEND_RETRIES", 1)))
     for attempt in range(1, attempts + 1):
         try:
-            # 1) Normal simple connection (beginner-friendly)
             _try_send(smtp_host)
             print(f"Email sent to {recipient}")
             return True
-
-        except smtplib.SMTPAuthenticationError as e:
-            print(f"Attempt {attempt} - SMTP authentication failed: {repr(e)}")
-            return False
-
-        except OSError as e:
-            print(f"Attempt {attempt} - OSError when sending email to {recipient}: {repr(e)}")
-            if getattr(e, "errno", None) == 101:
-                # 2) Retry once using IPv4 A-record (avoids common IPv6 routing issues)
-                try:
-                    ipv4 = socket.gethostbyname(smtp_host)
-                    print(f"Retrying with IPv4 address: {smtp_host} -> {ipv4}")
-                    _try_send(ipv4)
-                    print(f"Email sent to {recipient}")
-                    return True
-                except Exception as retry_err:
-                    print(f"IPv4 retry failed: {repr(retry_err)}")
-
         except Exception as e:
             print(f"Attempt {attempt} - Failed to send email to {recipient}: {repr(e)}")
-
-        if attempt < attempts:
+            if attempt == attempts:
+                return False
             time.sleep(0.5)
             continue
-        return False
+    return False
 
 
 def safe_send_email(subject: str, recipient: str, body: str, attachments=None, html_body=None) -> bool:
@@ -1340,15 +1335,18 @@ def test_email():
         f"Sent to: {recipient}\n"
         f"Time: {date.today().isoformat()}\n"
     )
-    email_sent = safe_send_email(
-        subject="Test Email: Attendance System",
-        recipient=recipient,
-        body=body,
-    )
-    if email_sent:
-        flash(f"Test email sent to {recipient}.", "success")
-    else:
-        flash("Failed to send test email. Check mail settings.", "error")
+    try:
+        email_sent = send_email(
+            subject="Test Email: Attendance System",
+            recipient=recipient,
+            body=body,
+        )
+        if email_sent:
+            flash(f"Test email sent to {recipient}.", "success")
+        else:
+            flash("Failed to send test email. Please check your SMTP settings in .env (MAIL_SERVER, MAIL_USERNAME, etc.).", "error")
+    except Exception as e:
+        flash(f"SMTP Error: {str(e)}", "error")
 
     return redirect(url_for("settings"))
 
@@ -1651,9 +1649,9 @@ def upload_students():
                     branches_map[str(b_id)] = b_id
 
             for _, row in df.iterrows():
-                name = str(row.get("name", "")).strip()
-                enrollment = str(row.get("enrollment", "")).strip()
-                email = str(row.get("email", "")).strip()
+                name = _clean_text(row.get("name"))
+                enrollment = _normalize_enrollment(row.get("enrollment"))
+                email = _clean_text(row.get("email"))
                 branch_id_raw = str(row.get("branch_id", "")).strip()
 
                 if not name or not enrollment:
@@ -1788,17 +1786,6 @@ def upload_students_csv():
                 from psycopg2.extras import execute_values
             except Exception:
                 execute_values = None
-
-            def _clean_text(value: object) -> str:
-                if value is None:
-                    return ""
-                text = str(value).strip()
-                if text.lower() in ("", "nan", "none", "n/a"):
-                    return ""
-                return text
-
-            def _normalize_enrollment(value: object) -> str:
-                return re.sub(r"\s+", "", _clean_text(value)).upper()
 
             def _canon_header(value: object) -> str:
                 return re.sub(r"[\s_\-]+", "", _clean_text(value).lstrip("\ufeff").lower())
@@ -2253,8 +2240,8 @@ def students():
         placeholder = get_placeholder()
         
         if request.method == "POST":
-            name = request.form.get("name", "").strip()
-            enrollment = request.form.get("enrollment", "").strip()
+            name = _clean_text(request.form.get("name"))
+            enrollment = _normalize_enrollment(request.form.get("enrollment"))
             branch_id = request.form.get("branch_id", "").strip()
             email = request.form.get("email", "").strip()
 
@@ -2482,6 +2469,9 @@ def student_login():
         if not username or not password:
             flash("Please enter username and password.", "error")
             return render_template("student_login.html", next=next_url)
+
+        # Normalize username to match stored enrollment (uppercase, no spaces)
+        username = re.sub(r"\s+", "", username).upper()
 
         db = None
         try:
