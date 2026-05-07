@@ -638,7 +638,8 @@ def init_db(db=None):
             subject_name TEXT,
             date TEXT NOT NULL,
             status TEXT NOT NULL,
-            note TEXT
+            note TEXT,
+            period INTEGER DEFAULT 1
         );
         """)
 
@@ -650,9 +651,10 @@ def init_db(db=None):
         );
         """)
 
+        db.execute("DROP INDEX IF EXISTS idx_attendance_student_subject_date")
         db.execute("""
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_attendance_student_subject_date
-        ON attendance(student_id, subject_id, date);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_attendance_student_subject_date_period
+        ON attendance(student_id, subject_id, date, period);
         """)
     else:
         # SQLite
@@ -704,7 +706,8 @@ def init_db(db=None):
             subject_name TEXT,
             date TEXT NOT NULL,
             status TEXT NOT NULL,
-            note TEXT
+            note TEXT,
+            period INTEGER DEFAULT 1
         );
 
         CREATE TABLE IF NOT EXISTS settings (
@@ -713,15 +716,25 @@ def init_db(db=None):
             value TEXT NOT NULL
         );
 
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_attendance_student_subject_date
-        ON attendance(student_id, subject_id, date);
+        DROP INDEX IF EXISTS idx_attendance_student_subject_date;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_attendance_student_subject_date_period
+        ON attendance(student_id, subject_id, date, period);
         """)
 
     # Best-effort schema upgrades for existing databases.
     try:
         _ensure_column(db, "attendance", "teacher_id", "INTEGER")
         _ensure_column(db, "attendance", "subject_name", "TEXT")
+        _ensure_column(db, "attendance", "period", "INTEGER DEFAULT 1")
         _ensure_column(db, "students", "import_order", "INTEGER")
+        
+        # Upgrade index if it doesn't support period
+        try:
+            db.execute("DROP INDEX IF EXISTS idx_attendance_student_subject_date")
+            db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_attendance_student_subject_date_period ON attendance(student_id, subject_id, date, period)")
+        except:
+            pass
+
         db.execute("CREATE INDEX IF NOT EXISTS idx_students_import_order ON students(import_order, id)")
 
         # Backfill import_order once for legacy rows (keeps existing relative order by id).
@@ -940,48 +953,51 @@ def dashboard():
         branch_count = int(_safe_scalar("SELECT COUNT(*) FROM branches", default=0) or 0)
         student_count = int(_safe_scalar("SELECT COUNT(*) FROM students", default=0) or 0)
         subject_count = int(_safe_scalar("SELECT COUNT(*) FROM subjects", default=0) or 0)
-        attendance_count = int(_safe_scalar("SELECT COUNT(*) FROM attendance", default=0) or 0)
+        # Count unique conducted classes (unique combinations of date, subject, branch, and period)
+        total_classes_query = "SELECT COUNT(*) FROM (SELECT 1 FROM attendance GROUP BY date, subject_id, branch_id, period) AS classes"
+        total_classes = int(_safe_scalar(total_classes_query, default=0) or 0)
 
         attendance_stats = db.execute("""
             SELECT
                 COUNT(CASE WHEN status='Present' THEN 1 END) as present_count,
-                COUNT(*) as total_count
+                COUNT(*) as total_attendance_records
             FROM attendance
         """).fetchone()
 
-        total_classes = 0
         present_count = 0
         absent_count = 0
+        attendance_record_count = 0
         try:
-            total_classes = int(row_get(attendance_stats, "total_count") or 0)
             present_count = int(row_get(attendance_stats, "present_count") or 0)
-            absent_count = max(total_classes - present_count, 0)
+            attendance_record_count = int(row_get(attendance_stats, "total_attendance_records") or 0)
+            absent_count = max(attendance_record_count - present_count, 0)
         except Exception:
             pass
 
         overall_percentage = 0
-        if total_classes > 0:
-            overall_percentage = round((present_count / total_classes) * 100, 1)
+        if attendance_record_count > 0:
+            overall_percentage = round((present_count / attendance_record_count) * 100, 1)
 
         subject_rows = _safe_fetchall(
             """
             SELECT
-                subjects.name AS subject_name,
-                COUNT(attendance.id) AS total_count,
-                SUM(CASE WHEN attendance.status = 'Present' THEN 1 ELSE 0 END) AS present_count
-            FROM subjects
-            LEFT JOIN attendance ON subjects.id = attendance.subject_id
-            GROUP BY subjects.id, subjects.name
-            ORDER BY subjects.name
+                s.name AS subject_name,
+                (SELECT COUNT(*) FROM (SELECT 1 FROM attendance a2 WHERE a2.subject_id = s.id GROUP BY a2.date, a2.branch_id, a2.period) sub) AS total_count,
+                SUM(CASE WHEN a.status = 'Present' THEN 1 ELSE 0 END) AS total_present_marks,
+                COUNT(a.id) AS total_attendance_records
+            FROM subjects s
+            LEFT JOIN attendance a ON s.id = a.subject_id
+            GROUP BY s.id, s.name
+            ORDER BY s.name
             """
         )
 
         subject_chart_labels = []
         subject_chart_percentages = []
         for row in subject_rows:
-            total = int(row_get(row, "total_count", 0) or 0)
-            present = int(row_get(row, "present_count", 0) or 0)
-            pct = round((present / total) * 100, 1) if total > 0 else 0
+            total_recs = int(row_get(row, "total_attendance_records", 0) or 0)
+            present_mks = int(row_get(row, "total_present_marks", 0) or 0)
+            pct = round((present_mks / total_recs) * 100, 1) if total_recs > 0 else 0
             subject_chart_labels.append(row_get(row, "subject_name", "") or "")
             subject_chart_percentages.append(pct)
 
@@ -989,9 +1005,10 @@ def dashboard():
             """
             SELECT
                 date,
-                COUNT(*) AS total_count,
-                SUM(CASE WHEN status = 'Present' THEN 1 ELSE 0 END) AS present_count
-            FROM attendance
+                (SELECT COUNT(*) FROM (SELECT 1 FROM attendance a2 WHERE a2.date = a.date GROUP BY a2.subject_id, a2.branch_id, a2.period) sub) AS daily_classes,
+                SUM(CASE WHEN status = 'Present' THEN 1 ELSE 0 END) AS present_marks,
+                COUNT(*) AS total_marks
+            FROM attendance a
             GROUP BY date
             ORDER BY date DESC
             LIMIT 14
@@ -1000,32 +1017,37 @@ def dashboard():
         trend_labels = []
         trend_percentages = []
         for row in reversed(trend_rows):
-            total = int(row_get(row, "total_count", 0) or 0)
-            present = int(row_get(row, "present_count", 0) or 0)
-            pct = round((present / total) * 100, 1) if total > 0 else 0
-            trend_labels.append(str(row_get(row, "date", "") or ""))
+            date_val = row_get(row, "date", "")
+            total_m = int(row_get(row, "total_marks", 0) or 0)
+            present_m = int(row_get(row, "present_marks", 0) or 0)
+            pct = round((present_m / total_m) * 100, 1) if total_m > 0 else 0
+            trend_labels.append(date_val)
             trend_percentages.append(pct)
 
         branch_data = _safe_fetchall(
             """
             SELECT
-                branches.name AS branch_name,
-                branches.location AS location,
-                COUNT(DISTINCT students.id) AS student_count,
-                COUNT(DISTINCT subjects.id) AS subject_count,
-                COUNT(attendance.id) AS attendance_count,
-                ROUND(
-                    COUNT(CASE WHEN attendance.status='Present' THEN 1 END)*100.0 / NULLIF(COUNT(attendance.id),0),
-                    1
-                ) AS attendance_percentage
-            FROM branches
-            LEFT JOIN students ON branches.id = students.branch_id
-            LEFT JOIN subjects ON branches.id = subjects.branch_id
-            LEFT JOIN attendance ON branches.id = attendance.branch_id
-            GROUP BY branches.id, branches.name, branches.location
-            ORDER BY branches.name
+                b.id,
+                b.name AS branch_name,
+                b.location,
+                (SELECT COUNT(*) FROM students s WHERE s.branch_id = b.id) AS student_count,
+                (SELECT COUNT(*) FROM subjects sb WHERE sb.branch_id = b.id) AS subject_count,
+                (SELECT COUNT(*) FROM (SELECT 1 FROM attendance a2 WHERE a2.branch_id = b.id GROUP BY a2.date, a2.subject_id, a2.period) sub) AS total_count,
+                (SELECT COUNT(*) FROM attendance a3 WHERE a3.branch_id = b.id AND a3.status = 'Present') AS present_marks,
+                (SELECT COUNT(*) FROM attendance a4 WHERE a4.branch_id = b.id) AS total_marks
+            FROM branches b
+            ORDER BY b.name
             """
         )
+
+        processed_branch_data = []
+        for row in branch_data:
+            d = dict(row)
+            tm = int(d.get("total_marks", 0) or 0)
+            pm = int(d.get("present_marks", 0) or 0)
+            d["attendance_percentage"] = round((pm / tm) * 100, 1) if tm > 0 else 0
+            processed_branch_data.append(d)
+        branch_data = processed_branch_data
         if not branch_data:
             # Backward-compatible fallback for old schemas that don't have branches.location.
             branch_data = _safe_fetchall(
@@ -2638,9 +2660,11 @@ def teacher_mark_attendance():
 
         today_str = date.today().isoformat()
         selected_date = request.args.get("date") or today_str
+        period = request.args.get("period", "1")
 
         if request.method == "POST":
             selected_date = request.form.get("date") or today_str
+            period = request.form.get("period", "1")
             student_ids = request.form.getlist("student_id")
             if not student_ids:
                 flash("Please select at least one student.", "error")
@@ -2654,21 +2678,21 @@ def teacher_mark_attendance():
                             f"""
                             INSERT INTO attendance (
                                 student_id, branch_id, subject_id, teacher_id, subject_name,
-                                date, status, note
-                            ) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})
-                            ON CONFLICT (student_id, subject_id, date) DO UPDATE
+                                date, period, status, note
+                            ) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})
+                            ON CONFLICT (student_id, subject_id, date, period) DO UPDATE
                             SET status = EXCLUDED.status,
                                 note = EXCLUDED.note,
                                 teacher_id = EXCLUDED.teacher_id,
                                 subject_name = EXCLUDED.subject_name
                             """,
-                            (student_id, branch_id, subject_id, teacher["teacher_id"], subject_name, selected_date, status, note),
+                            (student_id, branch_id, subject_id, teacher["teacher_id"], subject_name, selected_date, period, status, note),
                         )
                         if str(student_id).isdigit():
                             saved_ids.append(int(student_id))
                     db.commit()
-                    flash("Attendance saved successfully.", "success")
-                    return redirect(url_for("teacher_attendance_records"))
+                    flash(f"Attendance for Period {period} saved successfully.", "success")
+                    return redirect(url_for("teacher_mark_attendance", date=selected_date, period=period))
                 except Exception as save_error:
                     db.rollback()
                     print(f"[teacher_mark_attendance] ERROR: {repr(save_error)}")
@@ -2685,10 +2709,11 @@ def teacher_mark_attendance():
             SELECT student_id, status, note
             FROM attendance
             WHERE branch_id = {placeholder}
-              AND subject_name = {placeholder}
+              AND subject_id = {placeholder}
               AND date = {placeholder}
+              AND period = {placeholder}
             """,
-            (branch_id, subject_name, selected_date),
+            (branch_id, subject_id, selected_date, period),
         ).fetchall():
             attendance_map[str(row_get(row, "student_id"))] = row
 
@@ -2698,6 +2723,7 @@ def teacher_mark_attendance():
             students=students,
             attendance_map=attendance_map,
             selected_date=selected_date,
+            period=period,
             today_date=today_str,
         )
     except Exception as e:
@@ -2793,10 +2819,20 @@ def student_dashboard():
         attendance_query += "ORDER BY attendance.date DESC"
         
         attendance_records = db.execute(attendance_query, tuple(params)).fetchall()
-        total = len(attendance_records)
+        
+        # Calculate conducted sessions for this branch (and optionally subject)
+        sessions_query = f"SELECT COUNT(*) FROM (SELECT 1 FROM attendance WHERE branch_id = {placeholder} "
+        sessions_params = [row_get(student, "branch_id")]
+        if selected_subject_id:
+            sessions_query += f"AND subject_id = {placeholder} "
+            sessions_params.append(selected_subject_id)
+        sessions_query += "GROUP BY date, subject_id, branch_id, period) sub"
+        
+        total_conducted = db.execute(sessions_query, tuple(sessions_params)).fetchone()[0]
+        
         present = len([a for a in attendance_records if row_get(a, "status") == "Present"])
-        absent = total - present
-        percentage = round((present / total) * 100, 1) if total > 0 else 0
+        absent = total_conducted - present
+        percentage = round((present / total_conducted) * 100, 1) if total_conducted > 0 else 0
 
         student_qr_data_uri = None
         try:
@@ -2814,7 +2850,7 @@ def student_dashboard():
         except: pass
 
         db.close()
-        return render_template("student_dashboard.html", student=student, attendance_records=attendance_records, total_classes=total, present_count=present, absent_count=absent, percentage=percentage, subjects=subjects, selected_subject_id=selected_subject_id, student_qr_data_uri=student_qr_data_uri)
+        return render_template("student_dashboard.html", student=student, attendance_records=attendance_records, total_classes=total_conducted, present_count=present, absent_count=absent, percentage=percentage, subjects=subjects, selected_subject_id=selected_subject_id, student_qr_data_uri=student_qr_data_uri)
     except Exception as e:
         print(f"[student_dashboard] ERROR: {repr(e)}")
         if db:
@@ -2864,15 +2900,25 @@ def student_dashboard_by_id(student_id):
 
     attendance_records = db.execute(attendance_query, tuple(params)).fetchall()
 
-    total = len(attendance_records)
-    present = len([a for a in attendance_records if a["status"] == "Present"])
-    percentage = round((present / total) * 100, 1) if total > 0 else 0
+    # Calculate conducted sessions for this branch (and optionally subject)
+    sessions_query = f"SELECT COUNT(*) FROM (SELECT 1 FROM attendance WHERE branch_id = {placeholder} "
+    sessions_params = [row_get(student, "branch_id")]
+    if selected_subject_id:
+        sessions_query += f"AND subject_id = {placeholder} "
+        sessions_params.append(selected_subject_id)
+    sessions_query += "GROUP BY date, subject_id, branch_id, period) sub"
+    
+    total_conducted = db.execute(sessions_query, tuple(sessions_params)).fetchone()[0]
+
+    present = len([a for a in attendance_records if row_get(a, "status") == "Present"])
+    percentage = round((present / total_conducted) * 100, 1) if total_conducted > 0 else 0
 
     db.close()
     return render_template(
         "student_dashboard.html",
         student=student,
         attendance_records=attendance_records,
+        total_classes=total_conducted,
         percentage=percentage,
         subjects=subjects,
         selected_subject_id=selected_subject_id,
@@ -2894,6 +2940,7 @@ def mark_attendance():
         branch_id = request.args.get("branch_id")
         subject_id = request.args.get("subject_id")
         selected_date = request.args.get("date") or today_str
+        period = request.args.get("period", "1")
 
         # 2. Handle POST (Saving Attendance)
         if request.method == "POST":
@@ -2901,6 +2948,7 @@ def mark_attendance():
             branch_id = request.form.get("branch_id")
             subject_id = request.form.get("subject_id")
             selected_date = request.form.get("date") or today_str
+            period = request.form.get("period", "1")
             student_ids = request.form.getlist("student_id")
             
             if branch_id and subject_id and student_ids:
@@ -2914,23 +2962,23 @@ def mark_attendance():
                         is_pg = str(app.config.get("DATABASE", "")).startswith("postgres")
                         if is_pg:
                             db.execute(f"""
-                                INSERT INTO attendance (student_id, branch_id, subject_id, date, status, note)
-                                VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})
-                                ON CONFLICT (student_id, subject_id, date) DO UPDATE 
+                                INSERT INTO attendance (student_id, branch_id, subject_id, date, period, status, note)
+                                VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})
+                                ON CONFLICT (student_id, subject_id, date, period) DO UPDATE 
                                 SET status = EXCLUDED.status, note = EXCLUDED.note
-                            """, (student_id, branch_id, subject_id, selected_date, status, note))
+                            """, (student_id, branch_id, subject_id, selected_date, period, status, note))
                         else:
                             # SQLite manual update
-                            db.execute(f"DELETE FROM attendance WHERE student_id={placeholder} AND subject_id={placeholder} AND date={placeholder}", (student_id, subject_id, selected_date))
-                            db.execute(f"INSERT INTO attendance (student_id, branch_id, subject_id, date, status, note) VALUES ({placeholder},{placeholder},{placeholder},{placeholder},{placeholder},{placeholder})", (student_id, branch_id, subject_id, selected_date, status, note))
+                            db.execute(f"DELETE FROM attendance WHERE student_id={placeholder} AND subject_id={placeholder} AND date={placeholder} AND period={placeholder}", (student_id, subject_id, selected_date, period))
+                            db.execute(f"INSERT INTO attendance (student_id, branch_id, subject_id, date, period, status, note) VALUES ({placeholder},{placeholder},{placeholder},{placeholder},{placeholder},{placeholder},{placeholder})", (student_id, branch_id, subject_id, selected_date, period, status, note))
                         
                         if str(student_id).isdigit():
                             saved_ids.append(int(student_id))
                     
                     db.commit()
-                    flash("Attendance saved successfully.", "success")
+                    flash(f"Attendance for Period {period} saved successfully.", "success")
                     dispatch_low_attendance_notifications(saved_ids)
-                    return redirect(url_for("attendance_success", branch_id=branch_id, subject_id=subject_id, date=selected_date))
+                    return redirect(url_for("attendance_success", branch_id=branch_id, subject_id=subject_id, date=selected_date, period=period))
                 except Exception as e:
                     db.rollback()
                     print(f"[mark_attendance] Save Error: {repr(e)}")
@@ -2945,8 +2993,10 @@ def mark_attendance():
         attendance_map = {}
         if branch_id and subject_id:
             students = db.execute(f"SELECT id, name, enrollment FROM students WHERE branch_id = {placeholder} ORDER BY COALESCE(import_order, id), id", (branch_id,)).fetchall()
-            att_rows = db.execute(f"SELECT student_id, status, note FROM attendance WHERE subject_id = {placeholder} AND date = {placeholder}", (subject_id, selected_date)).fetchall()
+            att_rows = db.execute(f"SELECT student_id, status, note FROM attendance WHERE subject_id = {placeholder} AND date = {placeholder} AND period = {placeholder}", (subject_id, selected_date, period)).fetchall()
             attendance_map = {str(row_get(r, "student_id")): r for r in att_rows}
+
+        prev_date = (date.fromisoformat(selected_date) - timedelta(days=1)).isoformat() if selected_date else today_str
 
         return render_template(
             "mark_attendance.html",
@@ -2956,8 +3006,10 @@ def mark_attendance():
             branch_id=branch_id,
             subject_id=subject_id,
             selected_date=selected_date,
+            period=period,
             attendance_map=attendance_map,
-            today_date=today_str
+            today_date=today_str,
+            prev_date=prev_date
         )
     except Exception as e:
         print(f"[mark_attendance] General Error: {repr(e)}")
@@ -2975,10 +3027,11 @@ def generate_qr():
     branch_id = request.args.get("branch_id")
     subject_id = request.args.get("subject_id")
     selected_date = request.args.get("date") or date.today().isoformat()
+    period = request.args.get("period", "1")
 
     if not branch_id or not subject_id:
         flash("Please select a branch and subject before generating a QR code.", "error")
-        return redirect(url_for("mark_attendance", branch_id=branch_id, subject_id=subject_id, date=selected_date))
+        return redirect(url_for("mark_attendance", branch_id=branch_id, subject_id=subject_id, date=selected_date, period=period))
 
     db = get_db()
     placeholder = get_placeholder()
@@ -2994,7 +3047,7 @@ def generate_qr():
 
     if not branch or not subject:
         flash("Selected branch or subject was not found.", "error")
-        return redirect(url_for("mark_attendance", branch_id=branch_id, subject_id=subject_id, date=selected_date))
+        return redirect(url_for("mark_attendance", branch_id=branch_id, subject_id=subject_id, date=selected_date, period=period))
 
     return render_template(
         "qr_display.html",
@@ -3003,6 +3056,7 @@ def generate_qr():
         branch_name=branch["name"],
         subject_name=subject["name"],
         date=selected_date,
+        period=period
     )
 
 
@@ -3011,6 +3065,7 @@ def attendance_scan():
     branch_id = request.args.get("branch_id")
     subject_id = request.args.get("subject_id")
     selected_date = request.args.get("date") or date.today().isoformat()
+    period = request.args.get("period", "1")
 
     if not branch_id or not subject_id:
         flash("Invalid attendance scan link.", "error")
@@ -3042,15 +3097,15 @@ def attendance_scan():
         return redirect(url_for("student_dashboard"))
 
     existing = db.execute(
-        f"SELECT id, status FROM attendance WHERE student_id = {placeholder} AND subject_id = {placeholder} AND date = {placeholder}",
-        (student_id, subject_id, selected_date),
+        f"SELECT id, status FROM attendance WHERE student_id = {placeholder} AND subject_id = {placeholder} AND date = {placeholder} AND period = {placeholder}",
+        (student_id, subject_id, selected_date, period),
     ).fetchone()
 
     if existing:
-        if existing["status"] != "Present":
+        if row_get(existing, "status") != "Present":
             db.execute(
                 f"UPDATE attendance SET status = {placeholder}, note = {placeholder} WHERE id = {placeholder}",
-                ("Present", "Marked via QR scan", existing["id"]),
+                ("Present", "Marked via QR scan", row_get(existing, "id")),
             )
             db.commit()
             message = "Your attendance has been updated to Present."
@@ -3058,8 +3113,8 @@ def attendance_scan():
             message = "Your attendance is already marked as Present."
     else:
         db.execute(
-            f"INSERT INTO attendance (student_id, branch_id, subject_id, date, status, note) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})",
-            (student_id, branch_id, subject_id, selected_date, "Present", "Marked via QR scan"),
+            f"INSERT INTO attendance (student_id, branch_id, subject_id, date, period, status, note) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})",
+            (student_id, branch_id, subject_id, selected_date, period, "Present", "Marked via QR scan"),
         )
         db.commit()
         message = "Attendance recorded successfully."
@@ -3068,10 +3123,11 @@ def attendance_scan():
 
     return render_template(
         "attendance_scan.html",
-        branch_name=branch["name"],
-        subject_name=subject["name"],
+        branch_name=row_get(branch, "name"),
+        subject_name=row_get(subject, "name"),
         date=selected_date,
-        message=message,
+        period=period,
+        message=message
     )
 
 
@@ -3081,6 +3137,7 @@ def generate_qr_token():
     branch_id = request.args.get("branch_id")
     subject_id = request.args.get("subject_id")
     selected_date = request.args.get("date") or date.today().isoformat()
+    period = request.args.get("period", "1")
 
     if not branch_id or not subject_id:
         return jsonify({"error": "branch_id and subject_id are required."}), 400
@@ -3090,6 +3147,7 @@ def generate_qr_token():
         branch_id=branch_id,
         subject_id=subject_id,
         date=selected_date,
+        period=period,
         _external=True,
     )
     return jsonify({"scan_url": scan_url})
@@ -3101,13 +3159,14 @@ def attendance_success():
     branch_id = request.args.get("branch_id") or ""
     subject_id = request.args.get("subject_id") or ""
     selected_date = request.args.get("date") or date.today().isoformat()
+    period = request.args.get("period", "1")
     db = get_db()
     placeholder = get_placeholder()
     branch = db.execute(f"SELECT name FROM branches WHERE id = {placeholder}", (branch_id,)).fetchone()
     subject = db.execute(f"SELECT name FROM subjects WHERE id = {placeholder}", (subject_id,)).fetchone()
     attendance_count = db.execute(
-        f"SELECT COUNT(*) AS count FROM attendance WHERE branch_id = {placeholder} AND subject_id = {placeholder} AND date = {placeholder}",
-        (branch_id, subject_id, selected_date),
+        f"SELECT COUNT(*) AS count FROM attendance WHERE branch_id = {placeholder} AND subject_id = {placeholder} AND date = {placeholder} AND period = {placeholder}",
+        (branch_id, subject_id, selected_date, period),
     ).fetchone()["count"]
     db.close()
 
@@ -3116,9 +3175,10 @@ def attendance_success():
 
     return render_template(
         "attendance_success.html",
-        branch_name=branch["name"] if branch else "",
-        subject_name=subject["name"] if subject else "",
+        branch_name=row_get(branch, "name"),
+        subject_name=row_get(subject, "name"),
         selected_date=selected_date,
+        period=period,
         attendance_count=attendance_count,
         email_summary=email_summary,
         mail_configured=mail_configured,
@@ -3239,6 +3299,7 @@ def build_report_excel(records):
         rows.append(
             {
                 "Date": row_get(record, "date"),
+                "Period": row_get(record, "period") or "1",
                 "Student": row_get(record, "student_name"),
                 "Enrollment": row_get(record, "enrollment"),
                 "Branch": row_get(record, "branch_name"),
@@ -3284,7 +3345,7 @@ def build_report_pdf(records):
     )
     styles = getSampleStyleSheet()
 
-    table_data = [["Name", "Enrollment", "Subject", "Date", "Status"]]
+    table_data = [["Name", "Enrollment", "Subject", "Date", "Period", "Status"]]
     for r in records:
         table_data.append(
             [
@@ -3292,6 +3353,7 @@ def build_report_pdf(records):
                 str(row_get(r, "enrollment") or ""),
                 str(row_get(r, "subject_name") or ""),
                 str(row_get(r, "date") or ""),
+                str(row_get(r, "period") or "1"),
                 str(row_get(r, "status") or ""),
             ]
         )

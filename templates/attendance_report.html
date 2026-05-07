@@ -146,6 +146,7 @@
             <thead>
                 <tr>
                     <th>Date</th>
+                    <th>Period</th>
                     <th>Student</th>
                     <th>Enrollment</th>
                     <th>Branch</th>
@@ -159,6 +160,7 @@
                     {% for record in records %}
                     <tr>
                         <td>{{ record.date }}</td>
+                        <td>{{ record.period or '1' }}</td>
                         <td>{{ record.student_name }}</td>
                         <td>{{ record.enrollment }}</td>
                         <td>{{ record.branch_name }}</td>

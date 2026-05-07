@@ -20,12 +20,21 @@
             <label>Date</label>
             <input type="date" name="date" value="{{ selected_date }}" max="{{ today_date }}" required />
         </div>
+        <div>
+            <label>Period</label>
+            <select name="period" required onchange="this.form.submit()">
+                {% for p in range(1, 9) %}
+                <option value="{{ p }}" {% if period|string == p|string %}selected{% endif %}>Period {{ p }}</option>
+                {% endfor %}
+            </select>
+        </div>
         <button type="submit">Load Students</button>
     </form>
 
     {% if students %}
     <form method="post">
         <input type="hidden" name="date" value="{{ selected_date }}" />
+        <input type="hidden" name="period" value="{{ period }}" />
 
         <!-- Bulk Mark Absent Section -->
         <div class="card bulk-action-card" style="margin-bottom: 30px; background-color: #fff9f9; border-left: 6px solid var(--danger-color);">
@@ -86,7 +95,7 @@
         </div>
         <div style="margin-top: 18px; display: flex; gap: 10px; flex-wrap: wrap; align-items: center;">
             <button type="submit">Save Attendance</button>
-            <a href="{{ url_for('generate_qr', branch_id=teacher.branch_id, subject_id=teacher.subject_id, date=selected_date) }}" class="button" style="background-color: #2196F3; text-decoration: none; display: inline-flex; align-items: center; justify-content: center;">Generate QR Code</a>
+            <a href="{{ url_for('generate_qr', branch_id=teacher.branch_id, subject_id=teacher.subject_id, date=selected_date, period=period) }}" class="button" style="background-color: #2196F3; text-decoration: none; display: inline-flex; align-items: center; justify-content: center;">Generate QR Code</a>
             <button id="copyAttendanceLinkBtn" type="button" class="button" style="background-color: #4CAF50;">Copy Attendance Scan URL</button>
             <span id="copyStatus" style="color: #4CAF50; display: none; font-weight: bold;">Link copied!</span>
             <a href="{{ url_for('teacher_dashboard') }}" class="button" style="background: var(--text-secondary); text-decoration: none;">Back to Dashboard</a>
@@ -102,7 +111,8 @@
                     const branchId = '{{ teacher.branch_id }}';
                     const subjectId = '{{ teacher.subject_id }}';
                     const date = '{{ selected_date }}';
-                    const url = `/api/generate_qr_token?branch_id=${encodeURIComponent(branchId)}&subject_id=${encodeURIComponent(subjectId)}&date=${encodeURIComponent(date)}`;
+                    const period = '{{ period }}';
+                    const url = `/api/generate_qr_token?branch_id=${encodeURIComponent(branchId)}&subject_id=${encodeURIComponent(subjectId)}&date=${encodeURIComponent(date)}&period=${encodeURIComponent(period)}`;
                     fetch(url)
                         .then(response => response.json())
                         .then(data => {
