@@ -1357,6 +1357,7 @@ def test_email():
         f"Sent to: {recipient}\n"
         f"Time: {date.today().isoformat()}\n"
     )
+    try:
         # Use a localized error capture
         last_error = "Unknown error"
         def _capture_send(subject, recipient, body):
