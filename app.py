@@ -1455,10 +1455,10 @@ def upload_students():
 @app.route("/upload_students_csv", methods=["GET", "POST"])
 @login_required
 def upload_students_csv():
-    """Simple CSV upload for students with automatic login creation."""
+    """CSV upload for students with clear validation, logs, and safe transaction handling."""
     if request.method == "POST":
         file = request.files.get("file")
-        if not file or not file.filename.endswith(".csv"):
+        if not file or not str(file.filename).lower().endswith(".csv"):
             flash("Please upload a valid CSV file.", "error")
             return redirect(url_for("upload_students_csv"))
 
@@ -1469,7 +1469,6 @@ def upload_students_csv():
             import re
 
             def _canon_header(value: object) -> str:
-                """Normalize a header for matching: lowercase and ignore spaces/_/-."""
                 text = str(value).lstrip("\ufeff").strip().lower()
                 return re.sub(r"[\s_\-]+", "", text)
 
@@ -1478,7 +1477,7 @@ def upload_students_csv():
                     return ""
                 return str(value).strip()
 
-            # Try to sniff delimiter from a small sample (avoids loading full file into memory).
+            # Detect delimiter from a small sample while keeping memory usage low.
             dialect = csv.excel
             try:
                 stream = file.stream
@@ -1489,8 +1488,8 @@ def upload_students_csv():
                     stream.seek(0)
                 sample_text = sample_bytes.decode("utf-8-sig", errors="replace")
                 dialect = csv.Sniffer().sniff(sample_text, delimiters=",;\t|")
-            except Exception:
-                # Default to comma if sniffer fails
+            except Exception as sniff_error:
+                print(f"[CSV Upload] Delimiter sniff failed: {repr(sniff_error)}. Falling back to comma.")
                 try:
                     if hasattr(file.stream, "seek"):
                         file.stream.seek(0)
@@ -1501,11 +1500,12 @@ def upload_students_csv():
             reader = csv.DictReader(text_stream, dialect=dialect)
 
             fieldnames = reader.fieldnames or []
+            print(f"[CSV Upload] Detected headers: {fieldnames}")
             if not fieldnames:
                 flash("The uploaded CSV file is empty.", "error")
                 return redirect(url_for("upload_students_csv"))
 
-            # Build mapping: canonical header -> actual header in the CSV.
+            # Header mapping (case-insensitive, ignores spaces/underscores/hyphens).
             col_map = {}
             for header in fieldnames:
                 key = _canon_header(header)
@@ -1520,82 +1520,146 @@ def upload_students_csv():
             }
             missing = [label for label, key in required.items() if key not in col_map]
             if missing:
-                flash(
-                    "Missing required columns: "
-                    + ", ".join(missing)
-                    + ". Headers are case-insensitive and can include spaces (e.g. 'Branch ID').",
-                    "error",
-                )
+                flash("Missing required columns: " + ", ".join(missing), "error")
                 return redirect(url_for("upload_students_csv"))
 
             db = get_db()
             placeholder = get_placeholder()
             is_postgres = str(app.config.get("DATABASE", "")).startswith("postgres")
+
             inserted = 0
             skipped = 0
+            errors = 0
+            seen_enrollments = set()
 
-            for row in reader:
-                name = _clean_cell(row.get(col_map[required["name"]]))
-                enrollment = _clean_cell(row.get(col_map[required["enrollment"]]))
-                email = _clean_cell(row.get(col_map[required["email"]]))
-                branch_id = _clean_cell(row.get(col_map[required["branch_id"]]))
-
-                if not name or not enrollment or not branch_id:
-                    continue
-
-                # Ensure branch exists (otherwise the student won't show in the students table join).
-                branch_exists = db.execute(
-                    f"SELECT id FROM branches WHERE id = {placeholder}",
-                    (branch_id,),
-                ).fetchone()
-                if not branch_exists:
-                    skipped += 1
-                    continue
-
-                existing = db.execute(
-                    f"SELECT id FROM students WHERE enrollment = {placeholder}",
-                    (enrollment,),
-                ).fetchone()
-                if existing:
-                    skipped += 1
-                    continue
-
+            for row_number, row in enumerate(reader, start=2):
                 try:
+                    print(f"[CSV Upload] Row {row_number} raw data: {row}")
+
+                    name = _clean_cell(row.get(col_map[required["name"]]))
+                    enrollment = _clean_cell(row.get(col_map[required["enrollment"]]))
+                    email = _clean_cell(row.get(col_map[required["email"]]))
+                    branch_id_raw = _clean_cell(row.get(col_map[required["branch_id"]]))
+
+                    # Skip completely empty rows.
+                    if not name and not enrollment and not email and not branch_id_raw:
+                        skipped += 1
+                        continue
+
+                    # Required values check.
+                    if not name or not enrollment or not email or not branch_id_raw:
+                        print(f"[CSV Upload] Row {row_number} skipped: missing required value(s).")
+                        skipped += 1
+                        continue
+
+                    # Convert branch_id safely.
+                    try:
+                        branch_id = int(branch_id_raw)
+                    except Exception:
+                        print(f"[CSV Upload] Row {row_number} skipped: invalid branch_id '{branch_id_raw}'.")
+                        skipped += 1
+                        continue
+
+                    # Skip duplicate enrollment inside the same CSV file.
+                    enrollment_key = enrollment.lower()
+                    if enrollment_key in seen_enrollments:
+                        print(f"[CSV Upload] Row {row_number} skipped: duplicate enrollment in CSV ({enrollment}).")
+                        skipped += 1
+                        continue
+                    seen_enrollments.add(enrollment_key)
+
+                    # Ensure branch exists.
+                    branch_exists = db.execute(
+                        f"SELECT id FROM branches WHERE id = {placeholder}",
+                        (branch_id,),
+                    ).fetchone()
+                    if not branch_exists:
+                        print(f"[CSV Upload] Row {row_number} skipped: branch_id {branch_id} not found.")
+                        skipped += 1
+                        continue
+
+                    # Prevent duplicate enrollment in DB.
+                    existing = db.execute(
+                        f"SELECT id FROM students WHERE enrollment = {placeholder}",
+                        (enrollment,),
+                    ).fetchone()
+                    if existing:
+                        print(f"[CSV Upload] Row {row_number} skipped: enrollment already exists ({enrollment}).")
+                        skipped += 1
+                        continue
+
+                    student_id = None
                     if is_postgres:
                         cur = db.execute(
-                            f"INSERT INTO students (name, enrollment, email, branch_id) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}) RETURNING id",
+                            f"""
+                            INSERT INTO students (name, enrollment, email, branch_id)
+                            VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder})
+                            ON CONFLICT (enrollment) DO NOTHING
+                            RETURNING id
+                            """,
                             (name, enrollment, email or None, branch_id),
                         )
-                        student_id = cur.fetchone()[0]
+                        result = cur.fetchone()
+                        if not result:
+                            print(f"[CSV Upload] Row {row_number} skipped: enrollment conflict ({enrollment}).")
+                            skipped += 1
+                            continue
+                        student_id = result[0]
                     else:
                         cur = db.execute(
-                            f"INSERT INTO students (name, enrollment, email, branch_id) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder})",
+                            f"""
+                            INSERT OR IGNORE INTO students (name, enrollment, email, branch_id)
+                            VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder})
+                            """,
                             (name, enrollment, email or None, branch_id),
                         )
+                        if getattr(cur, "rowcount", 0) == 0:
+                            print(f"[CSV Upload] Row {row_number} skipped: enrollment conflict ({enrollment}).")
+                            skipped += 1
+                            continue
                         student_id = cur.lastrowid
 
-                    pwd_plain = enrollment[-4:] if len(enrollment) >= 4 else enrollment
-                    db.execute(
-                        f"INSERT INTO users (username, password, role, student_id) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder})",
-                        (enrollment, generate_password_hash(pwd_plain), "student", student_id),
-                    )
+                    # Create or ignore student user account.
+                    password_plain = enrollment[-4:] if len(enrollment) >= 4 else enrollment
+                    if is_postgres:
+                        db.execute(
+                            f"""
+                            INSERT INTO users (username, password, role, student_id)
+                            VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder})
+                            ON CONFLICT (username) DO NOTHING
+                            """,
+                            (enrollment, generate_password_hash(password_plain), "student", student_id),
+                        )
+                    else:
+                        db.execute(
+                            f"INSERT OR IGNORE INTO users (username, password, role, student_id) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder})",
+                            (enrollment, generate_password_hash(password_plain), "student", student_id),
+                        )
+
                     inserted += 1
-                except Exception as e:
-                    print(f"[CSV Upload Error] Row {enrollment}: {repr(e)}")
+
+                except Exception as row_error:
+                    errors += 1
+                    print(f"[CSV Upload] Row {row_number} exception: {repr(row_error)}")
                     continue
 
+            # Commit only once after processing/validation is complete.
             db.commit()
-            flash(f"Upload complete! {inserted} students added, {skipped} skipped.", "success")
+            flash(
+                f"Upload complete! {inserted} students added, {skipped} skipped, {errors} errors.",
+                "success",
+            )
             return redirect(url_for("students"))
 
         except Exception as e:
-            print(f"[CSV CRITICAL] {repr(e)}")
+            print(f"[CSV Upload CRITICAL] Exception: {repr(e)}")
+            print(traceback.format_exc())
             if db:
                 try:
                     db.rollback()
                 except Exception:
                     pass
-            flash("Failed to process CSV file. Ensure it is correctly formatted.", "error")
+            flash("Failed to process CSV file. Please check file format and logs.", "error")
             return redirect(url_for("upload_students_csv"))
         finally:
             if db:
