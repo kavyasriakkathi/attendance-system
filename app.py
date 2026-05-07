@@ -1094,7 +1094,7 @@ def dashboard():
             branch_count=branch_count,
             student_count=student_count,
             subject_count=subject_count,
-            attendance_count=attendance_count,
+            attendance_count=attendance_record_count,
             total_classes=total_classes,
             present_count=present_count,
             absent_count=absent_count,
