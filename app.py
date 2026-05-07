@@ -1423,12 +1423,11 @@ def upload_students_csv():
             flash("Please upload a valid CSV file.", "error")
             return redirect(url_for("upload_students_csv"))
 
+        db = None
         try:
-            import pandas as pd
+            import csv
+            import io
             import re
-
-            # Read as strings so things like enrollment numbers don't become floats.
-            df = pd.read_csv(file, dtype=str, keep_default_na=False)
 
             def _canon_header(value: object) -> str:
                 """Normalize a header for matching: lowercase and ignore spaces/_/-."""
@@ -1436,24 +1435,44 @@ def upload_students_csv():
                 return re.sub(r"[\s_\-]+", "", text)
 
             def _clean_cell(value: object) -> str:
-                """Convert a cell to a clean string, treating NaN/None as empty."""
                 if value is None:
                     return ""
-                try:
-                    if pd.isna(value):
-                        return ""
-                except Exception:
-                    pass
                 return str(value).strip()
 
-            # Build a mapping from canonical header -> actual dataframe column name.
-            col_map = {}
-            for col in df.columns:
-                key = _canon_header(col)
-                if key and key not in col_map:
-                    col_map[key] = col
+            # Try to sniff delimiter from a small sample (avoids loading full file into memory).
+            dialect = csv.excel
+            try:
+                stream = file.stream
+                if hasattr(stream, "seek"):
+                    stream.seek(0)
+                sample_bytes = stream.read(4096)
+                if hasattr(stream, "seek"):
+                    stream.seek(0)
+                sample_text = sample_bytes.decode("utf-8-sig", errors="replace")
+                dialect = csv.Sniffer().sniff(sample_text, delimiters=",;\t|")
+            except Exception:
+                # Default to comma if sniffer fails
+                try:
+                    if hasattr(file.stream, "seek"):
+                        file.stream.seek(0)
+                except Exception:
+                    pass
 
-            # Required columns (order does not matter).
+            text_stream = io.TextIOWrapper(file.stream, encoding="utf-8-sig", newline="")
+            reader = csv.DictReader(text_stream, dialect=dialect)
+
+            fieldnames = reader.fieldnames or []
+            if not fieldnames:
+                flash("The uploaded CSV file is empty.", "error")
+                return redirect(url_for("upload_students_csv"))
+
+            # Build mapping: canonical header -> actual header in the CSV.
+            col_map = {}
+            for header in fieldnames:
+                key = _canon_header(header)
+                if key and key not in col_map:
+                    col_map[key] = header
+
             required = {
                 "name": "name",
                 "enrollment": "enrollment",
@@ -1476,11 +1495,11 @@ def upload_students_csv():
             inserted = 0
             skipped = 0
 
-            for _, row in df.iterrows():
-                name = _clean_cell(row[col_map[required["name"]]])
-                enrollment = _clean_cell(row[col_map[required["enrollment"]]])
-                email = _clean_cell(row[col_map[required["email"]]])
-                branch_id = _clean_cell(row[col_map[required["branch_id"]]])
+            for row in reader:
+                name = _clean_cell(row.get(col_map[required["name"]]))
+                enrollment = _clean_cell(row.get(col_map[required["enrollment"]]))
+                email = _clean_cell(row.get(col_map[required["email"]]))
+                branch_id = _clean_cell(row.get(col_map[required["branch_id"]]))
 
                 if not name or not enrollment or not branch_id:
                     continue
@@ -1494,8 +1513,10 @@ def upload_students_csv():
                     skipped += 1
                     continue
 
-                # Duplicate Check
-                existing = db.execute(f"SELECT id FROM students WHERE enrollment = {placeholder}", (enrollment,)).fetchone()
+                existing = db.execute(
+                    f"SELECT id FROM students WHERE enrollment = {placeholder}",
+                    (enrollment,),
+                ).fetchone()
                 if existing:
                     skipped += 1
                     continue
@@ -1504,21 +1525,20 @@ def upload_students_csv():
                     if is_postgres:
                         cur = db.execute(
                             f"INSERT INTO students (name, enrollment, email, branch_id) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}) RETURNING id",
-                            (name, enrollment, email or None, branch_id)
+                            (name, enrollment, email or None, branch_id),
                         )
                         student_id = cur.fetchone()[0]
                     else:
                         cur = db.execute(
-                            f"INSERT INTO students (name, enrollment, email, branch_id) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder})", 
-                            (name, enrollment, email or None, branch_id)
+                            f"INSERT INTO students (name, enrollment, email, branch_id) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder})",
+                            (name, enrollment, email or None, branch_id),
                         )
                         student_id = cur.lastrowid
 
-                    # Create account: Password = last 4 digits
                     pwd_plain = enrollment[-4:] if len(enrollment) >= 4 else enrollment
                     db.execute(
                         f"INSERT INTO users (username, password, role, student_id) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder})",
-                        (enrollment, generate_password_hash(pwd_plain), "student", student_id)
+                        (enrollment, generate_password_hash(pwd_plain), "student", student_id),
                     )
                     inserted += 1
                 except Exception as e:
@@ -1531,8 +1551,19 @@ def upload_students_csv():
 
         except Exception as e:
             print(f"[CSV CRITICAL] {repr(e)}")
+            if db:
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
             flash("Failed to process CSV file. Ensure it is correctly formatted.", "error")
             return redirect(url_for("upload_students_csv"))
+        finally:
+            if db:
+                try:
+                    db.close()
+                except Exception:
+                    pass
 
     return render_template("upload_students_csv.html")
 
