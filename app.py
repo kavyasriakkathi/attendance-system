@@ -2265,26 +2265,29 @@ def bulk_delete_students():
         skipped_count = 0
         
         for item in items:
-            # Try to find by enrollment first
-            target = db.execute(f"SELECT id, enrollment FROM students WHERE enrollment = {placeholder}", (item,)).fetchone()
-            # If not found by enrollment, try by numeric ID if the input is numeric
-            if not target and item.isdigit():
-                target = db.execute(f"SELECT id, enrollment FROM students WHERE id = {placeholder}", (item,)).fetchone()
-            
-            if target:
-                sid = row_get(target, 'id')
-                try:
+            try:
+                # Try to find by enrollment first
+                target = db.execute(f"SELECT id, enrollment FROM students WHERE enrollment = {placeholder}", (item,)).fetchone()
+                # If not found by enrollment, try by numeric ID if the input is numeric
+                if not target and item.isdigit():
+                    target = db.execute(f"SELECT id, enrollment FROM students WHERE id = {placeholder}", (int(item),)).fetchone()
+                
+                if target:
+                    sid = row_get(target, 'id')
                     db.execute(f"DELETE FROM attendance WHERE student_id = {placeholder}", (sid,))
                     db.execute(f"DELETE FROM users WHERE student_id = {placeholder}", (sid,))
                     db.execute(f"DELETE FROM students WHERE id = {placeholder}", (sid,))
+                    db.commit()
                     deleted_count += 1
-                except Exception as e:
-                    print(f"[bulk_delete] Could not delete {item}: {repr(e)}")
+                else:
                     skipped_count += 1
-            else:
+            except Exception as e:
+                print(f"[bulk_delete] Could not delete {item}: {repr(e)}")
+                try:
+                    db.rollback()
+                except:
+                    pass
                 skipped_count += 1
-        
-        db.commit()
         if deleted_count > 0:
             flash(f"Successfully deleted {deleted_count} students.", 'success')
         if skipped_count > 0:
