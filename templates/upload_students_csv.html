@@ -8,12 +8,18 @@
 
     <div class="alert info" style="background: #e7f3ff; padding: 15px; border-radius: 8px; margin-bottom: 25px; border-left: 5px solid #2196F3;">
         <h4 style="margin: 0 0 10px 0;"><i class="fa-solid fa-circle-info"></i> CSV Format Requirements:</h4>
+        <p style="margin: 0 0 10px 0; font-size: 0.9rem; color: #555;">
+            The CSV must include these headers (column order doesn't matter). Headers are case-insensitive and can include spaces (e.g. <strong>Branch ID</strong>).
+        </p>
         <ul style="margin: 0; padding-left: 20px; font-size: 0.9rem;">
             <li><strong>Name:</strong> Full name of the student</li>
             <li><strong>Enrollment:</strong> Unique ID (e.g., 2021CSE001)</li>
             <li><strong>Email:</strong> Valid email address</li>
             <li><strong>Branch_ID:</strong> Numeric ID of the branch (e.g., 1 for CSE)</li>
         </ul>
+        <p style="margin-top: 10px; font-size: 0.85rem; color: #555;">
+            <em>Example header row:</em> <strong>name,enrollment,email,branch_id</strong>
+        </p>
         <p style="margin-top: 10px; font-size: 0.85rem; color: #555;">
             <em>Note: The password will be set to the <strong>last 4 digits</strong> of the Enrollment number.</em>
         </p>

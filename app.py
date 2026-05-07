@@ -1416,64 +1416,82 @@ def upload_students():
 @app.route("/upload_students_csv", methods=["GET", "POST"])
 @login_required
 def upload_students_csv():
-    """Smart CSV upload for students with fuzzy column mapping."""
+    """Simple CSV upload for students with automatic login creation."""
     if request.method == "POST":
         file = request.files.get("file")
         if not file or not file.filename.endswith(".csv"):
             flash("Please upload a valid CSV file.", "error")
             return redirect(url_for("upload_students_csv"))
 
-        db = None
         try:
             import pandas as pd
-            df = pd.read_csv(file)
-            
-            if df.empty:
-                flash("The uploaded CSV file is empty.", "error")
-                return redirect(url_for("upload_students_csv"))
+            import re
 
-            # Normalize column names for fuzzy matching
-            df.columns = [str(c).strip().lower() for c in df.columns]
-            
-            # Map common variations to standard names
-            mapping = {
-                'name': 'name', 'student name': 'name', 'fullname': 'name',
-                'enrollment': 'enrollment', 'enrollment no': 'enrollment', 'roll no': 'enrollment',
-                'email': 'email', 'mail id': 'email', 'email id': 'email',
-                'branch_id': 'branch_id', 'branch id': 'branch_id', 'branch': 'branch_id'
-            }
-            
-            # Rename columns based on mapping
-            new_cols = []
+            # Read as strings so things like enrollment numbers don't become floats.
+            df = pd.read_csv(file, dtype=str, keep_default_na=False)
+
+            def _canon_header(value: object) -> str:
+                """Normalize a header for matching: lowercase and ignore spaces/_/-."""
+                text = str(value).lstrip("\ufeff").strip().lower()
+                return re.sub(r"[\s_\-]+", "", text)
+
+            def _clean_cell(value: object) -> str:
+                """Convert a cell to a clean string, treating NaN/None as empty."""
+                if value is None:
+                    return ""
+                try:
+                    if pd.isna(value):
+                        return ""
+                except Exception:
+                    pass
+                return str(value).strip()
+
+            # Build a mapping from canonical header -> actual dataframe column name.
+            col_map = {}
             for col in df.columns:
-                mapped = False
-                for alias, target in mapping.items():
-                    if alias in col: # Check if alias is part of the header
-                        new_cols.append(target)
-                        mapped = True
-                        break
-                if not mapped:
-                    new_cols.append(col)
-            df.columns = new_cols
+                key = _canon_header(col)
+                if key and key not in col_map:
+                    col_map[key] = col
 
-            required = {"name", "enrollment", "email", "branch_id"}
-            missing = required - set(df.columns)
+            # Required columns (order does not matter).
+            required = {
+                "name": "name",
+                "enrollment": "enrollment",
+                "email": "email",
+                "branch_id": "branchid",
+            }
+            missing = [label for label, key in required.items() if key not in col_map]
             if missing:
-                flash(f"Missing required columns: {', '.join(missing)}. Please ensure your CSV headers are clear.", "error")
+                flash(
+                    "Missing required columns: "
+                    + ", ".join(missing)
+                    + ". Headers are case-insensitive and can include spaces (e.g. 'Branch ID').",
+                    "error",
+                )
                 return redirect(url_for("upload_students_csv"))
 
             db = get_db()
             placeholder = get_placeholder()
             is_postgres = str(app.config.get("DATABASE", "")).startswith("postgres")
-            inserted, skipped = 0, 0
+            inserted = 0
+            skipped = 0
 
             for _, row in df.iterrows():
-                name = str(row.get("name", "")).strip()
-                enrollment = str(row.get("enrollment", "")).strip()
-                email = str(row.get("email", "")).strip()
-                branch_id = str(row.get("branch_id", "")).strip()
+                name = _clean_cell(row[col_map[required["name"]]])
+                enrollment = _clean_cell(row[col_map[required["enrollment"]]])
+                email = _clean_cell(row[col_map[required["email"]]])
+                branch_id = _clean_cell(row[col_map[required["branch_id"]]])
 
-                if not name or not enrollment or not branch_id or branch_id.lower() == "nan":
+                if not name or not enrollment or not branch_id:
+                    continue
+
+                # Ensure branch exists (otherwise the student won't show in the students table join).
+                branch_exists = db.execute(
+                    f"SELECT id FROM branches WHERE id = {placeholder}",
+                    (branch_id,),
+                ).fetchone()
+                if not branch_exists:
+                    skipped += 1
                     continue
 
                 # Duplicate Check
@@ -1504,21 +1522,17 @@ def upload_students_csv():
                     )
                     inserted += 1
                 except Exception as e:
-                    print(f"[CSV Row Error] {enrollment}: {repr(e)}")
+                    print(f"[CSV Upload Error] Row {enrollment}: {repr(e)}")
                     continue
 
             db.commit()
-            flash(f"Successfully uploaded {inserted} students. {skipped} students were skipped (already exist).", "success")
+            flash(f"Upload complete! {inserted} students added, {skipped} skipped.", "success")
             return redirect(url_for("students"))
 
         except Exception as e:
-            print(f"[CSV Critical] {repr(e)}")
-            flash("An error occurred while processing the CSV file.", "error")
+            print(f"[CSV CRITICAL] {repr(e)}")
+            flash("Failed to process CSV file. Ensure it is correctly formatted.", "error")
             return redirect(url_for("upload_students_csv"))
-        finally:
-            if db:
-                try: db.close()
-                except: pass
 
     return render_template("upload_students_csv.html")
 
