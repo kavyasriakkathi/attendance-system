@@ -2210,12 +2210,13 @@ def delete_student():
         sid = row_get(target, 'id')
         enroll_val = row_get(target, 'enrollment') or ''
 
-        # Perform deletion inside a transaction. Remove dependent user first.
+        # Perform deletion inside a transaction. Remove dependent records first.
         try:
+            db.execute(f"DELETE FROM attendance WHERE student_id = {placeholder}", (sid,))
             db.execute(f"DELETE FROM users WHERE student_id = {placeholder}", (sid,))
             db.execute(f"DELETE FROM students WHERE id = {placeholder}", (sid,))
             db.commit()
-            flash(f"Student {enroll_val} deleted successfully.", 'success')
+            flash(f"Student {enroll_val} and all their records deleted successfully.", 'success')
         except Exception as e:
             try:
                 db.rollback()
@@ -2273,6 +2274,7 @@ def bulk_delete_students():
             if target:
                 sid = row_get(target, 'id')
                 try:
+                    db.execute(f"DELETE FROM attendance WHERE student_id = {placeholder}", (sid,))
                     db.execute(f"DELETE FROM users WHERE student_id = {placeholder}", (sid,))
                     db.execute(f"DELETE FROM students WHERE id = {placeholder}", (sid,))
                     deleted_count += 1
