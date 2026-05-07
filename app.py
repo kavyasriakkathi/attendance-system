@@ -1357,8 +1357,20 @@ def test_email():
         f"Sent to: {recipient}\n"
         f"Time: {date.today().isoformat()}\n"
     )
-    try:
-        email_sent = send_email(
+        # Use a localized error capture
+        last_error = "Unknown error"
+        def _capture_send(subject, recipient, body):
+            nonlocal last_error
+            try:
+                res = send_email(subject, recipient, body)
+                if not res:
+                    last_error = "Check logs for detailed connection errors."
+                return res
+            except Exception as e:
+                last_error = str(e)
+                return False
+
+        email_sent = _capture_send(
             subject="Test Email: Attendance System",
             recipient=recipient,
             body=body,
@@ -1366,7 +1378,7 @@ def test_email():
         if email_sent:
             flash(f"Test email sent to {recipient}.", "success")
         else:
-            flash("Failed to send test email. Please check your SMTP settings in .env (MAIL_SERVER, MAIL_USERNAME, etc.).", "error")
+            flash(f"Failed to send test email: {last_error}", "error")
     except Exception as e:
         flash(f"SMTP Error: {str(e)}", "error")
 
