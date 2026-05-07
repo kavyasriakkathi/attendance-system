@@ -6,6 +6,7 @@ import smtplib
 import ssl
 import time
 import socket
+import threading
 import traceback
 from urllib.parse import urlparse
 from email.message import EmailMessage
@@ -368,6 +369,7 @@ def send_email(subject, recipient, body, attachments=None, html_body=None):
     smtp_port = int(app.config.get("MAIL_PORT", 587))
     use_tls = bool(app.config.get("MAIL_USE_TLS"))
     debug = os.environ.get("MAIL_DEBUG", "False").lower() in ("1", "true", "yes")
+    smtp_timeout = float(os.environ.get("MAIL_TIMEOUT_SECONDS", 6))
 
     def _try_send(host_to_use: str) -> None:
         context = ssl.create_default_context()
@@ -375,7 +377,7 @@ def send_email(subject, recipient, body, attachments=None, html_body=None):
             username = app.config.get("MAIL_USERNAME")
             password = app.config.get("MAIL_PASSWORD")
             if use_tls:
-                with smtplib.SMTP(host_to_use, smtp_port, timeout=10) as server:
+                with smtplib.SMTP(host_to_use, smtp_port, timeout=smtp_timeout) as server:
                     if debug:
                         server.set_debuglevel(1)
                     server.ehlo()
@@ -384,7 +386,7 @@ def send_email(subject, recipient, body, attachments=None, html_body=None):
                     server.login(username, password)
                     server.send_message(msg)
             else:
-                with smtplib.SMTP_SSL(host_to_use, smtp_port, context=context, timeout=10) as server:
+                with smtplib.SMTP_SSL(host_to_use, smtp_port, context=context, timeout=smtp_timeout) as server:
                     if debug:
                         server.set_debuglevel(1)
                     server.ehlo()
@@ -392,13 +394,13 @@ def send_email(subject, recipient, body, attachments=None, html_body=None):
                     server.send_message(msg)
         else:
             # Development fallback: unauthenticated SMTP (MailHog/smtp4dev)
-            with smtplib.SMTP(host_to_use, smtp_port, timeout=10) as server:
+            with smtplib.SMTP(host_to_use, smtp_port, timeout=smtp_timeout) as server:
                 if debug:
                     server.set_debuglevel(1)
                 server.ehlo()
                 server.send_message(msg)
 
-    attempts = 3
+    attempts = max(1, int(os.environ.get("MAIL_SEND_RETRIES", 1)))
     for attempt in range(1, attempts + 1):
         try:
             # 1) Normal simple connection (beginner-friendly)
@@ -427,7 +429,7 @@ def send_email(subject, recipient, body, attachments=None, html_body=None):
             print(f"Attempt {attempt} - Failed to send email to {recipient}: {repr(e)}")
 
         if attempt < attempts:
-            time.sleep(2)
+            time.sleep(0.5)
             continue
         return False
 
@@ -531,6 +533,36 @@ def notify_low_attendance(db, student_ids):
                 })
 
     return emailed_students
+
+
+def _send_low_attendance_background(student_ids):
+    """Background task so attendance save response is never blocked by SMTP."""
+    db = None
+    try:
+        db = get_db()
+        emailed = notify_low_attendance(db, student_ids)
+        print(f"[mark_attendance] Low-attendance email task complete. emailed={len(emailed)}")
+    except Exception as e:
+        print(f"[mark_attendance] Low-attendance email task failed: {repr(e)}")
+        print(traceback.format_exc())
+    finally:
+        if db:
+            try:
+                db.close()
+            except Exception:
+                pass
+
+
+def dispatch_low_attendance_notifications(student_ids):
+    if not student_ids or not is_mail_configured():
+        return
+    try:
+        # Preferred path for eventlet/gevent compatible servers.
+        socketio.start_background_task(_send_low_attendance_background, list(student_ids))
+    except Exception as e:
+        print(f"[mark_attendance] socketio background task unavailable, using thread fallback: {repr(e)}")
+        t = threading.Thread(target=_send_low_attendance_background, args=(list(student_ids),), daemon=True)
+        t.start()
 
 
 def init_db(db=None):
@@ -2904,7 +2936,7 @@ def mark_attendance():
                     
                     db.commit()
                     flash("Attendance saved successfully.", "success")
-                    notify_low_attendance(db, saved_ids) # Background notification
+                    dispatch_low_attendance_notifications(saved_ids)
                     return redirect(url_for("attendance_success", branch_id=branch_id, subject_id=subject_id, date=selected_date))
                 except Exception as e:
                     db.rollback()
