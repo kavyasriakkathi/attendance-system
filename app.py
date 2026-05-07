@@ -151,12 +151,15 @@ def ensure_db_initialized(db) -> bool:
     global _DB_INIT_DONE, _DB_INIT_LAST_ERROR
     if _DB_INIT_DONE:
         return True
+    
+    # Set flag early to prevent recursion if init_db calls get_db()
+    _DB_INIT_DONE = True
     try:
         init_db(db=db)
-        _DB_INIT_DONE = True
         _DB_INIT_LAST_ERROR = None
         return True
     except Exception as e:
+        _DB_INIT_DONE = False # Reset on failure
         _DB_INIT_LAST_ERROR = repr(e)
         print(f"[DB] init_db failed: {_DB_INIT_LAST_ERROR}")
         print(traceback.format_exc())
