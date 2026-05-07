@@ -1,0 +1,73 @@
+{% extends "layout.html" %}
+{% block content %}
+<div class="card" style="max-width: 1100px; margin: 0 auto;">
+    <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 20px; flex-wrap: wrap;">
+        <div>
+            <p style="margin: 0 0 8px 0; color: var(--text-secondary);">Teacher Dashboard</p>
+            <h1 style="margin: 0;">{{ teacher.subject_name }}</h1>
+            <p style="margin: 10px 0 0 0; color: var(--text-secondary);">
+                <strong>Teacher:</strong> {{ teacher.username }}<br>
+                <strong>Department:</strong> {{ teacher.branch_name or 'Assigned Branch' }}
+            </p>
+        </div>
+        <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+            <a class="button" href="{{ url_for('teacher_mark_attendance') }}"><i class="fa-solid fa-calendar-check"></i> Mark Attendance</a>
+            <a class="button" href="{{ url_for('teacher_attendance_records') }}" style="background: var(--text-secondary);"><i class="fa-solid fa-rectangle-list"></i> My Attendance Records</a>
+            <a class="button" href="{{ url_for('logout') }}" style="background: #c0392b;"><i class="fa-solid fa-right-from-bracket"></i> Logout</a>
+        </div>
+    </div>
+</div>
+
+<div class="stats-grid" style="margin-top: 24px;">
+    <div class="stat-box">
+        <h3>My Subject</h3>
+        <p class="count" style="font-size: 1.4rem;">{{ teacher.subject_name }}</p>
+    </div>
+    <div class="stat-box">
+        <h3>My Branch</h3>
+        <p class="count" style="font-size: 1.4rem;">{{ teacher.branch_name or 'Assigned Branch' }}</p>
+    </div>
+    <div class="stat-box">
+        <h3>Students</h3>
+        <p class="count">{{ student_count }}</p>
+    </div>
+    <div class="stat-box">
+        <h3>Attendance Records</h3>
+        <p class="count">{{ attendance_count }}</p>
+    </div>
+</div>
+
+<div class="card" style="margin-top: 24px;">
+    <h2 style="margin-top: 0;"><i class="fa-solid fa-clock-rotate-left"></i> Recent Attendance</h2>
+    <div class="table-responsive">
+        <table>
+            <thead>
+                <tr>
+                    <th>Date</th>
+                    <th>Student</th>
+                    <th>Enrollment</th>
+                    <th>Status</th>
+                    <th>Note</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% if recent_records %}
+                    {% for record in recent_records %}
+                    <tr>
+                        <td>{{ record.date }}</td>
+                        <td>{{ record.student_name }}</td>
+                        <td>{{ record.enrollment }}</td>
+                        <td>{{ record.status }}</td>
+                        <td>{{ record.note or '-' }}</td>
+                    </tr>
+                    {% endfor %}
+                {% else %}
+                    <tr>
+                        <td colspan="5">No attendance records found for your subject.</td>
+                    </tr>
+                {% endif %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}

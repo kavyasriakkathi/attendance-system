@@ -1,0 +1,69 @@
+{% extends "layout.html" %}
+{% block content %}
+<div class="card" style="max-width: 1200px; margin: 0 auto;">
+    <h1 style="margin-top: 0;"><i class="fa-solid fa-calendar-check"></i> Mark Attendance</h1>
+    <p class="notice">
+        You are marking attendance only for <strong>{{ teacher.subject_name }}</strong>
+        in <strong>{{ teacher.branch_name or 'your assigned department' }}</strong>.
+    </p>
+
+    <form method="get" class="form-row" style="margin-bottom: 18px;">
+        <div>
+            <label>Subject</label>
+            <input type="text" value="{{ teacher.subject_name }}" readonly />
+        </div>
+        <div>
+            <label>Department</label>
+            <input type="text" value="{{ teacher.branch_name or 'Assigned Branch' }}" readonly />
+        </div>
+        <div>
+            <label>Date</label>
+            <input type="date" name="date" value="{{ selected_date }}" max="{{ today_date }}" required />
+        </div>
+        <button type="submit">Load Students</button>
+    </form>
+
+    {% if students %}
+    <form method="post">
+        <input type="hidden" name="date" value="{{ selected_date }}" />
+        <div class="table-responsive">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Student</th>
+                        <th>Enrollment</th>
+                        <th>Status</th>
+                        <th>Note</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for student in students %}
+                    <tr>
+                        <td>{{ student.name }}</td>
+                        <td>{{ student.enrollment }}</td>
+                        <td>
+                            <input type="hidden" name="student_id" value="{{ student.id }}" />
+                            <select name="status_{{ student.id }}">
+                                <option value="Present" {% if attendance_map[student.id|string] and attendance_map[student.id|string].status == 'Present' %}selected{% endif %}>Present</option>
+                                <option value="Absent" {% if attendance_map[student.id|string] and attendance_map[student.id|string].status == 'Absent' %}selected{% endif %}>Absent</option>
+                                <option value="Late" {% if attendance_map[student.id|string] and attendance_map[student.id|string].status == 'Late' %}selected{% endif %}>Late</option>
+                            </select>
+                        </td>
+                        <td>
+                            <input type="text" name="note_{{ student.id }}" value="{{ attendance_map[student.id|string].note if attendance_map[student.id|string] else '' }}" />
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        <div style="margin-top: 18px; display: flex; gap: 10px; flex-wrap: wrap; align-items: center;">
+            <button type="submit">Save Attendance</button>
+            <a href="{{ url_for('teacher_dashboard') }}" class="button" style="background: var(--text-secondary); text-decoration: none;">Back to Dashboard</a>
+        </div>
+    </form>
+    {% else %}
+    <div class="flash warning" style="display: block;">No students found for your assigned branch.</div>
+    {% endif %}
+</div>
+{% endblock %}

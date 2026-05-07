@@ -1,0 +1,47 @@
+{% extends "layout.html" %}
+{% block content %}
+<div class="card">
+    <h1 style="margin-top: 0;"><i class="fa-solid fa-rectangle-list"></i> My Attendance Records</h1>
+    <p class="notice">Subject: <strong>{{ teacher.subject_name }}</strong> | Department: <strong>{{ teacher.branch_name or 'Assigned Branch' }}</strong></p>
+
+    <form method="get" class="form-row" style="margin-bottom: 18px;">
+        <div style="flex-basis: 100%;">
+            <label>Search Student</label>
+            <input type="text" name="search" value="{{ search or '' }}" placeholder="Name or enrollment" />
+        </div>
+        <button type="submit">Filter</button>
+        <a href="{{ url_for('teacher_attendance_records') }}" class="button" style="background: var(--text-secondary);">Clear</a>
+    </form>
+
+    <div class="table-responsive">
+        <table>
+            <thead>
+                <tr>
+                    <th>Date</th>
+                    <th>Student</th>
+                    <th>Enrollment</th>
+                    <th>Status</th>
+                    <th>Note</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% if records %}
+                    {% for record in records %}
+                    <tr>
+                        <td>{{ record.date }}</td>
+                        <td>{{ record.student_name }}</td>
+                        <td>{{ record.enrollment }}</td>
+                        <td>{{ record.status }}</td>
+                        <td>{{ record.note or '-' }}</td>
+                    </tr>
+                    {% endfor %}
+                {% else %}
+                    <tr>
+                        <td colspan="5">No attendance records found for your subject.</td>
+                    </tr>
+                {% endif %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}

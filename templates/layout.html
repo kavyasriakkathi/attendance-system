@@ -34,8 +34,9 @@
             <a class="nav-link" href="{{ url_for('settings') }}"><i class="fa-solid fa-gear"></i> Settings</a>
             <a class="logout" href="{{ url_for('logout') }}"><i class="fa-solid fa-right-from-bracket"></i></a>
             {% elif session.role == 'teacher' %}
-            <a class="nav-link" href="{{ url_for('mark_attendance') }}"><i class="fa-solid fa-calendar-check"></i> Attendance</a>
-            <a class="nav-link" href="{{ url_for('attendance_report') }}"><i class="fa-solid fa-file-invoice"></i> Reports</a>
+            <a class="nav-link" href="{{ url_for('teacher_dashboard') }}"><i class="fa-solid fa-chalkboard-user"></i> My Subject</a>
+            <a class="nav-link" href="{{ url_for('teacher_mark_attendance') }}"><i class="fa-solid fa-calendar-check"></i> Mark Attendance</a>
+            <a class="nav-link" href="{{ url_for('teacher_attendance_records') }}"><i class="fa-solid fa-rectangle-list"></i> My Attendance Records</a>
             <a class="logout" href="{{ url_for('logout') }}"><i class="fa-solid fa-right-from-bracket"></i></a>
             {% else %}
             <a class="logout" href="{{ url_for('logout') }}"><i class="fa-solid fa-right-from-bracket"></i></a>

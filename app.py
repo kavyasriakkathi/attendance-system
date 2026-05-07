@@ -226,6 +226,103 @@ def set_setting(db, key, value):
         )
 
 
+def _clean_identifier(value: object) -> str:
+    import re
+    text = re.sub(r"[^a-zA-Z0-9]+", "_", (str(value) if value is not None else "").strip().lower())
+    return text.strip("_")
+
+
+def _table_columns(db, table_name: str):
+    if str(app.config.get("DATABASE", "")).startswith("postgres"):
+        rows = db.execute(
+            """
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_name = %s
+            ORDER BY ordinal_position
+            """,
+            (table_name,),
+        ).fetchall()
+        return {row_get(row, "column_name") for row in rows}
+
+    rows = db.execute(f"PRAGMA table_info({table_name})").fetchall()
+    return {row_get(row, "name") for row in rows}
+
+
+def _ensure_column(db, table_name: str, column_name: str, column_definition: str):
+    columns = _table_columns(db, table_name)
+    if column_name in columns:
+        return
+    if str(app.config.get("DATABASE", "")).startswith("postgres"):
+        db.execute(f"ALTER TABLE {table_name} ADD COLUMN IF NOT EXISTS {column_name} {column_definition}")
+    else:
+        db.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}")
+
+
+def get_teacher_context(db=None):
+    """Return the logged-in teacher profile plus subject/branch metadata."""
+    if session.get("role") != "teacher":
+        return None
+
+    created_here = False
+    if db is None:
+        db = get_db()
+        created_here = True
+
+    try:
+        teacher_id = session.get("teacher_id")
+        if not teacher_id:
+            return None
+
+        placeholder = get_placeholder()
+        teacher = db.execute(
+            f"SELECT * FROM teachers WHERE id = {placeholder}",
+            (teacher_id,),
+        ).fetchone()
+        if not teacher:
+            return None
+
+        branch_id = row_get(teacher, "branch_id")
+        subject_name = (row_get(teacher, "subject_name") or "").strip()
+
+        branch = None
+        if branch_id is not None:
+            branch = db.execute(
+                f"SELECT id, name FROM branches WHERE id = {placeholder}",
+                (branch_id,),
+            ).fetchone()
+
+        subject = None
+        if subject_name:
+            if branch_id is not None:
+                subject = db.execute(
+                    f"SELECT id, name, branch_id FROM subjects WHERE LOWER(name) = LOWER({placeholder}) AND branch_id = {placeholder}",
+                    (subject_name, branch_id),
+                ).fetchone()
+            if not subject:
+                subject = db.execute(
+                    f"SELECT id, name, branch_id FROM subjects WHERE LOWER(name) = LOWER({placeholder}) ORDER BY id LIMIT 1",
+                    (subject_name,),
+                ).fetchone()
+
+        return {
+            "teacher": teacher,
+            "teacher_id": row_get(teacher, "id"),
+            "username": row_get(teacher, "username"),
+            "subject_name": subject_name,
+            "branch_id": branch_id,
+            "branch_name": row_get(branch, "name") if branch else None,
+            "subject_id": row_get(subject, "id") if subject else None,
+            "subject_row": subject,
+        }
+    finally:
+        if created_here:
+            try:
+                db.close()
+            except Exception:
+                pass
+
+
 def send_email(subject, recipient, body, attachments=None, html_body=None):
     # If credentials are not configured, allow a local dev fallback when explicitly enabled
     dev_fallback_enabled = os.environ.get("MAIL_DEV_FALLBACK", "False").lower() in ("1", "true", "yes")
@@ -454,6 +551,16 @@ def init_db(db=None):
         # IMPORTANT: create referenced tables before tables with FOREIGN KEYs.
 
         db.execute("""
+        CREATE TABLE IF NOT EXISTS teachers (
+            id SERIAL PRIMARY KEY,
+            username TEXT UNIQUE NOT NULL,
+            password TEXT NOT NULL,
+            subject_name TEXT NOT NULL,
+            branch_id INTEGER NOT NULL
+        );
+        """)
+
+        db.execute("""
         CREATE TABLE IF NOT EXISTS branches (
             id SERIAL PRIMARY KEY,
             name TEXT UNIQUE NOT NULL,
@@ -496,6 +603,8 @@ def init_db(db=None):
             student_id INTEGER NOT NULL,
             branch_id INTEGER NOT NULL,
             subject_id INTEGER NOT NULL,
+            teacher_id INTEGER,
+            subject_name TEXT,
             date TEXT NOT NULL,
             status TEXT NOT NULL,
             note TEXT
@@ -517,6 +626,14 @@ def init_db(db=None):
     else:
         # SQLite
         db.executescript("""
+        CREATE TABLE IF NOT EXISTS teachers (
+            id INTEGER PRIMARY KEY,
+            username TEXT UNIQUE NOT NULL,
+            password TEXT NOT NULL,
+            subject_name TEXT NOT NULL,
+            branch_id INTEGER NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY,
             username TEXT UNIQUE NOT NULL,
@@ -551,6 +668,8 @@ def init_db(db=None):
             student_id INTEGER NOT NULL,
             branch_id INTEGER NOT NULL,
             subject_id INTEGER NOT NULL,
+            teacher_id INTEGER,
+            subject_name TEXT,
             date TEXT NOT NULL,
             status TEXT NOT NULL,
             note TEXT
@@ -565,6 +684,33 @@ def init_db(db=None):
         CREATE UNIQUE INDEX IF NOT EXISTS idx_attendance_student_subject_date
         ON attendance(student_id, subject_id, date);
         """)
+
+    # Best-effort schema upgrades for existing databases.
+    try:
+        _ensure_column(db, "attendance", "teacher_id", "INTEGER")
+        _ensure_column(db, "attendance", "subject_name", "TEXT")
+        if str(app.config.get("DATABASE", "")).startswith("postgres"):
+            db.execute("""
+                CREATE TABLE IF NOT EXISTS teachers (
+                    id SERIAL PRIMARY KEY,
+                    username TEXT UNIQUE NOT NULL,
+                    password TEXT NOT NULL,
+                    subject_name TEXT NOT NULL,
+                    branch_id INTEGER NOT NULL
+                )
+            """)
+        else:
+            db.execute("""
+                CREATE TABLE IF NOT EXISTS teachers (
+                    id INTEGER PRIMARY KEY,
+                    username TEXT UNIQUE NOT NULL,
+                    password TEXT NOT NULL,
+                    subject_name TEXT NOT NULL,
+                    branch_id INTEGER NOT NULL
+                )
+            """)
+    except Exception as upgrade_error:
+        print(f"[DB] teacher schema upgrade skipped: {repr(upgrade_error)}")
 
     # ✅ Admin check
     admin = db.execute(
@@ -587,6 +733,21 @@ def init_db(db=None):
             f"INSERT INTO users (username, password, role) VALUES ({placeholder}, {placeholder}, {placeholder})",
             ("teacher1", generate_password_hash("1234"), "teacher"),
         )
+
+    default_teacher_seed = db.execute(
+        f"SELECT id FROM teachers WHERE username = {placeholder}",
+        ("teacher1",),
+    ).fetchone()
+    if not default_teacher_seed:
+        default_branch = db.execute(f"SELECT id FROM branches ORDER BY id LIMIT 1").fetchone()
+        default_branch_id = row_get(default_branch, "id") if default_branch else 1
+        try:
+            db.execute(
+                f"INSERT INTO teachers (username, password, subject_name, branch_id) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder})",
+                ("teacher1", generate_password_hash("1234"), "Data Structures", default_branch_id),
+            )
+        except Exception as teacher_seed_error:
+            print(f"[DB] teacher seed skipped: {repr(teacher_seed_error)}")
 
     # ✅ Default low attendance threshold setting
     if not db.execute(f"SELECT id FROM settings WHERE key = {placeholder}", ("low_attendance_threshold",)).fetchone():
@@ -624,6 +785,16 @@ def admin_required(f):
         if session.get("role") != "admin":
             flash("Please login first.", "warning")
             return redirect(url_for("login"))
+        return f(*args, **kwargs)
+
+    return decorated_function
+
+
+def teacher_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if session.get("role") != "teacher" or not session.get("teacher_id"):
+            return "Unauthorized Access", 403
         return f(*args, **kwargs)
 
     return decorated_function
@@ -2190,16 +2361,19 @@ def teacher_login():
             db = get_db()
             placeholder = get_placeholder()
             user = db.execute(
-                f"SELECT id, username, password, role FROM users WHERE username = {placeholder}",
+                f"SELECT id, username, password, subject_name, branch_id FROM teachers WHERE username = {placeholder}",
                 (username,),
             ).fetchone()
 
-            if user and row_get(user, "role") == "teacher" and check_password_hash(row_get(user, "password"), password):
+            if user and check_password_hash(row_get(user, "password"), password):
                 session.clear()
                 session["user_id"] = row_get(user, "id")
                 session["username"] = row_get(user, "username")
-                session["role"] = row_get(user, "role")
-                return redirect(url_for("dashboard"))
+                session["role"] = "teacher"
+                session["teacher_id"] = row_get(user, "id")
+                session["teacher_subject_name"] = row_get(user, "subject_name")
+                session["teacher_branch_id"] = row_get(user, "branch_id")
+                return redirect(url_for("teacher_dashboard"))
 
             flash("Invalid teacher login credentials.", "error")
 
@@ -2215,6 +2389,216 @@ def teacher_login():
                 pass
 
     return render_template("teacher_login.html", hide_nav=True)
+
+
+@app.route("/teacher/dashboard")
+@app.route("/teacher-dashboard")
+@login_required
+@teacher_required
+def teacher_dashboard():
+    db = None
+    try:
+        db = get_db()
+        teacher = get_teacher_context(db)
+        if not teacher:
+            return "Unauthorized Access", 403
+
+        placeholder = get_placeholder()
+        subject_name = teacher["subject_name"]
+        branch_id = teacher["branch_id"]
+        subject_row = teacher["subject_row"]
+        subject_id = row_get(subject_row, "id") if subject_row else None
+
+        student_count = db.execute(
+            f"SELECT COUNT(*) AS count FROM students WHERE branch_id = {placeholder}",
+            (branch_id,),
+        ).fetchone()
+
+        attendance_count = db.execute(
+            f"SELECT COUNT(*) AS count FROM attendance WHERE subject_name = {placeholder} AND branch_id = {placeholder}",
+            (subject_name, branch_id),
+        ).fetchone()
+
+        records = db.execute(
+            f"""
+            SELECT attendance.date, attendance.status, attendance.note,
+                   students.name AS student_name, students.enrollment
+            FROM attendance
+            JOIN students ON attendance.student_id = students.id
+            WHERE attendance.branch_id = {placeholder}
+              AND attendance.subject_name = {placeholder}
+            ORDER BY attendance.date DESC, students.name
+            LIMIT 20
+            """,
+            (branch_id, subject_name),
+        ).fetchall()
+
+        return render_template(
+            "teacher_dashboard.html",
+            teacher=teacher,
+            student_count=row_get(student_count, "count", 0) or 0,
+            attendance_count=row_get(attendance_count, "count", 0) or 0,
+            recent_records=records,
+            subject_id=subject_id,
+        )
+    except Exception as e:
+        print(f"[teacher_dashboard] ERROR: {repr(e)}")
+        flash("Teacher dashboard is temporarily unavailable.", "error")
+        return redirect(url_for("teacher_login"))
+    finally:
+        if db:
+            try:
+                db.close()
+            except Exception:
+                pass
+
+
+@app.route("/teacher/attendance", methods=["GET", "POST"])
+@app.route("/teacher-mark-attendance", methods=["GET", "POST"])
+@login_required
+@teacher_required
+def teacher_mark_attendance():
+    db = None
+    try:
+        db = get_db()
+        teacher = get_teacher_context(db)
+        if not teacher:
+            return "Unauthorized Access", 403
+
+        placeholder = get_placeholder()
+        branch_id = teacher["branch_id"]
+        subject_name = teacher["subject_name"]
+        subject_row = teacher["subject_row"]
+        subject_id = row_get(subject_row, "id") if subject_row else None
+
+        if not subject_row or subject_id is None:
+            return "Unauthorized Access", 403
+
+        today_str = date.today().isoformat()
+        selected_date = request.args.get("date") or today_str
+
+        if request.method == "POST":
+            selected_date = request.form.get("date") or today_str
+            student_ids = request.form.getlist("student_id")
+            if not student_ids:
+                flash("Please select at least one student.", "error")
+            else:
+                saved_ids = []
+                try:
+                    for student_id in student_ids:
+                        status = request.form.get(f"status_{student_id}", "Absent")
+                        note = request.form.get(f"note_{student_id}", "")
+                        db.execute(
+                            f"""
+                            INSERT INTO attendance (
+                                student_id, branch_id, subject_id, teacher_id, subject_name,
+                                date, status, note
+                            ) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})
+                            ON CONFLICT (student_id, subject_id, date) DO UPDATE
+                            SET status = EXCLUDED.status,
+                                note = EXCLUDED.note,
+                                teacher_id = EXCLUDED.teacher_id,
+                                subject_name = EXCLUDED.subject_name
+                            """,
+                            (student_id, branch_id, subject_id, teacher["teacher_id"], subject_name, selected_date, status, note),
+                        )
+                        if str(student_id).isdigit():
+                            saved_ids.append(int(student_id))
+                    db.commit()
+                    flash("Attendance saved successfully.", "success")
+                    return redirect(url_for("teacher_attendance_records"))
+                except Exception as save_error:
+                    db.rollback()
+                    print(f"[teacher_mark_attendance] ERROR: {repr(save_error)}")
+                    flash("Failed to save attendance.", "error")
+
+        students = db.execute(
+            f"SELECT id, name, enrollment FROM students WHERE branch_id = {placeholder} ORDER BY name",
+            (branch_id,),
+        ).fetchall()
+
+        attendance_map = {}
+        for row in db.execute(
+            f"""
+            SELECT student_id, status, note
+            FROM attendance
+            WHERE branch_id = {placeholder}
+              AND subject_name = {placeholder}
+              AND date = {placeholder}
+            """,
+            (branch_id, subject_name, selected_date),
+        ).fetchall():
+            attendance_map[str(row_get(row, "student_id"))] = row
+
+        return render_template(
+            "teacher_mark_attendance.html",
+            teacher=teacher,
+            students=students,
+            attendance_map=attendance_map,
+            selected_date=selected_date,
+            today_date=today_str,
+        )
+    except Exception as e:
+        print(f"[teacher_mark_attendance] ERROR: {repr(e)}")
+        flash("Teacher attendance page is temporarily unavailable.", "error")
+        return redirect(url_for("teacher_dashboard"))
+    finally:
+        if db:
+            try:
+                db.close()
+            except Exception:
+                pass
+
+
+@app.route("/teacher/records")
+@app.route("/teacher-records")
+@login_required
+@teacher_required
+def teacher_attendance_records():
+    db = None
+    try:
+        db = get_db()
+        teacher = get_teacher_context(db)
+        if not teacher:
+            return "Unauthorized Access", 403
+
+        placeholder = get_placeholder()
+        subject_name = teacher["subject_name"]
+        branch_id = teacher["branch_id"]
+        search = (request.args.get("search") or "").strip()
+
+        query = (
+            "SELECT attendance.date, attendance.status, attendance.note, attendance.subject_name, "
+            "students.name AS student_name, students.enrollment, branches.name AS branch_name "
+            "FROM attendance "
+            "JOIN students ON attendance.student_id = students.id "
+            "JOIN branches ON attendance.branch_id = branches.id "
+            f"WHERE attendance.branch_id = {placeholder} AND attendance.subject_name = {placeholder}"
+        )
+        params = [branch_id, subject_name]
+        if search:
+            like_op = "ILIKE" if str(app.config.get("DATABASE", "")).startswith("postgres") else "LIKE"
+            query += f" AND (students.name {like_op} {placeholder} OR students.enrollment {like_op} {placeholder})"
+            params.extend([f"%{search}%", f"%{search}%"])
+        query += " ORDER BY attendance.date DESC, students.name"
+
+        records = db.execute(query, params).fetchall()
+        return render_template(
+            "teacher_records.html",
+            teacher=teacher,
+            records=records,
+            search=search,
+        )
+    except Exception as e:
+        print(f"[teacher_attendance_records] ERROR: {repr(e)}")
+        flash("Teacher records are temporarily unavailable.", "error")
+        return redirect(url_for("teacher_dashboard"))
+    finally:
+        if db:
+            try:
+                db.close()
+            except Exception:
+                pass
 
 
 @app.route("/student_dashboard")
