@@ -268,13 +268,37 @@ def _table_columns(db, table_name: str):
 
 
 def _ensure_column(db, table_name: str, column_name: str, column_definition: str):
-    columns = _table_columns(db, table_name)
-    if column_name in columns:
-        return
-    if str(app.config.get("DATABASE", "")).startswith("postgres"):
-        db.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}")
+    """Add a column to a table if it doesn't exist.
+    
+    For PostgreSQL, each ALTER is wrapped in a SAVEPOINT so that if it fails
+    (e.g. duplicate column from a concurrent worker), only that statement is
+    rolled back and the connection is NOT left in the InFailedSqlTransaction
+    state that would break all subsequent queries including login.
+    """
+    is_postgres = str(app.config.get("DATABASE", "")).startswith("postgres")
+    
+    if is_postgres:
+        # Use savepoint so a failure here doesn't abort the outer transaction
+        try:
+            db.execute("SAVEPOINT ensure_col")
+            columns = _table_columns(db, table_name)
+            if column_name not in columns:
+                db.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}")
+            db.execute("RELEASE SAVEPOINT ensure_col")
+        except Exception as e:
+            print(f"[_ensure_column] {table_name}.{column_name} skipped: {repr(e)}")
+            try:
+                db.execute("ROLLBACK TO SAVEPOINT ensure_col")
+                db.execute("RELEASE SAVEPOINT ensure_col")
+            except Exception:
+                pass
     else:
-        db.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}")
+        columns = _table_columns(db, table_name)
+        if column_name not in columns:
+            try:
+                db.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}")
+            except Exception as e:
+                print(f"[_ensure_column] {table_name}.{column_name} skipped: {repr(e)}")
 
 
 def get_teacher_context(db=None):
@@ -732,6 +756,17 @@ def init_db(db=None):
         """)
 
     # Best-effort schema upgrades for existing databases.
+    # IMPORTANT: For PostgreSQL, we rollback any stale aborted transaction
+    # that may have been left by a previous failed connection before doing
+    # any DDL work. This prevents InFailedSqlTransaction from poisoning the
+    # connection and breaking the login route.
+    is_postgres = str(app.config.get("DATABASE", "")).startswith("postgres")
+    if is_postgres:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
     try:
         _ensure_column(db, "attendance", "teacher_id", "INTEGER")
         _ensure_column(db, "attendance", "subject_name", "TEXT")
@@ -743,21 +778,28 @@ def init_db(db=None):
         _ensure_column(db, "users", "student_id", "INTEGER")
         _ensure_column(db, "branches", "location", "TEXT")
         
-        db.commit() # Clear transaction state before index creation
+        db.commit() # Commit column additions before index creation
         
         # Upgrade index if it doesn't support period
         try:
+            if is_postgres:
+                db.execute("SAVEPOINT idx_upgrade")
             db.execute("DROP INDEX IF EXISTS idx_attendance_student_subject_date")
             db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_attendance_student_subject_date_period ON attendance(student_id, subject_id, date, period)")
-            
-            # Scalability: Add indexes for long-term storage
             db.execute("CREATE INDEX IF NOT EXISTS idx_attendance_date ON attendance(date)")
             db.execute("CREATE INDEX IF NOT EXISTS idx_attendance_teacher ON attendance(teacher_id)")
             db.execute("CREATE INDEX IF NOT EXISTS idx_attendance_subject ON attendance(subject_id)")
             db.execute("CREATE INDEX IF NOT EXISTS idx_attendance_student ON attendance(student_id)")
+            if is_postgres:
+                db.execute("RELEASE SAVEPOINT idx_upgrade")
             db.commit()
         except Exception as idx_error:
-            print(f"[DB] index upgrade failed: {repr(idx_error)}")
+            print(f"[DB] index upgrade skipped: {repr(idx_error)}")
+            if is_postgres:
+                try:
+                    db.execute("ROLLBACK TO SAVEPOINT idx_upgrade")
+                    db.execute("RELEASE SAVEPOINT idx_upgrade")
+                except Exception: pass
             if hasattr(db, 'rollback'): db.rollback()
         
         try:
@@ -927,6 +969,13 @@ def login():
         db = None
         try:
             db = get_db()
+            # Safety: clear any stale aborted transaction (PostgreSQL only).
+            # If init_db left the connection in a failed state, this resets it.
+            if str(app.config.get("DATABASE", "")).startswith("postgres"):
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
             placeholder = get_placeholder()
             user = db.execute(
                 f"SELECT id, username, password, role FROM users WHERE username = {placeholder}",
