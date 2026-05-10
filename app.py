@@ -1565,6 +1565,40 @@ def subjects():
             except: pass
 
 
+@app.route("/delete_subject", methods=["POST"])
+@login_required
+@admin_required
+def delete_subject():
+    db = None
+    try:
+        subject_id = (request.form.get("subject_id") or "").strip()
+        if not subject_id:
+            flash("No subject specified for deletion.", "error")
+            return redirect(url_for("subjects"))
+
+        db = get_db()
+        placeholder = get_placeholder()
+
+        # Delete associated attendance records first to avoid foreign key constraints
+        db.execute(f"DELETE FROM attendance WHERE subject_id = {placeholder}", (subject_id,))
+        # Delete the subject
+        db.execute(f"DELETE FROM subjects WHERE id = {placeholder}", (subject_id,))
+        
+        db.commit()
+        flash("Subject and associated attendance records deleted successfully.", "success")
+    except Exception as e:
+        if db:
+            try: db.rollback()
+            except: pass
+        print(f"[delete_subject] ERROR: {repr(e)}")
+        flash("Failed to delete subject.", "error")
+    finally:
+        if db:
+            try: db.close()
+            except: pass
+    return redirect(url_for("subjects"))
+
+
 @app.route("/upload_students", methods=["GET", "POST"])
 @login_required
 @admin_required
