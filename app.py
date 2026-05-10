@@ -792,6 +792,8 @@ def init_db(db=None):
         _ensure_column(db, "students", "current_semester", "INTEGER DEFAULT 1")
         _ensure_column(db, "users", "student_id", "INTEGER")
         _ensure_column(db, "branches", "location", "TEXT")
+        _ensure_column(db, "teachers", "name", "TEXT")
+        _ensure_column(db, "teachers", "subject_id", "INTEGER")
         
         db.commit() # Commit column additions before index creation
         
@@ -1769,13 +1771,27 @@ def manage_teachers():
                         db.commit()
                         flash("Teacher deleted successfully.", "success")
 
-        teachers_list = db.execute("""
-            SELECT t.*, s.name AS subject_name, b.name AS branch_name 
-            FROM teachers t 
-            LEFT JOIN subjects s ON t.subject_id = s.id 
-            LEFT JOIN branches b ON t.branch_id = b.id 
-            ORDER BY t.name
-        """).fetchall()
+        # Fetch teachers list — use a safe fallback query if subject_id column
+        # doesn't exist yet on the live database (gives a clearer error instead of 500)
+        try:
+            teachers_list = db.execute("""
+                SELECT t.*, s.name AS subject_name, b.name AS branch_name 
+                FROM teachers t 
+                LEFT JOIN subjects s ON t.subject_id = s.id 
+                LEFT JOIN branches b ON t.branch_id = b.id 
+                ORDER BY t.name
+            """).fetchall()
+        except Exception as col_err:
+            print(f"[manage_teachers] Query fallback due to: {repr(col_err)}")
+            # Fallback: query without subject_id join in case migration hasn't run yet
+            teachers_list = db.execute("""
+                SELECT t.id, t.username, t.branch_id,
+                       COALESCE(t.name, t.username) AS name,
+                       NULL AS subject_name, b.name AS branch_name 
+                FROM teachers t 
+                LEFT JOIN branches b ON t.branch_id = b.id 
+                ORDER BY t.username
+            """).fetchall()
         
         subjects_list = db.execute("SELECT id, name FROM subjects ORDER BY name").fetchall()
         branches_list = db.execute("SELECT id, name FROM branches ORDER BY name").fetchall()
