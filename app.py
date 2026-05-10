@@ -1738,6 +1738,7 @@ def subjects():
                 flash("Name and branch are required.", "error")
 
         subjects_list = db.execute("SELECT subjects.*, branches.name AS branch_name FROM subjects JOIN branches ON subjects.branch_id = branches.id ORDER BY subjects.name").fetchall()
+        subjects_list = db.execute("SELECT id, name FROM subjects ORDER BY name").fetchall()
         branches_list = db.execute("SELECT id, name FROM branches ORDER BY name").fetchall()
         return render_template("subjects.html", subjects=subjects_list, branches=branches_list)
     except Exception as e:
@@ -1931,45 +1932,12 @@ def manage_teachers():
                             db.rollback()
                             flash(f"Error deleting teacher: {repr(e)}", "error")
 
-        # Fetch teachers list with all assigned branches
-        try:
-            teachers_list = db.execute("""
-                SELECT t.id, t.name, t.username, t.subject_id, s.name AS subject_name,
-                       GROUP_CONCAT(b.name, ', ') AS branch_names,
-                       COUNT(tb.branch_id) AS branch_count
-                FROM teachers t 
-                LEFT JOIN subjects s ON t.subject_id = s.id 
-                LEFT JOIN teacher_branches tb ON t.id = tb.teacher_id
-                LEFT JOIN branches b ON tb.branch_id = b.id
-                GROUP BY t.id, t.name, t.username, t.subject_id, s.name
-                ORDER BY t.name
-            """).fetchall()
-        except Exception as col_err:
-            print(f"[manage_teachers] GROUP_CONCAT query fallback: {repr(col_err)}")
-            # Fallback for PostgreSQL (use string_agg instead of GROUP_CONCAT)
-            try:
-                teachers_list = db.execute("""
-                    SELECT t.id, t.name, t.username, t.subject_id, s.name AS subject_name,
-                           STRING_AGG(b.name, ', ') AS branch_names,
-                           COUNT(tb.branch_id) AS branch_count
-                    FROM teachers t 
-                    LEFT JOIN subjects s ON t.subject_id = s.id 
-                    LEFT JOIN teacher_branches tb ON t.id = tb.teacher_id
-                    LEFT JOIN branches b ON tb.branch_id = b.id
-                    GROUP BY t.id, t.name, t.username, t.subject_id, s.name
-                    ORDER BY t.name
-                """).fetchall()
-            except Exception as pg_err:
-                print(f"[manage_teachers] STRING_AGG fallback also failed: {repr(pg_err)}")
-                # Final fallback - simple query without aggregation
-                teachers_list = db.execute("""
-                    SELECT t.id, t.name, t.username, t.subject_id, s.name AS subject_name,
-                           '' AS branch_names, 0 AS branch_count
-                    FROM teachers t 
-                    LEFT JOIN subjects s ON t.subject_id = s.id 
-                    ORDER BY t.name
-                """).fetchall()
-        
+        teachers_list = db.execute("""
+            SELECT DISTINCT t.id, t.name, t.username, t.subject_id, s.name AS subject_name
+            FROM teachers t 
+            LEFT JOIN subjects s ON t.subject_id = s.id 
+            ORDER BY t.name
+        """).fetchall()
         subjects_list = db.execute("SELECT id, name FROM subjects ORDER BY name").fetchall()
         branches_list = db.execute("SELECT id, name FROM branches ORDER BY name").fetchall()
         
@@ -2830,6 +2798,7 @@ def students():
         query += " ORDER BY COALESCE(students.import_order, students.id), students.id"
         
         students_list = db.execute(query, params).fetchall()
+        subjects_list = db.execute("SELECT id, name FROM subjects ORDER BY name").fetchall()
         branches_list = db.execute("SELECT id, name FROM branches ORDER BY name").fetchall()
         return render_template("students.html", students=students_list, branches=branches_list)
     except Exception as e:
