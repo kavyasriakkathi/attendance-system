@@ -1,0 +1,91 @@
+{% extends "layout.html" %}
+{% block content %}
+<div class="card">
+    <div style="display: flex; align-items: center; gap: 15px; margin-bottom: 20px;">
+        <i class="fa-solid fa-graduation-cap" style="font-size: 2rem; color: var(--primary-color);"></i>
+        <h1 style="margin: 0;">Academic Progression</h1>
+    </div>
+    <p style="color: var(--text-secondary); margin-bottom: 25px;">Manage student academic years and semesters, and perform bulk promotions.</p>
+
+    <div class="stats-grid" style="margin-bottom: 30px;">
+        <div class="stat-box" style="background: #eff6ff; border: 1px solid #bfdbfe;">
+            <h3>Bulk Promotion Actions</h3>
+            <div style="display: flex; gap: 10px; margin-top: 15px;">
+                <form method="post" onsubmit="return confirm('Are you sure you want to promote ALL students to the next semester?');">
+                    <input type="hidden" name="action" value="promote_semester" />
+                    <button type="submit" class="button" style="background: var(--primary-color);">Promote to Next Semester</button>
+                </form>
+                <form method="post" onsubmit="return confirm('Are you sure you want to promote ALL students to the next academic year (and reset to Semester 1)?');">
+                    <input type="hidden" name="action" value="promote_year" />
+                    <button type="submit" class="button" style="background: #8b5cf6;">Promote to Next Year</button>
+                </form>
+                <form method="post" onsubmit="return confirm('Send automated warning emails to ALL students (and parents) below 75% attendance?');">
+                    <input type="hidden" name="action" value="trigger_warnings" />
+                    <button type="submit" class="button" style="background: #ef4444;"><i class="fa-solid fa-triangle-exclamation"></i> Send Low Attendance Warnings</button>
+                </form>
+            </div>
+            <p style="font-size: 0.85rem; color: #64748b; margin-top: 10px;">Use these at the end of the semester/year to bulk update all records.</p>
+        </div>
+        
+        <div class="stat-box">
+            <h3>Current Student Distribution</h3>
+            <ul style="list-style: none; padding: 0; margin-top: 10px;">
+                {% for stat in stats %}
+                <li style="display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #e2e8f0;">
+                    <span>Year {{ stat.current_year }}, Semester {{ stat.current_semester }}</span>
+                    <strong style="color: var(--primary-color);">{{ stat.count }} students</strong>
+                </li>
+                {% else %}
+                <li style="color: var(--text-secondary);">No students found.</li>
+                {% endfor %}
+            </ul>
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    <h2>Individual Student Status</h2>
+    <div class="table-responsive">
+        <table>
+            <thead>
+                <tr>
+                    <th>Student Name</th>
+                    <th>Enrollment</th>
+                    <th>Current Year</th>
+                    <th>Current Semester</th>
+                    <th>Action</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for student in students %}
+                <tr>
+                    <td>{{ student.name }}</td>
+                    <td><code>{{ student.enrollment }}</code></td>
+                    <form method="post" style="display: flex; gap: 10px; align-items: center;">
+                        <input type="hidden" name="action" value="update_student" />
+                        <input type="hidden" name="student_id" value="{{ student.id }}" />
+                        <td>
+                            <select name="current_year" style="padding: 4px; border-radius: 4px; border: 1px solid #ccc;">
+                                <option value="1" {% if student.current_year == 1 %}selected{% endif %}>1</option>
+                                <option value="2" {% if student.current_year == 2 %}selected{% endif %}>2</option>
+                                <option value="3" {% if student.current_year == 3 %}selected{% endif %}>3</option>
+                                <option value="4" {% if student.current_year == 4 %}selected{% endif %}>4</option>
+                            </select>
+                        </td>
+                        <td>
+                            <select name="current_semester" style="padding: 4px; border-radius: 4px; border: 1px solid #ccc;">
+                                <option value="1" {% if student.current_semester == 1 %}selected{% endif %}>1</option>
+                                <option value="2" {% if student.current_semester == 2 %}selected{% endif %}>2</option>
+                            </select>
+                        </td>
+                        <td>
+                            <button type="submit" class="button" style="padding: 4px 10px; font-size: 0.85rem;">Update</button>
+                        </td>
+                    </form>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}

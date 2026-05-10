@@ -26,6 +26,7 @@
             {% elif session.role == 'admin' %}
             <a class="nav-link" href="{{ url_for('dashboard') }}"><i class="fa-solid fa-chart-line"></i> Dashboard</a>
             <a class="nav-link" href="{{ url_for('students') }}"><i class="fa-solid fa-users"></i> Students</a>
+            <a class="nav-link" href="{{ url_for('admin_academic') }}"><i class="fa-solid fa-graduation-cap"></i> Academic</a>
             <a class="nav-link" href="{{ url_for('branches') }}"><i class="fa-solid fa-building"></i> Depts</a>
             <a class="nav-link" href="{{ url_for('subjects') }}"><i class="fa-solid fa-book"></i> Subjects</a>
             <a class="nav-link" href="{{ url_for('manage_teachers') }}"><i class="fa-solid fa-chalkboard-user"></i> Teachers</a>

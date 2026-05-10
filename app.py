@@ -481,6 +481,7 @@ def notify_low_attendance(db, student_ids):
             students.id AS student_id,
             students.name AS student_name,
             students.email AS email,
+            students.parent_email AS parent_email,
             ROUND(
                 100.0 * SUM(CASE WHEN attendance.status = 'Present' THEN 1 ELSE 0 END) / COUNT(attendance.id),
                 1
@@ -495,13 +496,18 @@ def notify_low_attendance(db, student_ids):
     emailed_students = []
 
     for row in rows:
-        if not row["email"]:
+        recipients = []
+        if row["email"]: recipients.append(row["email"])
+        if row["parent_email"]: recipients.append(row["parent_email"])
+        
+        if not recipients:
             continue
+            
         if row["percentage"] < threshold:
             body = (
-                f"Hello {row['student_name']},\n\n"
-                f"Your current attendance is {row['percentage']}%, which is below the minimum required threshold of {threshold}% for this course.\n"
-                "Please attend classes regularly and check your attendance dashboard for details.\n\n"
+                f"Hello {row['student_name']} and Parent/Guardian,\n\n"
+                f"The current attendance for {row['student_name']} is {row['percentage']}%, which is below the minimum required threshold of {threshold}%.\n"
+                "Please attend classes regularly and check the attendance dashboard for details.\n\n"
                 "If you have any questions, contact your instructor.\n\n"
                 "Best regards,\n"
                 "Attendance Management Team"
@@ -509,23 +515,26 @@ def notify_low_attendance(db, student_ids):
             html_body = (
                 f"<div style='font-family:Arial,sans-serif;line-height:1.6;color:#1f2937'>"
                 f"<h2 style='margin-bottom:8px;color:#ef476f'>Low Attendance Alert</h2>"
-                f"<p>Hello <strong>{row['student_name']}</strong>,</p>"
-                f"<p>Your current attendance is <strong>{row['percentage']}%</strong>, which is below the required threshold of <strong>{threshold}%</strong>.</p>"
+                f"<p>Hello <strong>{row['student_name']} and Parent/Guardian</strong>,</p>"
+                f"<p>The current attendance for <strong>{row['student_name']}</strong> is <strong>{row['percentage']}%</strong>, which is below the required threshold of <strong>{threshold}%</strong>.</p>"
                 "<p>Please attend classes regularly and check your dashboard for details.</p>"
                 "<p style='margin-top:16px'>Best regards,<br>Attendance Management Team</p>"
                 "</div>"
             )
-            if send_email(
-                subject=f"Low Attendance Alert: {row['percentage']}%",
-                recipient=row["email"],
-                body=body,
-                html_body=html_body,
-            ):
-                emailed_students.append({
-                    "name": row["student_name"],
-                    "email": row["email"],
-                    "percentage": row["percentage"],
-                })
+            
+            # Send to all recipients
+            for rec in recipients:
+                if send_email(
+                    subject=f"Low Attendance Alert: {row['percentage']}%",
+                    recipient=rec,
+                    body=body,
+                    html_body=html_body,
+                ):
+                    emailed_students.append({
+                        "name": row["student_name"],
+                        "email": rec,
+                        "percentage": row["percentage"],
+                    })
 
     return emailed_students
 
@@ -603,6 +612,9 @@ def init_db(db=None):
             enrollment TEXT UNIQUE NOT NULL,
             branch_id INTEGER NOT NULL,
             email TEXT,
+            parent_email TEXT,
+            current_year INTEGER DEFAULT 1,
+            current_semester INTEGER DEFAULT 1,
             import_order INTEGER
         );
         """)
@@ -691,6 +703,9 @@ def init_db(db=None):
             enrollment TEXT UNIQUE NOT NULL,
             branch_id INTEGER NOT NULL,
             email TEXT,
+            parent_email TEXT,
+            current_year INTEGER DEFAULT 1,
+            current_semester INTEGER DEFAULT 1,
             import_order INTEGER
         );
 
@@ -722,6 +737,9 @@ def init_db(db=None):
         _ensure_column(db, "attendance", "subject_name", "TEXT")
         _ensure_column(db, "attendance", "period", "INTEGER DEFAULT 1")
         _ensure_column(db, "students", "import_order", "INTEGER")
+        _ensure_column(db, "students", "parent_email", "TEXT")
+        _ensure_column(db, "students", "current_year", "INTEGER DEFAULT 1")
+        _ensure_column(db, "students", "current_semester", "INTEGER DEFAULT 1")
         _ensure_column(db, "users", "student_id", "INTEGER")
         _ensure_column(db, "branches", "location", "TEXT")
         
@@ -1702,6 +1720,69 @@ def manage_teachers():
             except: pass
 
 
+@app.route("/admin/academic", methods=["GET", "POST"])
+@login_required
+@admin_required
+def admin_academic():
+    db = None
+    try:
+        db = get_db()
+        placeholder = get_placeholder()
+        
+        if request.method == "POST":
+            action = request.form.get("action")
+            
+            if action == "promote_semester":
+                # Promote all students to next semester. If they are in sem 2, move to sem 1 of next year.
+                # SQLite and Postgres handle this slightly differently, but standard SQL works.
+                db.execute("""
+                    UPDATE students 
+                    SET 
+                        current_year = CASE WHEN current_semester = 2 THEN current_year + 1 ELSE current_year END,
+                        current_semester = CASE WHEN current_semester = 1 THEN 2 ELSE 1 END
+                """)
+                db.commit()
+                flash("All students have been promoted to the next semester successfully.", "success")
+                
+            elif action == "promote_year":
+                # Promote all students to next year, reset semester to 1
+                db.execute("UPDATE students SET current_year = current_year + 1, current_semester = 1")
+                db.commit()
+                flash("All students have been promoted to the next academic year successfully.", "success")
+                
+            elif action == "update_student":
+                student_id = request.form.get("student_id")
+                new_year = request.form.get("current_year")
+                new_sem = request.form.get("current_semester")
+                if student_id and new_year and new_sem:
+                    db.execute(f"UPDATE students SET current_year = {placeholder}, current_semester = {placeholder} WHERE id = {placeholder}", (new_year, new_sem, student_id))
+                    db.commit()
+                    flash("Student academic status updated.", "success")
+                    
+            elif action == "trigger_warnings":
+                all_students = db.execute("SELECT id FROM students").fetchall()
+                student_ids = [row_get(s, "id") for s in all_students]
+                if student_ids:
+                    dispatch_low_attendance_notifications(student_ids)
+                    flash("Automated warnings triggered. Emails are being sent in the background to students below the attendance threshold.", "success")
+                else:
+                    flash("No students found to check.", "warning")
+
+        # Fetch stats
+        stats = db.execute("SELECT current_year, current_semester, COUNT(*) as count FROM students GROUP BY current_year, current_semester ORDER BY current_year, current_semester").fetchall()
+        students = db.execute("SELECT id, name, enrollment, current_year, current_semester FROM students ORDER BY current_year, current_semester, name").fetchall()
+        
+        return render_template("admin_academic.html", stats=stats, students=students)
+    except Exception as e:
+        print(f"[admin_academic] ERROR: {repr(e)}")
+        flash("Academic management is temporarily unavailable.", "error")
+        return redirect(url_for("dashboard"))
+    finally:
+        if db:
+            try: db.close()
+            except: pass
+
+
 @app.route("/upload_students", methods=["GET", "POST"])
 @login_required
 @admin_required
@@ -2420,11 +2501,14 @@ def students():
             enrollment = _normalize_enrollment(request.form.get("enrollment"))
             branch_id = request.form.get("branch_id", "").strip()
             email = request.form.get("email", "").strip()
+            parent_email = request.form.get("parent_email", "").strip()
 
             if not name or not enrollment or not branch_id:
                 flash("Name, enrollment, and branch are required.", "error")
             elif email and not is_valid_email(email):
                 flash("Please enter a valid email address.", "error")
+            elif parent_email and not is_valid_email(parent_email):
+                flash("Please enter a valid parent email address.", "error")
             else:
                 existing = db.execute(f"SELECT id FROM students WHERE enrollment = {placeholder}", (enrollment,)).fetchone()
                 if existing:
@@ -2434,12 +2518,12 @@ def students():
                         if str(app.config.get("DATABASE", "")).startswith("postgres"):
                             max_order_row = db.execute("SELECT COALESCE(MAX(import_order), 0) AS max_import_order FROM students").fetchone()
                             next_import_order = int(row_get(max_order_row, "max_import_order", 0) or 0) + 1
-                            cur = db.execute(f"INSERT INTO students (name, enrollment, email, branch_id, import_order) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}) RETURNING id", (name, enrollment, email or None, branch_id, next_import_order))
+                            cur = db.execute(f"INSERT INTO students (name, enrollment, email, parent_email, branch_id, import_order) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}) RETURNING id", (name, enrollment, email or None, parent_email or None, branch_id, next_import_order))
                             student_id = cur.fetchone()[0]
                         else:
                             max_order_row = db.execute("SELECT COALESCE(MAX(import_order), 0) AS max_import_order FROM students").fetchone()
                             next_import_order = int(row_get(max_order_row, "max_import_order", 0) or 0) + 1
-                            cur = db.execute(f"INSERT INTO students (name, enrollment, email, branch_id, import_order) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})", (name, enrollment, email or None, branch_id, next_import_order))
+                            cur = db.execute(f"INSERT INTO students (name, enrollment, email, parent_email, branch_id, import_order) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})", (name, enrollment, email or None, parent_email or None, branch_id, next_import_order))
                             student_id = cur.lastrowid
                         
                         db.execute(f"INSERT INTO users (username, password, role, student_id) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder})", (enrollment, generate_password_hash(enrollment[-4:]), "student", student_id))
@@ -3010,8 +3094,49 @@ def student_dashboard():
             student_qr_data_uri = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
         except: pass
 
+        # Calculate subject-wise attendance analytics
+        subject_analytics = []
+        for subj in subjects:
+            subj_id = row_get(subj, "id")
+            subj_name = row_get(subj, "name")
+            
+            # Total conducted for this subject
+            s_total_q = f"SELECT COUNT(*) FROM (SELECT 1 FROM attendance WHERE branch_id = {placeholder} AND subject_id = {placeholder} GROUP BY date, subject_id, branch_id, period) sub"
+            s_total = db.execute(s_total_q, (row_get(student, "branch_id"), subj_id)).fetchone()[0]
+            
+            if s_total > 0:
+                s_present = len([a for a in attendance_records if row_get(a, "subject_id") == subj_id and row_get(a, "status") == "Present"])
+                subject_analytics.append({
+                    "subject": subj_name,
+                    "percentage": round((s_present / s_total) * 100, 1)
+                })
+
+        # Calculate monthly attendance analytics
+        monthly_analytics_raw = {}
+        for record in attendance_records:
+            date_str = row_get(record, "date")
+            if not date_str: continue
+            month_prefix = date_str[:7] # YYYY-MM
+            if month_prefix not in monthly_analytics_raw:
+                monthly_analytics_raw[month_prefix] = {"present": 0, "total": 0}
+            
+            # We can't easily get total conducted per month per student from just attendance_records unless we query it.
+            # But we can approximate based on recorded attendance for this student:
+            monthly_analytics_raw[month_prefix]["total"] += 1
+            if row_get(record, "status") == "Present":
+                monthly_analytics_raw[month_prefix]["present"] += 1
+
+        monthly_analytics = []
+        for month in sorted(monthly_analytics_raw.keys()):
+            data = monthly_analytics_raw[month]
+            if data["total"] > 0:
+                monthly_analytics.append({
+                    "month": month,
+                    "percentage": round((data["present"] / data["total"]) * 100, 1)
+                })
+
         db.close()
-        return render_template("student_dashboard.html", student=student, attendance_records=attendance_records, total_classes=total_conducted, present_count=present, absent_count=absent, percentage=percentage, subjects=subjects, selected_subject_id=selected_subject_id, student_qr_data_uri=student_qr_data_uri)
+        return render_template("student_dashboard.html", student=student, attendance_records=attendance_records, total_classes=total_conducted, present_count=present, absent_count=absent, percentage=percentage, subjects=subjects, selected_subject_id=selected_subject_id, student_qr_data_uri=student_qr_data_uri, subject_analytics=subject_analytics, monthly_analytics=monthly_analytics)
     except Exception as e:
         print(f"[student_dashboard] ERROR: {repr(e)}")
         if db:
