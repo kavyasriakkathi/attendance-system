@@ -792,8 +792,9 @@ def init_db(db=None):
         _ensure_column(db, "students", "current_semester", "INTEGER DEFAULT 1")
         _ensure_column(db, "users", "student_id", "INTEGER")
         _ensure_column(db, "branches", "location", "TEXT")
-        _ensure_column(db, "teachers", "name", "TEXT")
+        _ensure_column(db, "teachers", "name", "TEXT NOT NULL")
         _ensure_column(db, "teachers", "subject_id", "INTEGER")
+        _ensure_column(db, "teachers", "subject_name", "TEXT")
         
         # Drop the NOT NULL constraint on teachers.subject_name so new inserts
         # that use subject_id instead of subject_name don't violate the constraint.
@@ -858,20 +859,24 @@ def init_db(db=None):
             db.execute("""
                 CREATE TABLE IF NOT EXISTS teachers (
                     id SERIAL PRIMARY KEY,
+                    name TEXT NOT NULL,
                     username TEXT UNIQUE NOT NULL,
                     password TEXT NOT NULL,
-                    subject_name TEXT NOT NULL,
-                    branch_id INTEGER NOT NULL
+                    subject_id INTEGER,
+                    branch_id INTEGER NOT NULL,
+                    subject_name TEXT
                 )
             """)
         else:
             db.execute("""
                 CREATE TABLE IF NOT EXISTS teachers (
                     id INTEGER PRIMARY KEY,
+                    name TEXT NOT NULL,
                     username TEXT UNIQUE NOT NULL,
                     password TEXT NOT NULL,
-                    subject_name TEXT NOT NULL,
-                    branch_id INTEGER NOT NULL
+                    subject_id INTEGER,
+                    branch_id INTEGER NOT NULL,
+                    subject_name TEXT
                 )
             """)
     except Exception as upgrade_error:
@@ -1741,7 +1746,9 @@ def manage_teachers():
                     else:
                         # Look up subject name for backward compatibility with old schema
                         sub_row = db.execute(f"SELECT name FROM subjects WHERE id = {placeholder}", (subject_id,)).fetchone()
-                        subject_name_val = row_get(sub_row, "name") or ""
+                        subject_name_val = row_get(sub_row, "name") if sub_row else ""
+                        if not subject_name_val:
+                            subject_name_val = ""  # Ensure never None/NULL
                         try:
                             db.execute(
                                 f"INSERT INTO teachers (name, username, password, subject_id, subject_name, branch_id) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})",
@@ -1768,10 +1775,15 @@ def manage_teachers():
                     if dup:
                         flash(f"Username '{username}' is already taken by another teacher.", "error")
                     else:
+                        # Look up subject name to maintain backward compatibility
+                        sub_row = db.execute(f"SELECT name FROM subjects WHERE id = {placeholder}", (subject_id,)).fetchone()
+                        subject_name_val = row_get(sub_row, "name") if sub_row else ""
+                        if not subject_name_val:
+                            subject_name_val = ""
                         try:
                             db.execute(
-                                f"UPDATE teachers SET name = {placeholder}, username = {placeholder}, subject_id = {placeholder}, branch_id = {placeholder} WHERE id = {placeholder}",
-                                (name, username, subject_id, branch_id, teacher_id)
+                                f"UPDATE teachers SET name = {placeholder}, username = {placeholder}, subject_id = {placeholder}, subject_name = {placeholder}, branch_id = {placeholder} WHERE id = {placeholder}",
+                                (name, username, subject_id, subject_name_val, branch_id, teacher_id)
                             )
                             db.commit()
                             flash(f"Teacher '{name}' updated successfully.", "success")
