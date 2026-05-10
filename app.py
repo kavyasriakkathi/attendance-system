@@ -795,6 +795,21 @@ def init_db(db=None):
         _ensure_column(db, "teachers", "name", "TEXT")
         _ensure_column(db, "teachers", "subject_id", "INTEGER")
         
+        # Drop the NOT NULL constraint on teachers.subject_name so new inserts
+        # that use subject_id instead of subject_name don't violate the constraint.
+        if is_postgres:
+            try:
+                db.execute("SAVEPOINT drop_subject_name_notnull")
+                db.execute("ALTER TABLE teachers ALTER COLUMN subject_name DROP NOT NULL")
+                db.execute("RELEASE SAVEPOINT drop_subject_name_notnull")
+                db.commit()
+            except Exception as e:
+                print(f"[DB] subject_name NOT NULL drop skipped: {repr(e)}")
+                try:
+                    db.execute("ROLLBACK TO SAVEPOINT drop_subject_name_notnull")
+                    db.execute("RELEASE SAVEPOINT drop_subject_name_notnull")
+                except Exception: pass
+        
         db.commit() # Commit column additions before index creation
         
         # Upgrade index if it doesn't support period
@@ -1724,10 +1739,13 @@ def manage_teachers():
                     if existing:
                         flash(f"Username '{username}' is already taken. Please choose a different username.", "error")
                     else:
+                        # Look up subject name for backward compatibility with old schema
+                        sub_row = db.execute(f"SELECT name FROM subjects WHERE id = {placeholder}", (subject_id,)).fetchone()
+                        subject_name_val = row_get(sub_row, "name") or ""
                         try:
                             db.execute(
-                                f"INSERT INTO teachers (name, username, password, subject_id, branch_id) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})",
-                                (name, username, generate_password_hash(password), subject_id, branch_id)
+                                f"INSERT INTO teachers (name, username, password, subject_id, subject_name, branch_id) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})",
+                                (name, username, generate_password_hash(password), subject_id, subject_name_val, branch_id)
                             )
                             db.commit()
                             flash(f"Teacher '{name}' added successfully. They can now log in with username: {username}", "success")
