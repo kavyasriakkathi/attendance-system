@@ -731,6 +731,12 @@ def init_db(db=None):
         try:
             db.execute("DROP INDEX IF EXISTS idx_attendance_student_subject_date")
             db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_attendance_student_subject_date_period ON attendance(student_id, subject_id, date, period)")
+            
+            # Scalability: Add indexes for long-term storage
+            db.execute("CREATE INDEX IF NOT EXISTS idx_attendance_date ON attendance(date)")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_attendance_teacher ON attendance(teacher_id)")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_attendance_subject ON attendance(subject_id)")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_attendance_student ON attendance(student_id)")
             db.commit()
         except Exception as idx_error:
             print(f"[DB] index upgrade failed: {repr(idx_error)}")
@@ -1603,13 +1609,18 @@ def delete_subject():
         db = get_db()
         placeholder = get_placeholder()
 
-        # Delete associated attendance records first to avoid foreign key constraints
-        db.execute(f"DELETE FROM attendance WHERE subject_id = {placeholder}", (subject_id,))
+        # Data Safety: Prevent accidental deletion if attendance records exist
+        attendance_count_row = db.execute(f"SELECT COUNT(*) as count FROM attendance WHERE subject_id = {placeholder}", (subject_id,)).fetchone()
+        attendance_count = row_get(attendance_count_row, 'count', 0)
+        
+        if attendance_count > 0:
+            flash(f"Cannot delete subject because it has {attendance_count} attendance records. This ensures long-term data safety.", "error")
+            return redirect(url_for("subjects"))
+
         # Delete the subject
         db.execute(f"DELETE FROM subjects WHERE id = {placeholder}", (subject_id,))
-        
         db.commit()
-        flash("Subject and associated attendance records deleted successfully.", "success")
+        flash("Subject deleted successfully.", "success")
     except Exception as e:
         if db:
             try: db.rollback()
@@ -1658,9 +1669,16 @@ def manage_teachers():
             elif action == "delete":
                 teacher_id = request.form.get("teacher_id")
                 if teacher_id:
-                    db.execute(f"DELETE FROM teachers WHERE id = {placeholder}", (teacher_id,))
-                    db.commit()
-                    flash("Teacher deleted successfully.", "success")
+                    # Data Safety: Prevent accidental deletion if attendance records exist
+                    attendance_count_row = db.execute(f"SELECT COUNT(*) as count FROM attendance WHERE teacher_id = {placeholder}", (teacher_id,)).fetchone()
+                    attendance_count = row_get(attendance_count_row, 'count', 0)
+                    
+                    if attendance_count > 0:
+                        flash(f"Cannot delete teacher because they have {attendance_count} attendance records. This ensures long-term data safety.", "error")
+                    else:
+                        db.execute(f"DELETE FROM teachers WHERE id = {placeholder}", (teacher_id,))
+                        db.commit()
+                        flash("Teacher deleted successfully.", "success")
 
         teachers_list = db.execute("""
             SELECT t.*, s.name AS subject_name, b.name AS branch_name 
@@ -2492,13 +2510,20 @@ def delete_student():
         sid = row_get(target, 'id')
         enroll_val = row_get(target, 'enrollment') or ''
 
-        # Perform deletion inside a transaction. Remove dependent records first.
+        # Data Safety: Prevent accidental deletion if attendance records exist
+        attendance_count_row = db.execute(f"SELECT COUNT(*) as count FROM attendance WHERE student_id = {placeholder}", (sid,)).fetchone()
+        attendance_count = row_get(attendance_count_row, 'count', 0)
+        
+        if attendance_count > 0:
+            flash(f"Cannot delete student {enroll_val} because they have {attendance_count} attendance records. This ensures long-term data safety.", 'error')
+            return redirect(url_for('students'))
+
+        # Perform deletion inside a transaction for users and students only
         try:
-            db.execute(f"DELETE FROM attendance WHERE student_id = {placeholder}", (sid,))
             db.execute(f"DELETE FROM users WHERE student_id = {placeholder}", (sid,))
             db.execute(f"DELETE FROM students WHERE id = {placeholder}", (sid,))
             db.commit()
-            flash(f"Student {enroll_val} and all their records deleted successfully.", 'success')
+            flash(f"Student {enroll_val} deleted successfully.", 'success')
         except Exception as e:
             try:
                 db.rollback()
@@ -3329,6 +3354,8 @@ def get_report_filters():
         "from_date": request.args.get("from_date") or request.form.get("from_date"),
         "to_date": request.args.get("to_date") or request.form.get("to_date"),
         "search": request.args.get("search") or request.form.get("search"),
+        "year": request.args.get("year") or request.form.get("year"),
+        "semester": request.args.get("semester") or request.form.get("semester"),
     }
 
 
@@ -3365,6 +3392,23 @@ def fetch_report_records(db, filters):
         like_op = "ILIKE" if str(app.config.get("DATABASE", "")).startswith("postgres") else "LIKE"
         clauses.append(f"(students.name {like_op} {placeholder} OR students.enrollment {like_op} {placeholder})")
         params.extend([s, s])
+
+    if filters.get("year"):
+        like_op = "ILIKE" if str(app.config.get("DATABASE", "")).startswith("postgres") else "LIKE"
+        clauses.append(f"attendance.date {like_op} {placeholder}")
+        params.append(f"{filters['year']}-%")
+    
+    if filters.get("semester"):
+        sem = filters["semester"]
+        like_op = "ILIKE" if str(app.config.get("DATABASE", "")).startswith("postgres") else "LIKE"
+        if sem == "1":
+            # Semester 1: Jan to Jun
+            clauses.append(f"(attendance.date {like_op} {placeholder} OR attendance.date {like_op} {placeholder} OR attendance.date {like_op} {placeholder} OR attendance.date {like_op} {placeholder} OR attendance.date {like_op} {placeholder} OR attendance.date {like_op} {placeholder})")
+            params.extend(["%-01-%", "%-02-%", "%-03-%", "%-04-%", "%-05-%", "%-06-%"])
+        elif sem == "2":
+            # Semester 2: Jul to Dec
+            clauses.append(f"(attendance.date {like_op} {placeholder} OR attendance.date {like_op} {placeholder} OR attendance.date {like_op} {placeholder} OR attendance.date {like_op} {placeholder} OR attendance.date {like_op} {placeholder} OR attendance.date {like_op} {placeholder})")
+            params.extend(["%-07-%", "%-08-%", "%-09-%", "%-10-%", "%-11-%", "%-12-%"])
 
     if clauses:
         query += " WHERE " + " AND ".join(clauses)
