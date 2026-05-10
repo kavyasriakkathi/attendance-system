@@ -301,7 +301,7 @@ def get_teacher_context(db=None):
             return None
 
         branch_id = row_get(teacher, "branch_id")
-        subject_name = (row_get(teacher, "subject_name") or "").strip()
+        subject_id = row_get(teacher, "subject_id")
 
         branch = None
         if branch_id is not None:
@@ -311,26 +311,23 @@ def get_teacher_context(db=None):
             ).fetchone()
 
         subject = None
-        if subject_name:
-            if branch_id is not None:
-                subject = db.execute(
-                    f"SELECT id, name, branch_id FROM subjects WHERE LOWER(name) = LOWER({placeholder}) AND branch_id = {placeholder}",
-                    (subject_name, branch_id),
-                ).fetchone()
-            if not subject:
-                subject = db.execute(
-                    f"SELECT id, name, branch_id FROM subjects WHERE LOWER(name) = LOWER({placeholder}) ORDER BY id LIMIT 1",
-                    (subject_name,),
-                ).fetchone()
+        if subject_id:
+            subject = db.execute(
+                f"SELECT id, name, branch_id FROM subjects WHERE id = {placeholder}",
+                (subject_id,),
+            ).fetchone()
+        
+        subject_name = row_get(subject, "name") if subject else ""
 
         return {
             "teacher": teacher,
             "teacher_id": row_get(teacher, "id"),
+            "name": row_get(teacher, "name"),
             "username": row_get(teacher, "username"),
             "subject_name": subject_name,
             "branch_id": branch_id,
             "branch_name": row_get(branch, "name") if branch else None,
-            "subject_id": row_get(subject, "id") if subject else None,
+            "subject_id": subject_id,
             "subject_row": subject,
         }
     finally:
@@ -583,9 +580,10 @@ def init_db(db=None):
         db.execute("""
         CREATE TABLE IF NOT EXISTS teachers (
             id SERIAL PRIMARY KEY,
+            name TEXT NOT NULL,
             username TEXT UNIQUE NOT NULL,
             password TEXT NOT NULL,
-            subject_name TEXT NOT NULL,
+            subject_id INTEGER,
             branch_id INTEGER NOT NULL
         );
         """)
@@ -657,10 +655,13 @@ def init_db(db=None):
         db.executescript("""
         CREATE TABLE IF NOT EXISTS teachers (
             id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
             username TEXT UNIQUE NOT NULL,
             password TEXT NOT NULL,
-            subject_name TEXT NOT NULL,
-            branch_id INTEGER NOT NULL
+            subject_id INTEGER,
+            branch_id INTEGER NOT NULL,
+            FOREIGN KEY(subject_id) REFERENCES subjects(id),
+            FOREIGN KEY(branch_id) REFERENCES branches(id)
         );
 
         CREATE TABLE IF NOT EXISTS users (
@@ -800,20 +801,43 @@ def init_db(db=None):
             ("teacher1", generate_password_hash("1234"), "teacher"),
         )
 
-    default_teacher_seed = db.execute(
-        f"SELECT id FROM teachers WHERE username = {placeholder}",
-        ("teacher1",),
-    ).fetchone()
-    if not default_teacher_seed:
+    # ✅ Ensure at least one branch exists
+    default_branch = db.execute(f"SELECT id FROM branches ORDER BY id LIMIT 1").fetchone()
+    if not default_branch:
+        db.execute(f"INSERT INTO branches (name, location) VALUES ({placeholder}, {placeholder})", ("General Branch", "Main Campus"))
         default_branch = db.execute(f"SELECT id FROM branches ORDER BY id LIMIT 1").fetchone()
-        default_branch_id = row_get(default_branch, "id") if default_branch else 1
-        try:
-            db.execute(
-                f"INSERT INTO teachers (username, password, subject_name, branch_id) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder})",
-                ("teacher1", generate_password_hash("1234"), "Data Structures", default_branch_id),
-            )
-        except Exception as teacher_seed_error:
-            print(f"[DB] teacher seed skipped: {repr(teacher_seed_error)}")
+    
+    default_branch_id = row_get(default_branch, "id")
+
+    # ✅ Ensure sample subjects exist
+    sample_subjects = ["Mathematics", "Physics", "Chemistry", "English", "Programming", "Data Structures"]
+    for sub_name in sample_subjects:
+        existing_sub = db.execute(f"SELECT id FROM subjects WHERE name = {placeholder}", (sub_name,)).fetchone()
+        if not existing_sub:
+            db.execute(f"INSERT INTO subjects (name, branch_id) VALUES ({placeholder}, {placeholder})", (sub_name, default_branch_id))
+
+    # ✅ Seed sample teacher accounts
+    teachers_to_seed = [
+        ("math_teacher", "math123", "Mathematics", "Math Teacher"),
+        ("physics_teacher", "phy123", "Physics", "Physics Teacher"),
+        ("chemistry_teacher", "chem123", "Chemistry", "Chemistry Teacher"),
+        ("teacher1", "1234", "Data Structures", "Default Teacher"),
+    ]
+
+    for username, password, sub_name, teacher_display_name in teachers_to_seed:
+        existing_teacher = db.execute(f"SELECT id FROM teachers WHERE username = {placeholder}", (username,)).fetchone()
+        if not existing_teacher:
+            # Find subject id
+            sub_row = db.execute(f"SELECT id FROM subjects WHERE name = {placeholder}", (sub_name,)).fetchone()
+            sub_id = row_get(sub_row, "id")
+            if sub_id:
+                try:
+                    db.execute(
+                        f"INSERT INTO teachers (name, username, password, subject_id, branch_id) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})",
+                        (teacher_display_name, username, generate_password_hash(password), sub_id, default_branch_id),
+                    )
+                except Exception as e:
+                    print(f"[DB] Failed to seed teacher {username}: {repr(e)}")
 
     # ✅ Default low attendance threshold setting
     if not db.execute(f"SELECT id FROM settings WHERE key = {placeholder}", ("low_attendance_threshold",)).fetchone():
@@ -1597,6 +1621,67 @@ def delete_subject():
             try: db.close()
             except: pass
     return redirect(url_for("subjects"))
+
+
+@app.route("/admin/teachers", methods=["GET", "POST"])
+@login_required
+@admin_required
+def manage_teachers():
+    db = None
+    try:
+        db = get_db()
+        placeholder = get_placeholder()
+        
+        if request.method == "POST":
+            action = request.form.get("action")
+            if action == "add":
+                name = request.form.get("name")
+                username = request.form.get("username")
+                password = request.form.get("password")
+                subject_id = request.form.get("subject_id")
+                branch_id = request.form.get("branch_id")
+                
+                if name and username and password and subject_id and branch_id:
+                    try:
+                        db.execute(
+                            f"INSERT INTO teachers (name, username, password, subject_id, branch_id) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})",
+                            (name, username, generate_password_hash(password), subject_id, branch_id)
+                        )
+                        db.commit()
+                        flash("Teacher added successfully.", "success")
+                    except Exception as e:
+                        db.rollback()
+                        flash(f"Error adding teacher: {repr(e)}", "error")
+                else:
+                    flash("All fields are required.", "error")
+            
+            elif action == "delete":
+                teacher_id = request.form.get("teacher_id")
+                if teacher_id:
+                    db.execute(f"DELETE FROM teachers WHERE id = {placeholder}", (teacher_id,))
+                    db.commit()
+                    flash("Teacher deleted successfully.", "success")
+
+        teachers_list = db.execute("""
+            SELECT t.*, s.name AS subject_name, b.name AS branch_name 
+            FROM teachers t 
+            LEFT JOIN subjects s ON t.subject_id = s.id 
+            LEFT JOIN branches b ON t.branch_id = b.id 
+            ORDER BY t.name
+        """).fetchall()
+        
+        subjects_list = db.execute("SELECT id, name FROM subjects ORDER BY name").fetchall()
+        branches_list = db.execute("SELECT id, name FROM branches ORDER BY name").fetchall()
+        
+        return render_template("admin_teachers.html", teachers=teachers_list, subjects=subjects_list, branches=branches_list)
+    except Exception as e:
+        print(f"[manage_teachers] ERROR: {repr(e)}")
+        flash("Teacher management is temporarily unavailable.", "error")
+        return redirect(url_for("dashboard"))
+    finally:
+        if db:
+            try: db.close()
+            except: pass
 
 
 @app.route("/upload_students", methods=["GET", "POST"])
@@ -2596,7 +2681,7 @@ def teacher_login():
             db = get_db()
             placeholder = get_placeholder()
             user = db.execute(
-                f"SELECT id, username, password, subject_name, branch_id FROM teachers WHERE username = {placeholder}",
+                f"SELECT id, username, password, name, subject_id, branch_id FROM teachers WHERE username = {placeholder}",
                 (username,),
             ).fetchone()
 
