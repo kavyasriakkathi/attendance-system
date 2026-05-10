@@ -117,7 +117,22 @@ def get_db():
                 self._conn = conn
             def execute(self, query, params=()):
                 cur = self._conn.cursor(cursor_factory=DictCursor)
-                cur.execute(query, params)
+                try:
+                    cur.execute(query, params)
+                except Exception as ex:
+                    # If the connection is in a failed transaction state, roll back
+                    # and retry once. This prevents InFailedSqlTransaction from
+                    # cascading into login, dashboard, and every other route.
+                    if "InFailedSqlTransaction" in type(ex).__name__ or "current transaction is aborted" in str(ex):
+                        print(f"[DB] Aborted transaction detected — rolling back and retrying.")
+                        try:
+                            self._conn.rollback()
+                        except Exception:
+                            pass
+                        cur = self._conn.cursor(cursor_factory=DictCursor)
+                        cur.execute(query, params)
+                    else:
+                        raise
                 return cur
             def commit(self): return self._conn.commit()
             def rollback(self): return self._conn.rollback()
@@ -1030,6 +1045,13 @@ def dashboard():
     try:
         db = get_db()
         placeholder = get_placeholder()
+        
+        # Safety: clear any stale aborted transaction (PostgreSQL).
+        if str(app.config.get("DATABASE", "")).startswith("postgres"):
+            try:
+                db.rollback()
+            except Exception:
+                pass
 
         def _safe_scalar(query, params=(), default=0):
             try:
