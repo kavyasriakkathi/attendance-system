@@ -3,9 +3,19 @@
 <div class="card" style="max-width: 1200px; margin: 0 auto;">
     <h1 style="margin-top: 0;"><i class="fa-solid fa-calendar-check"></i> Mark Attendance</h1>
     <p class="notice">
-        You are marking attendance only for <strong>{{ teacher.subject_name }}</strong>
-        in <strong>{{ teacher.branch_name or 'your assigned department' }}</strong>.
+        You are marking attendance for <strong>{{ teacher.subject_name }}</strong>
+        in <strong>{{ teacher.current_branch_name or 'your assigned branch' }}</strong>.
     </p>
+
+    {% if teacher.assigned_branches_count > 1 %}
+    <div style="background: #fffbeb; border: 1px solid #fbbf24; border-radius: 8px; padding: 12px 16px; margin-bottom: 16px; display: flex; align-items: center; gap: 10px;">
+        <i class="fa-solid fa-info-circle" style="color: #f59e0b;"></i>
+        <div>
+            <strong style="color: #92400e;">Marking for branch: {{ teacher.current_branch_name }}</strong>
+            <a href="{{ url_for('teacher_select_branch') }}" style="margin-left: 12px; color: #1f2937; text-decoration: underline; font-size: 0.9rem;">Switch branch</a>
+        </div>
+    </div>
+    {% endif %}
 
     <form method="get" class="form-row" style="margin-bottom: 18px;">
         <div>
@@ -13,8 +23,8 @@
             <input type="text" value="{{ teacher.subject_name }}" readonly />
         </div>
         <div>
-            <label>Department</label>
-            <input type="text" value="{{ teacher.branch_name or 'Assigned Branch' }}" readonly />
+            <label>Branch</label>
+            <input type="text" value="{{ teacher.current_branch_name or 'Your Branch' }}" readonly />
         </div>
         <div>
             <label>Date</label>

@@ -2,7 +2,14 @@
 {% block content %}
 <div class="card">
     <h1 style="margin-top: 0;"><i class="fa-solid fa-rectangle-list"></i> My Attendance Records</h1>
-    <p class="notice">Subject: <strong>{{ teacher.subject_name }}</strong> | Department: <strong>{{ teacher.branch_name or 'Assigned Branch' }}</strong></p>
+    <p class="notice">Subject: <strong>{{ teacher.subject_name }}</strong> | Branch: <strong>{{ teacher.current_branch_name or 'Your Branch' }}</strong></p>
+
+    {% if teacher.assigned_branches_count > 1 %}
+    <div style="background: #f0fdf4; border: 1px solid #86efac; border-radius: 8px; padding: 12px 16px; margin-bottom: 16px;">
+        <span style="color: #166534;">Showing records for <strong>{{ teacher.current_branch_name }}</strong></span>
+        <a href="{{ url_for('teacher_select_branch') }}" style="margin-left: 12px; color: #0369a1; text-decoration: underline; font-size: 0.9rem;">Switch branch</a>
+    </div>
+    {% endif %}
 
     <form method="get" class="form-row" style="margin-bottom: 18px;">
         <div style="flex-basis: 100%;">

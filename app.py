@@ -339,14 +339,30 @@ def get_teacher_context(db=None):
         if not teacher:
             return None
 
-        branch_id = row_get(teacher, "branch_id")
         subject_id = row_get(teacher, "subject_id")
-
-        branch = None
-        if branch_id is not None:
-            branch = db.execute(
+        
+        # Get current selected branch from session (or first available branch)
+        current_branch_id = session.get("teacher_branch_id")
+        
+        # Fetch all assigned branches for this teacher
+        assigned_branches = db.execute(f"""
+            SELECT b.id, b.name, b.location
+            FROM branches b
+            JOIN teacher_branches tb ON b.id = tb.branch_id
+            WHERE tb.teacher_id = {placeholder}
+            ORDER BY b.name
+        """, (teacher_id,)).fetchall()
+        
+        # If no current branch selected, use the first one
+        if not current_branch_id and assigned_branches:
+            current_branch_id = row_get(assigned_branches[0], "id")
+        
+        # Get current branch details
+        current_branch = None
+        if current_branch_id:
+            current_branch = db.execute(
                 f"SELECT id, name FROM branches WHERE id = {placeholder}",
-                (branch_id,),
+                (current_branch_id,),
             ).fetchone()
 
         subject = None
@@ -364,10 +380,12 @@ def get_teacher_context(db=None):
             "name": row_get(teacher, "name"),
             "username": row_get(teacher, "username"),
             "subject_name": subject_name,
-            "branch_id": branch_id,
-            "branch_name": row_get(branch, "name") if branch else None,
             "subject_id": subject_id,
             "subject_row": subject,
+            "current_branch_id": current_branch_id,
+            "current_branch_name": row_get(current_branch, "name") if current_branch else None,
+            "assigned_branches": assigned_branches,
+            "assigned_branches_count": len(assigned_branches) if assigned_branches else 0,
         }
     finally:
         if created_here:
@@ -881,6 +899,60 @@ def init_db(db=None):
             """)
     except Exception as upgrade_error:
         print(f"[DB] teacher schema upgrade skipped: {repr(upgrade_error)}")
+
+    # ✅ Create teacher_branches junction table for multi-branch support
+    try:
+        if is_postgres:
+            db.execute("""
+                CREATE TABLE IF NOT EXISTS teacher_branches (
+                    id SERIAL PRIMARY KEY,
+                    teacher_id INTEGER NOT NULL,
+                    branch_id INTEGER NOT NULL,
+                    UNIQUE(teacher_id, branch_id),
+                    FOREIGN KEY(teacher_id) REFERENCES teachers(id) ON DELETE CASCADE,
+                    FOREIGN KEY(branch_id) REFERENCES branches(id) ON DELETE CASCADE
+                )
+            """)
+        else:
+            db.execute("""
+                CREATE TABLE IF NOT EXISTS teacher_branches (
+                    id INTEGER PRIMARY KEY,
+                    teacher_id INTEGER NOT NULL,
+                    branch_id INTEGER NOT NULL,
+                    UNIQUE(teacher_id, branch_id),
+                    FOREIGN KEY(teacher_id) REFERENCES teachers(id) ON DELETE CASCADE,
+                    FOREIGN KEY(branch_id) REFERENCES branches(id) ON DELETE CASCADE
+                )
+            """)
+        
+        # Migrate existing teacher-branch assignments from teachers.branch_id
+        # One-time migration: for each teacher with a branch_id, insert into teacher_branches if not already there
+        try:
+            existing_assignments = db.execute("SELECT COUNT(*) as count FROM teacher_branches").fetchone()
+            count = row_get(existing_assignments, "count", 0)
+            if count == 0:
+                # First migration - populate from teachers.branch_id
+                teachers_with_branches = db.execute("SELECT DISTINCT id, branch_id FROM teachers WHERE branch_id IS NOT NULL").fetchall()
+                for teacher_row in teachers_with_branches:
+                    t_id = row_get(teacher_row, "id")
+                    b_id = row_get(teacher_row, "branch_id")
+                    if t_id and b_id:
+                        try:
+                            db.execute(
+                                f"INSERT INTO teacher_branches (teacher_id, branch_id) VALUES ({placeholder}, {placeholder})",
+                                (t_id, b_id)
+                            )
+                        except Exception:
+                            pass  # Duplicate or other constraint - ignore
+                db.commit()
+                print("[DB] Migrated teacher-branch assignments to new junction table")
+        except Exception as migration_error:
+            print(f"[DB] teacher_branches migration skipped: {repr(migration_error)}")
+            if hasattr(db, 'rollback'): db.rollback()
+        
+        db.commit()
+    except Exception as tb_error:
+        print(f"[DB] teacher_branches table creation skipped: {repr(tb_error)}")
 
     # ✅ Admin check
     admin = db.execute(
@@ -1734,28 +1806,45 @@ def manage_teachers():
                 username = (request.form.get("username") or "").strip()
                 password = (request.form.get("password") or "").strip()
                 subject_id = request.form.get("subject_id")
-                branch_id = request.form.get("branch_id")
+                branch_ids = request.form.getlist("branch_ids")  # Multiple branches
 
-                if not all([name, username, password, subject_id, branch_id]):
-                    flash("All fields are required to add a teacher.", "error")
+                if not all([name, username, password, subject_id, branch_ids]):
+                    flash("Teacher name, username, password, subject, and at least one branch are required.", "error")
                 else:
                     # Duplicate username check
                     existing = db.execute(f"SELECT id FROM teachers WHERE username = {placeholder}", (username,)).fetchone()
                     if existing:
                         flash(f"Username '{username}' is already taken. Please choose a different username.", "error")
                     else:
-                        # Look up subject name for backward compatibility with old schema
+                        # Look up subject name for backward compatibility
                         sub_row = db.execute(f"SELECT name FROM subjects WHERE id = {placeholder}", (subject_id,)).fetchone()
                         subject_name_val = row_get(sub_row, "name") if sub_row else ""
                         if not subject_name_val:
-                            subject_name_val = ""  # Ensure never None/NULL
+                            subject_name_val = ""
                         try:
+                            # Insert teacher with first branch as legacy branch_id
+                            first_branch_id = branch_ids[0] if branch_ids else None
                             db.execute(
                                 f"INSERT INTO teachers (name, username, password, subject_id, subject_name, branch_id) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})",
-                                (name, username, generate_password_hash(password), subject_id, subject_name_val, branch_id)
+                                (name, username, generate_password_hash(password), subject_id, subject_name_val, first_branch_id)
                             )
                             db.commit()
-                            flash(f"Teacher '{name}' added successfully. They can now log in with username: {username}", "success")
+                            
+                            # Get the newly created teacher ID
+                            teacher = db.execute(f"SELECT id FROM teachers WHERE username = {placeholder}", (username,)).fetchone()
+                            new_teacher_id = row_get(teacher, "id")
+                            
+                            # Insert into teacher_branches for all selected branches
+                            for branch_id in branch_ids:
+                                try:
+                                    db.execute(
+                                        f"INSERT INTO teacher_branches (teacher_id, branch_id) VALUES ({placeholder}, {placeholder})",
+                                        (new_teacher_id, branch_id)
+                                    )
+                                except Exception:
+                                    pass  # Skip duplicate entries
+                            db.commit()
+                            flash(f"Teacher '{name}' added successfully with {len(branch_ids)} branch(es). They can now log in with username: {username}", "success")
                         except Exception as e:
                             db.rollback()
                             flash(f"Error adding teacher: {repr(e)}", "error")
@@ -1765,10 +1854,10 @@ def manage_teachers():
                 name = (request.form.get("name") or "").strip()
                 username = (request.form.get("username") or "").strip()
                 subject_id = request.form.get("subject_id")
-                branch_id = request.form.get("branch_id")
+                branch_ids = request.form.getlist("branch_ids")  # Multiple branches
 
-                if not all([teacher_id, name, username, subject_id, branch_id]):
-                    flash("All fields are required.", "error")
+                if not all([teacher_id, name, username, subject_id, branch_ids]):
+                    flash("All fields including at least one branch are required.", "error")
                 else:
                     # Check for duplicate username excluding self
                     dup = db.execute(f"SELECT id FROM teachers WHERE username = {placeholder} AND id != {placeholder}", (username, teacher_id)).fetchone()
@@ -1781,12 +1870,27 @@ def manage_teachers():
                         if not subject_name_val:
                             subject_name_val = ""
                         try:
+                            first_branch_id = branch_ids[0] if branch_ids else None
                             db.execute(
                                 f"UPDATE teachers SET name = {placeholder}, username = {placeholder}, subject_id = {placeholder}, subject_name = {placeholder}, branch_id = {placeholder} WHERE id = {placeholder}",
-                                (name, username, subject_id, subject_name_val, branch_id, teacher_id)
+                                (name, username, subject_id, subject_name_val, first_branch_id, teacher_id)
                             )
+                            
+                            # Clear existing branch assignments
+                            db.execute(f"DELETE FROM teacher_branches WHERE teacher_id = {placeholder}", (teacher_id,))
+                            
+                            # Insert new branch assignments
+                            for branch_id in branch_ids:
+                                try:
+                                    db.execute(
+                                        f"INSERT INTO teacher_branches (teacher_id, branch_id) VALUES ({placeholder}, {placeholder})",
+                                        (teacher_id, branch_id)
+                                    )
+                                except Exception:
+                                    pass  # Skip duplicates
+                            
                             db.commit()
-                            flash(f"Teacher '{name}' updated successfully.", "success")
+                            flash(f"Teacher '{name}' updated successfully with {len(branch_ids)} branch(es).", "success")
                         except Exception as e:
                             db.rollback()
                             flash(f"Error updating teacher: {repr(e)}", "error")
@@ -1827,32 +1931,66 @@ def manage_teachers():
                             db.rollback()
                             flash(f"Error deleting teacher: {repr(e)}", "error")
 
-        # Fetch teachers list — use a safe fallback query if subject_id column
-        # doesn't exist yet on the live database (gives a clearer error instead of 500)
+        # Fetch teachers list with all assigned branches
         try:
             teachers_list = db.execute("""
-                SELECT t.*, s.name AS subject_name, b.name AS branch_name 
+                SELECT t.id, t.name, t.username, t.subject_id, s.name AS subject_name,
+                       GROUP_CONCAT(b.name, ', ') AS branch_names,
+                       COUNT(tb.branch_id) AS branch_count
                 FROM teachers t 
                 LEFT JOIN subjects s ON t.subject_id = s.id 
-                LEFT JOIN branches b ON t.branch_id = b.id 
+                LEFT JOIN teacher_branches tb ON t.id = tb.teacher_id
+                LEFT JOIN branches b ON tb.branch_id = b.id
+                GROUP BY t.id, t.name, t.username, t.subject_id, s.name
                 ORDER BY t.name
             """).fetchall()
         except Exception as col_err:
-            print(f"[manage_teachers] Query fallback due to: {repr(col_err)}")
-            # Fallback: query without subject_id join in case migration hasn't run yet
-            teachers_list = db.execute("""
-                SELECT t.id, t.username, t.branch_id,
-                       COALESCE(t.name, t.username) AS name,
-                       NULL AS subject_name, b.name AS branch_name 
-                FROM teachers t 
-                LEFT JOIN branches b ON t.branch_id = b.id 
-                ORDER BY t.username
-            """).fetchall()
+            print(f"[manage_teachers] GROUP_CONCAT query fallback: {repr(col_err)}")
+            # Fallback for PostgreSQL (use string_agg instead of GROUP_CONCAT)
+            try:
+                teachers_list = db.execute("""
+                    SELECT t.id, t.name, t.username, t.subject_id, s.name AS subject_name,
+                           STRING_AGG(b.name, ', ') AS branch_names,
+                           COUNT(tb.branch_id) AS branch_count
+                    FROM teachers t 
+                    LEFT JOIN subjects s ON t.subject_id = s.id 
+                    LEFT JOIN teacher_branches tb ON t.id = tb.teacher_id
+                    LEFT JOIN branches b ON tb.branch_id = b.id
+                    GROUP BY t.id, t.name, t.username, t.subject_id, s.name
+                    ORDER BY t.name
+                """).fetchall()
+            except Exception as pg_err:
+                print(f"[manage_teachers] STRING_AGG fallback also failed: {repr(pg_err)}")
+                # Final fallback - simple query without aggregation
+                teachers_list = db.execute("""
+                    SELECT t.id, t.name, t.username, t.subject_id, s.name AS subject_name,
+                           '' AS branch_names, 0 AS branch_count
+                    FROM teachers t 
+                    LEFT JOIN subjects s ON t.subject_id = s.id 
+                    ORDER BY t.name
+                """).fetchall()
         
         subjects_list = db.execute("SELECT id, name FROM subjects ORDER BY name").fetchall()
         branches_list = db.execute("SELECT id, name FROM branches ORDER BY name").fetchall()
         
-        return render_template("admin_teachers.html", teachers=teachers_list, subjects=subjects_list, branches=branches_list)
+        # For each teacher, fetch their assigned branches
+        teacher_branches_map = {}
+        for teacher_row in teachers_list:
+            teacher_id = row_get(teacher_row, "id")
+            assigned_branches = db.execute(f"""
+                SELECT b.id, b.name
+                FROM branches b
+                JOIN teacher_branches tb ON b.id = tb.branch_id
+                WHERE tb.teacher_id = {placeholder}
+                ORDER BY b.name
+            """, (teacher_id,)).fetchall()
+            teacher_branches_map[teacher_id] = assigned_branches
+        
+        return render_template("admin_teachers.html", 
+                             teachers=teachers_list, 
+                             subjects=subjects_list, 
+                             branches=branches_list,
+                             teacher_branches_map=teacher_branches_map)
     except Exception as e:
         print(f"[manage_teachers] ERROR: {repr(e)}")
         flash("Teacher management is temporarily unavailable.", "error")
@@ -2933,19 +3071,41 @@ def teacher_login():
             db = get_db()
             placeholder = get_placeholder()
             user = db.execute(
-                f"SELECT id, username, password, name, subject_id, branch_id FROM teachers WHERE username = {placeholder}",
+                f"SELECT id, username, password, name, subject_id FROM teachers WHERE username = {placeholder}",
                 (username,),
             ).fetchone()
 
             if user and check_password_hash(row_get(user, "password"), password):
+                teacher_id = row_get(user, "id")
+                
+                # Fetch all assigned branches for this teacher
+                assigned_branches = db.execute(f"""
+                    SELECT b.id, b.name
+                    FROM branches b
+                    JOIN teacher_branches tb ON b.id = tb.branch_id
+                    WHERE tb.teacher_id = {placeholder}
+                    ORDER BY b.name
+                """, (teacher_id,)).fetchall()
+                
                 session.clear()
-                session["user_id"] = row_get(user, "id")
+                session["user_id"] = teacher_id
                 session["username"] = row_get(user, "username")
                 session["role"] = "teacher"
-                session["teacher_id"] = row_get(user, "id")
-                session["teacher_subject_name"] = row_get(user, "subject_name")
-                session["teacher_branch_id"] = row_get(user, "branch_id")
-                return redirect(url_for("teacher_dashboard"))
+                session["teacher_id"] = teacher_id
+                session["teacher_name"] = row_get(user, "name")
+                session["teacher_subject_id"] = row_get(user, "subject_id")
+                
+                # If teacher has multiple branches, show branch selection page
+                if len(assigned_branches) > 1:
+                    return redirect(url_for("teacher_select_branch"))
+                elif len(assigned_branches) == 1:
+                    session["teacher_branch_id"] = row_get(assigned_branches[0], "id")
+                    return redirect(url_for("teacher_dashboard"))
+                else:
+                    # No branches assigned - show error
+                    session.clear()
+                    flash("No branches assigned to your account. Contact admin.", "error")
+                    return render_template("teacher_login.html")
 
             flash("Invalid teacher login credentials.", "error")
 
@@ -2963,6 +3123,61 @@ def teacher_login():
     return render_template("teacher_login.html", hide_nav=True)
 
 
+@app.route("/teacher/select-branch", methods=["GET", "POST"])
+@login_required
+@teacher_required
+def teacher_select_branch():
+    """Allow teacher to select which branch to mark attendance for."""
+    db = None
+    try:
+        db = get_db()
+        teacher_id = session.get("teacher_id")
+        placeholder = get_placeholder()
+        
+        if request.method == "POST":
+            selected_branch_id = request.form.get("branch_id")
+            if selected_branch_id:
+                # Verify this branch is assigned to this teacher
+                assigned = db.execute(f"""
+                    SELECT id FROM teacher_branches 
+                    WHERE teacher_id = {placeholder} AND branch_id = {placeholder}
+                """, (teacher_id, selected_branch_id)).fetchone()
+                
+                if assigned:
+                    session["teacher_branch_id"] = selected_branch_id
+                    return redirect(url_for("teacher_dashboard"))
+                else:
+                    flash("Invalid branch selection.", "error")
+        
+        # Get all assigned branches
+        branches = db.execute(f"""
+            SELECT b.id, b.name, b.location
+            FROM branches b
+            JOIN teacher_branches tb ON b.id = tb.branch_id
+            WHERE tb.teacher_id = {placeholder}
+            ORDER BY b.name
+        """, (teacher_id,)).fetchall()
+        
+        teacher = db.execute(
+            f"SELECT name FROM teachers WHERE id = {placeholder}",
+            (teacher_id,)
+        ).fetchone()
+        
+        return render_template("teacher_select_branch.html", 
+                             branches=branches,
+                             teacher_name=row_get(teacher, "name") if teacher else "Teacher")
+    except Exception as e:
+        print(f"[teacher_select_branch] ERROR: {repr(e)}")
+        flash("Error loading branch selection.", "error")
+        return redirect(url_for("teacher_login"))
+    finally:
+        if db:
+            try:
+                db.close()
+            except Exception:
+                pass
+
+
 @app.route("/teacher/dashboard")
 @app.route("/teacher-dashboard")
 @login_required
@@ -2977,18 +3192,22 @@ def teacher_dashboard():
 
         placeholder = get_placeholder()
         subject_name = teacher["subject_name"]
-        branch_id = teacher["branch_id"]
+        current_branch_id = teacher["current_branch_id"]
         subject_row = teacher["subject_row"]
         subject_id = row_get(subject_row, "id") if subject_row else None
 
+        if not current_branch_id:
+            flash("No branch selected. Please select a branch.", "error")
+            return redirect(url_for("teacher_select_branch"))
+
         student_count = db.execute(
             f"SELECT COUNT(*) AS count FROM students WHERE branch_id = {placeholder}",
-            (branch_id,),
+            (current_branch_id,),
         ).fetchone()
 
         attendance_count = db.execute(
-            f"SELECT COUNT(*) AS count FROM attendance WHERE subject_name = {placeholder} AND branch_id = {placeholder}",
-            (subject_name, branch_id),
+            f"SELECT COUNT(*) AS count FROM attendance WHERE subject_id = {placeholder} AND branch_id = {placeholder}",
+            (subject_id, current_branch_id),
         ).fetchone()
 
         records = db.execute(
@@ -2998,11 +3217,11 @@ def teacher_dashboard():
             FROM attendance
             JOIN students ON attendance.student_id = students.id
             WHERE attendance.branch_id = {placeholder}
-              AND attendance.subject_name = {placeholder}
-                        ORDER BY COALESCE(students.import_order, students.id), students.id, attendance.id
+              AND attendance.subject_id = {placeholder}
+                        ORDER BY COALESCE(students.import_order, students.id), students.id, attendance.id DESC
             LIMIT 20
             """,
-            (branch_id, subject_name),
+            (current_branch_id, subject_id),
         ).fetchall()
 
         return render_template(
@@ -3038,13 +3257,14 @@ def teacher_mark_attendance():
             return "Unauthorized Access", 403
 
         placeholder = get_placeholder()
-        branch_id = teacher["branch_id"]
+        current_branch_id = teacher["current_branch_id"]
         subject_name = teacher["subject_name"]
         subject_row = teacher["subject_row"]
         subject_id = row_get(subject_row, "id") if subject_row else None
 
-        if not subject_row or subject_id is None:
-            return "Unauthorized Access", 403
+        if not subject_row or subject_id is None or not current_branch_id:
+            flash("No subject or branch selected.", "error")
+            return redirect(url_for("teacher_select_branch"))
 
         today_str = date.today().isoformat()
         selected_date = request.args.get("date") or today_str
@@ -3074,7 +3294,7 @@ def teacher_mark_attendance():
                                 teacher_id = EXCLUDED.teacher_id,
                                 subject_name = EXCLUDED.subject_name
                             """,
-                            (student_id, branch_id, subject_id, teacher["teacher_id"], subject_name, selected_date, period, status, note),
+                            (student_id, current_branch_id, subject_id, teacher["teacher_id"], subject_name, selected_date, period, status, note),
                         )
                         if str(student_id).isdigit():
                             saved_ids.append(int(student_id))
@@ -3088,7 +3308,7 @@ def teacher_mark_attendance():
 
         students = db.execute(
             f"SELECT id, name, enrollment FROM students WHERE branch_id = {placeholder} ORDER BY COALESCE(import_order, id), id",
-            (branch_id,),
+            (current_branch_id,),
         ).fetchall()
 
         attendance_map = {}
@@ -3101,7 +3321,7 @@ def teacher_mark_attendance():
               AND date = {placeholder}
               AND period = {placeholder}
             """,
-            (branch_id, subject_id, selected_date, period),
+            (current_branch_id, subject_id, selected_date, period),
         ).fetchall():
             attendance_map[str(row_get(row, "student_id"))] = row
 
@@ -3139,9 +3359,13 @@ def teacher_attendance_records():
             return "Unauthorized Access", 403
 
         placeholder = get_placeholder()
-        subject_name = teacher["subject_name"]
-        branch_id = teacher["branch_id"]
+        subject_id = row_get(teacher["subject_row"], "id") if teacher["subject_row"] else None
+        current_branch_id = teacher["current_branch_id"]
         search = (request.args.get("search") or "").strip()
+
+        if not subject_id or not current_branch_id:
+            flash("No subject or branch assigned.", "error")
+            return redirect(url_for("teacher_dashboard"))
 
         query = (
             "SELECT attendance.date, attendance.status, attendance.note, attendance.subject_name, "
@@ -3149,14 +3373,14 @@ def teacher_attendance_records():
             "FROM attendance "
             "JOIN students ON attendance.student_id = students.id "
             "JOIN branches ON attendance.branch_id = branches.id "
-            f"WHERE attendance.branch_id = {placeholder} AND attendance.subject_name = {placeholder}"
+            f"WHERE attendance.branch_id = {placeholder} AND attendance.subject_id = {placeholder}"
         )
-        params = [branch_id, subject_name]
+        params = [current_branch_id, subject_id]
         if search:
             like_op = "ILIKE" if str(app.config.get("DATABASE", "")).startswith("postgres") else "LIKE"
             query += f" AND (students.name {like_op} {placeholder} OR students.enrollment {like_op} {placeholder})"
             params.extend([f"%{search}%", f"%{search}%"])
-        query += " ORDER BY COALESCE(students.import_order, students.id), students.id, attendance.id"
+        query += " ORDER BY COALESCE(students.import_order, students.id), students.id, attendance.id DESC"
 
         records = db.execute(query, params).fetchall()
         return render_template(

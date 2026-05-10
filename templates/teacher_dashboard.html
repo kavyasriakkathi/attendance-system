@@ -6,9 +6,21 @@
             <p style="margin: 0 0 8px 0; color: var(--text-secondary);">Teacher Dashboard</p>
             <h1 style="margin: 0;">{{ teacher.subject_name }}</h1>
             <p style="margin: 10px 0 0 0; color: var(--text-secondary);">
-                <strong>Teacher:</strong> {{ teacher.username }}<br>
-                <strong>Department:</strong> {{ teacher.branch_name or 'Assigned Branch' }}
+                <strong>Welcome:</strong> {{ teacher.name }}<br>
+                <strong>Subject:</strong> {{ teacher.subject_name }}<br>
+                <strong>Current Branch:</strong> <span style="color: #0d6efd; font-weight: 600;">{{ teacher.current_branch_name or 'Select a branch' }}</span>
             </p>
+            
+            {% if teacher.assigned_branches_count > 1 %}
+            <form method="POST" action="{{ url_for('teacher_select_branch') }}" style="margin-top: 12px; display: flex; gap: 8px;">
+                <select name="branch_id" required onchange="this.form.submit();" style="padding: 6px 10px; border: 1px solid #cbd5e0; border-radius: 6px; font-size: 0.9rem;">
+                    <option value="">Switch Branch...</option>
+                    {% for branch in teacher.assigned_branches %}
+                    <option value="{{ branch.id }}" {% if branch.id == teacher.current_branch_id %}selected{% endif %}>{{ branch.name }}</option>
+                    {% endfor %}
+                </select>
+            </form>
+            {% endif %}
         </div>
         <div style="display: flex; gap: 10px; flex-wrap: wrap;">
             <a class="button" href="{{ url_for('teacher_mark_attendance') }}"><i class="fa-solid fa-calendar-check"></i> Mark Attendance</a>
@@ -18,17 +30,24 @@
     </div>
 </div>
 
+{% if teacher.assigned_branches_count > 0 %}
+<div style="background: #f0fdf4; border: 1px solid #86efac; border-radius: 8px; padding: 12px 16px; margin-top: 20px; display: flex; align-items: center; gap: 10px;">
+    <i class="fa-solid fa-check-circle" style="color: #22c55e; font-size: 1.2rem;"></i>
+    <span style="color: #166534;">You are assigned to <strong>{{ teacher.assigned_branches_count }}</strong> branch(es). {% if teacher.assigned_branches_count > 1 %}Use the dropdown above to switch between them.{% endif %}</span>
+</div>
+{% endif %}
+
 <div class="stats-grid" style="margin-top: 24px;">
     <div class="stat-box">
         <h3>My Subject</h3>
         <p class="count" style="font-size: 1.4rem;">{{ teacher.subject_name }}</p>
     </div>
     <div class="stat-box">
-        <h3>My Branch</h3>
-        <p class="count" style="font-size: 1.4rem;">{{ teacher.branch_name or 'Assigned Branch' }}</p>
+        <h3>Current Branch</h3>
+        <p class="count" style="font-size: 1.4rem;">{{ teacher.current_branch_name or '—' }}</p>
     </div>
     <div class="stat-box">
-        <h3>Students</h3>
+        <h3>Students in Branch</h3>
         <p class="count">{{ student_count }}</p>
     </div>
     <div class="stat-box">
