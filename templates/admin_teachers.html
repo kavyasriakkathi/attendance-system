@@ -1,25 +1,27 @@
 {% extends "layout.html" %}
 {% block content %}
+
+<!-- Add Teacher Card -->
 <div class="card">
-    <div style="display: flex; align-items: center; gap: 15px; margin-bottom: 20px;">
+    <div style="display: flex; align-items: center; gap: 15px; margin-bottom: 8px;">
         <i class="fa-solid fa-chalkboard-user" style="font-size: 2rem; color: var(--primary-color);"></i>
         <h1 style="margin: 0;">Manage Teachers</h1>
     </div>
-    <p style="color: var(--text-secondary); margin-bottom: 25px;">Create and manage teacher accounts and assign them to subjects.</p>
+    <p style="color: var(--text-secondary); margin-bottom: 25px;">Only admins can create teacher accounts. Teachers log in using the credentials set here.</p>
 
-    <form method="post" class="form-row" style="background: #f8fafc; padding: 20px; border-radius: 12px; border: 1px solid var(--border-color);">
+    <form method="post" class="form-row" style="background: #f0f9ff; padding: 20px; border-radius: 12px; border: 1px solid #bae6fd;">
         <input type="hidden" name="action" value="add" />
         <div>
             <label>Teacher Name</label>
-            <input type="text" name="name" required placeholder="e.g. Dr. Smith" />
+            <input type="text" name="name" required placeholder="e.g. Dr. Priya Sharma" />
         </div>
         <div>
             <label>Username</label>
-            <input type="text" name="username" required placeholder="e.g. smith_math" />
+            <input type="text" name="username" required placeholder="e.g. priya_math" autocomplete="off" />
         </div>
         <div>
             <label>Password</label>
-            <input type="password" name="password" required placeholder="••••••••" />
+            <input type="password" name="password" required placeholder="Min. 4 characters" autocomplete="new-password" />
         </div>
         <div>
             <label>Assigned Subject</label>
@@ -31,7 +33,7 @@
             </select>
         </div>
         <div>
-            <label>Branch</label>
+            <label>Branch / Department</label>
             <select name="branch_id" required>
                 <option value="">Choose branch</option>
                 {% for branch in branches %}
@@ -40,53 +42,162 @@
             </select>
         </div>
         <div style="display: flex; align-items: flex-end;">
-            <button type="submit" style="width: 100%;"><i class="fa-solid fa-plus"></i> Add Teacher</button>
+            <button type="submit" style="width: 100%;"><i class="fa-solid fa-user-plus"></i> Add Teacher</button>
         </div>
     </form>
 </div>
 
+<!-- Teachers List Card -->
 <div class="card">
-    <h2 style="margin-bottom: 20px;">Existing Teachers</h2>
-    <table>
-        <thead>
-            <tr>
-                <th>Name</th>
-                <th>Username</th>
-                <th>Subject</th>
-                <th>Branch</th>
-                <th>Action</th>
-            </tr>
-        </thead>
-        <tbody>
-            {% for teacher in teachers %}
-            <tr>
-                <td style="font-weight: 600;">{{ teacher.name }}</td>
-                <td><code>{{ teacher.username }}</code></td>
-                <td>
-                    <span class="badge" style="background: #e0f2fe; color: #0369a1; padding: 4px 8px; border-radius: 6px; font-size: 0.85rem;">
-                        {{ teacher.subject_name }}
-                    </span>
-                </td>
-                <td>{{ teacher.branch_name }}</td>
-                <td>
-                    <form method="post" onsubmit="return confirm('Are you sure you want to delete this teacher?');" style="display:inline;">
-                        <input type="hidden" name="action" value="delete" />
-                        <input type="hidden" name="teacher_id" value="{{ teacher.id }}" />
-                        <button type="submit" class="button" style="background:#ef4444; color:white; border:0; padding:6px 12px; border-radius:6px; cursor:pointer;">
-                            <i class="fa-solid fa-trash-can"></i> Delete
-                        </button>
-                    </form>
-                </td>
-            </tr>
-            {% endfor %}
-            {% if not teachers %}
-            <tr>
-                <td colspan="5" style="text-align: center; padding: 40px; color: var(--text-secondary);">
-                    No teachers found. Add one above to get started.
-                </td>
-            </tr>
-            {% endif %}
-        </tbody>
-    </table>
+    <h2 style="margin-bottom: 20px;"><i class="fa-solid fa-users"></i> Teacher Accounts ({{ teachers|length }})</h2>
+    {% if not teachers %}
+    <div style="text-align: center; padding: 50px 20px; color: var(--text-secondary);">
+        <i class="fa-solid fa-user-slash" style="font-size: 3rem; margin-bottom: 15px; opacity: 0.4;"></i>
+        <p style="font-size: 1.1rem;">No teacher accounts yet.</p>
+        <p>Use the form above to add your first teacher.</p>
+    </div>
+    {% else %}
+    <div class="table-responsive">
+        <table>
+            <thead>
+                <tr>
+                    <th>#</th>
+                    <th>Teacher Name</th>
+                    <th>Username</th>
+                    <th>Subject</th>
+                    <th>Branch</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for teacher in teachers %}
+                <tr>
+                    <td style="color: var(--text-secondary);">{{ teacher.id }}</td>
+                    <td style="font-weight: 600;">{{ teacher.name or teacher.username }}</td>
+                    <td><code style="background:#f1f5f9; padding: 2px 8px; border-radius: 4px;">{{ teacher.username }}</code></td>
+                    <td>
+                        {% if teacher.subject_name %}
+                        <span style="background:#e0f2fe; color:#0369a1; padding: 4px 10px; border-radius: 6px; font-size:0.85rem;">
+                            {{ teacher.subject_name }}
+                        </span>
+                        {% else %}
+                        <span style="color: var(--text-secondary); font-size:0.85rem;">—</span>
+                        {% endif %}
+                    </td>
+                    <td>{{ teacher.branch_name or '—' }}</td>
+                    <td>
+                        <div style="display: flex; gap: 6px; flex-wrap: wrap;">
+                            <!-- Edit Button -->
+                            <button type="button" class="button" style="background:#3b82f6; padding:5px 10px; font-size:0.82rem;"
+                                onclick="openEditModal({{ teacher.id }}, '{{ teacher.name|replace("'", "\\'") }}', '{{ teacher.username }}', '{{ teacher.subject_id or '' }}', '{{ teacher.branch_id or '' }}')">
+                                <i class="fa-solid fa-pen"></i> Edit
+                            </button>
+                            <!-- Reset Password Button -->
+                            <button type="button" class="button" style="background:#f59e0b; padding:5px 10px; font-size:0.82rem;"
+                                onclick="openResetModal({{ teacher.id }}, '{{ teacher.name|replace("'", "\\'") }}')">
+                                <i class="fa-solid fa-key"></i> Reset
+                            </button>
+                            <!-- Delete Button -->
+                            <form method="post" onsubmit="return confirm('Delete teacher \'{{ teacher.name|replace("'", "\\'") }}\'? This cannot be undone.');" style="display:inline; margin:0;">
+                                <input type="hidden" name="action" value="delete" />
+                                <input type="hidden" name="teacher_id" value="{{ teacher.id }}" />
+                                <button type="submit" class="button" style="background:#ef4444; padding:5px 10px; font-size:0.82rem;">
+                                    <i class="fa-solid fa-trash-can"></i> Delete
+                                </button>
+                            </form>
+                        </div>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
 </div>
+
+<!-- Edit Teacher Modal -->
+<div id="editModal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.5); z-index:1000; align-items:center; justify-content:center;">
+    <div style="background:white; padding:30px; border-radius:16px; width:90%; max-width:520px; box-shadow: 0 25px 50px rgba(0,0,0,0.3);">
+        <h2 style="margin-top:0;"><i class="fa-solid fa-pen"></i> Edit Teacher</h2>
+        <form method="post">
+            <input type="hidden" name="action" value="edit" />
+            <input type="hidden" name="teacher_id" id="edit_teacher_id" />
+            <div style="margin-bottom:15px;">
+                <label>Teacher Name</label>
+                <input type="text" name="name" id="edit_name" required style="width:100%; margin-top:5px;" />
+            </div>
+            <div style="margin-bottom:15px;">
+                <label>Username</label>
+                <input type="text" name="username" id="edit_username" required style="width:100%; margin-top:5px;" autocomplete="off" />
+            </div>
+            <div style="margin-bottom:15px;">
+                <label>Assigned Subject</label>
+                <select name="subject_id" id="edit_subject_id" required style="width:100%; margin-top:5px;">
+                    <option value="">Choose subject</option>
+                    {% for subject in subjects %}
+                    <option value="{{ subject.id }}">{{ subject.name }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div style="margin-bottom:20px;">
+                <label>Branch / Department</label>
+                <select name="branch_id" id="edit_branch_id" required style="width:100%; margin-top:5px;">
+                    <option value="">Choose branch</option>
+                    {% for branch in branches %}
+                    <option value="{{ branch.id }}">{{ branch.name }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div style="display:flex; gap:10px;">
+                <button type="submit" style="flex:1; background:var(--primary-color);">Save Changes</button>
+                <button type="button" onclick="closeEditModal()" style="flex:1; background:#6b7280;">Cancel</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- Reset Password Modal -->
+<div id="resetModal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.5); z-index:1000; align-items:center; justify-content:center;">
+    <div style="background:white; padding:30px; border-radius:16px; width:90%; max-width:420px; box-shadow: 0 25px 50px rgba(0,0,0,0.3);">
+        <h2 style="margin-top:0;"><i class="fa-solid fa-key"></i> Reset Password</h2>
+        <p style="color:var(--text-secondary);">Resetting password for: <strong id="reset_teacher_name"></strong></p>
+        <form method="post">
+            <input type="hidden" name="action" value="reset_password" />
+            <input type="hidden" name="teacher_id" id="reset_teacher_id" />
+            <div style="margin-bottom:20px;">
+                <label>New Password (min. 4 characters)</label>
+                <input type="password" name="new_password" required minlength="4" placeholder="Enter new password" style="width:100%; margin-top:5px;" autocomplete="new-password" />
+            </div>
+            <div style="display:flex; gap:10px;">
+                <button type="submit" style="flex:1; background:#f59e0b;">Reset Password</button>
+                <button type="button" onclick="closeResetModal()" style="flex:1; background:#6b7280;">Cancel</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<script>
+function openEditModal(id, name, username, subjectId, branchId) {
+    document.getElementById('edit_teacher_id').value = id;
+    document.getElementById('edit_name').value = name;
+    document.getElementById('edit_username').value = username;
+    document.getElementById('edit_subject_id').value = subjectId;
+    document.getElementById('edit_branch_id').value = branchId;
+    document.getElementById('editModal').style.display = 'flex';
+}
+function closeEditModal() {
+    document.getElementById('editModal').style.display = 'none';
+}
+function openResetModal(id, name) {
+    document.getElementById('reset_teacher_id').value = id;
+    document.getElementById('reset_teacher_name').textContent = name;
+    document.getElementById('resetModal').style.display = 'flex';
+}
+function closeResetModal() {
+    document.getElementById('resetModal').style.display = 'none';
+}
+// Close modals when clicking outside
+document.getElementById('editModal').addEventListener('click', function(e){ if(e.target===this) closeEditModal(); });
+document.getElementById('resetModal').addEventListener('click', function(e){ if(e.target===this) closeResetModal(); });
+</script>
 {% endblock %}

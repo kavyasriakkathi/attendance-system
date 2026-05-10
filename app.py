@@ -873,16 +873,8 @@ def init_db(db=None):
             ("admin", generate_password_hash("admin123"), "admin"),
         )
 
-    # ✅ Teacher check
-    teacher = db.execute(
-        f"SELECT id FROM users WHERE username = {placeholder}", ("teacher1",)
-    ).fetchone()
-
-    if not teacher:
-        db.execute(
-            f"INSERT INTO users (username, password, role) VALUES ({placeholder}, {placeholder}, {placeholder})",
-            ("teacher1", generate_password_hash("1234"), "teacher"),
-        )
+    # No default teacher accounts are seeded.
+    # Teachers must be created manually by an admin via /admin/teachers.
 
     # ✅ Ensure at least one branch exists
     default_branch = db.execute(f"SELECT id FROM branches ORDER BY id LIMIT 1").fetchone()
@@ -899,28 +891,8 @@ def init_db(db=None):
         if not existing_sub:
             db.execute(f"INSERT INTO subjects (name, branch_id) VALUES ({placeholder}, {placeholder})", (sub_name, default_branch_id))
 
-    # ✅ Seed sample teacher accounts
-    teachers_to_seed = [
-        ("math_teacher", "math123", "Mathematics", "Math Teacher"),
-        ("physics_teacher", "phy123", "Physics", "Physics Teacher"),
-        ("chemistry_teacher", "chem123", "Chemistry", "Chemistry Teacher"),
-        ("teacher1", "1234", "Data Structures", "Default Teacher"),
-    ]
-
-    for username, password, sub_name, teacher_display_name in teachers_to_seed:
-        existing_teacher = db.execute(f"SELECT id FROM teachers WHERE username = {placeholder}", (username,)).fetchone()
-        if not existing_teacher:
-            # Find subject id
-            sub_row = db.execute(f"SELECT id FROM subjects WHERE name = {placeholder}", (sub_name,)).fetchone()
-            sub_id = row_get(sub_row, "id")
-            if sub_id:
-                try:
-                    db.execute(
-                        f"INSERT INTO teachers (name, username, password, subject_id, branch_id) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})",
-                        (teacher_display_name, username, generate_password_hash(password), sub_id, default_branch_id),
-                    )
-                except Exception as e:
-                    print(f"[DB] Failed to seed teacher {username}: {repr(e)}")
+    # No demo teacher accounts are seeded automatically.
+    # All teacher accounts must be created by an admin via the Manage Teachers page.
 
     # ✅ Default low attendance threshold setting
     if not db.execute(f"SELECT id FROM settings WHERE key = {placeholder}", ("low_attendance_threshold",)).fetchone():
@@ -1736,40 +1708,94 @@ def manage_teachers():
         
         if request.method == "POST":
             action = request.form.get("action")
+
             if action == "add":
-                name = request.form.get("name")
-                username = request.form.get("username")
-                password = request.form.get("password")
+                name = (request.form.get("name") or "").strip()
+                username = (request.form.get("username") or "").strip()
+                password = (request.form.get("password") or "").strip()
                 subject_id = request.form.get("subject_id")
                 branch_id = request.form.get("branch_id")
-                
-                if name and username and password and subject_id and branch_id:
+
+                if not all([name, username, password, subject_id, branch_id]):
+                    flash("All fields are required to add a teacher.", "error")
+                else:
+                    # Duplicate username check
+                    existing = db.execute(f"SELECT id FROM teachers WHERE username = {placeholder}", (username,)).fetchone()
+                    if existing:
+                        flash(f"Username '{username}' is already taken. Please choose a different username.", "error")
+                    else:
+                        try:
+                            db.execute(
+                                f"INSERT INTO teachers (name, username, password, subject_id, branch_id) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})",
+                                (name, username, generate_password_hash(password), subject_id, branch_id)
+                            )
+                            db.commit()
+                            flash(f"Teacher '{name}' added successfully. They can now log in with username: {username}", "success")
+                        except Exception as e:
+                            db.rollback()
+                            flash(f"Error adding teacher: {repr(e)}", "error")
+
+            elif action == "edit":
+                teacher_id = request.form.get("teacher_id")
+                name = (request.form.get("name") or "").strip()
+                username = (request.form.get("username") or "").strip()
+                subject_id = request.form.get("subject_id")
+                branch_id = request.form.get("branch_id")
+
+                if not all([teacher_id, name, username, subject_id, branch_id]):
+                    flash("All fields are required.", "error")
+                else:
+                    # Check for duplicate username excluding self
+                    dup = db.execute(f"SELECT id FROM teachers WHERE username = {placeholder} AND id != {placeholder}", (username, teacher_id)).fetchone()
+                    if dup:
+                        flash(f"Username '{username}' is already taken by another teacher.", "error")
+                    else:
+                        try:
+                            db.execute(
+                                f"UPDATE teachers SET name = {placeholder}, username = {placeholder}, subject_id = {placeholder}, branch_id = {placeholder} WHERE id = {placeholder}",
+                                (name, username, subject_id, branch_id, teacher_id)
+                            )
+                            db.commit()
+                            flash(f"Teacher '{name}' updated successfully.", "success")
+                        except Exception as e:
+                            db.rollback()
+                            flash(f"Error updating teacher: {repr(e)}", "error")
+
+            elif action == "reset_password":
+                teacher_id = request.form.get("teacher_id")
+                new_password = (request.form.get("new_password") or "").strip()
+
+                if not teacher_id or not new_password:
+                    flash("Teacher ID and new password are required.", "error")
+                elif len(new_password) < 4:
+                    flash("Password must be at least 4 characters.", "error")
+                else:
                     try:
                         db.execute(
-                            f"INSERT INTO teachers (name, username, password, subject_id, branch_id) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})",
-                            (name, username, generate_password_hash(password), subject_id, branch_id)
+                            f"UPDATE teachers SET password = {placeholder} WHERE id = {placeholder}",
+                            (generate_password_hash(new_password), teacher_id)
                         )
                         db.commit()
-                        flash("Teacher added successfully.", "success")
+                        flash("Password reset successfully.", "success")
                     except Exception as e:
                         db.rollback()
-                        flash(f"Error adding teacher: {repr(e)}", "error")
-                else:
-                    flash("All fields are required.", "error")
-            
+                        flash(f"Error resetting password: {repr(e)}", "error")
+
             elif action == "delete":
                 teacher_id = request.form.get("teacher_id")
                 if teacher_id:
-                    # Data Safety: Prevent accidental deletion if attendance records exist
                     attendance_count_row = db.execute(f"SELECT COUNT(*) as count FROM attendance WHERE teacher_id = {placeholder}", (teacher_id,)).fetchone()
                     attendance_count = row_get(attendance_count_row, 'count', 0)
-                    
                     if attendance_count > 0:
-                        flash(f"Cannot delete teacher because they have {attendance_count} attendance records. This ensures long-term data safety.", "error")
+                        flash(f"Cannot delete teacher — they have {attendance_count} attendance record(s). This protects historical data.", "error")
                     else:
-                        db.execute(f"DELETE FROM teachers WHERE id = {placeholder}", (teacher_id,))
-                        db.commit()
-                        flash("Teacher deleted successfully.", "success")
+                        try:
+                            db.execute(f"DELETE FROM teachers WHERE id = {placeholder}", (teacher_id,))
+                            db.commit()
+                            flash("Teacher deleted successfully.", "success")
+                        except Exception as e:
+                            db.rollback()
+                            flash(f"Error deleting teacher: {repr(e)}", "error")
 
         # Fetch teachers list — use a safe fallback query if subject_id column
         # doesn't exist yet on the live database (gives a clearer error instead of 500)
