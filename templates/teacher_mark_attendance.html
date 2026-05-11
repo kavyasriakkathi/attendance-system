@@ -20,7 +20,12 @@
     <form method="get" class="form-row" style="margin-bottom: 18px;">
         <div>
             <label>Subject</label>
-            <input type="text" value="{{ teacher.subject_name }}" readonly />
+            <div style="display:flex; gap:8px; align-items:center;">
+                <input type="text" value="{{ teacher.subject_name }}" readonly />
+                {% if teacher.assigned_subjects_count > 1 %}
+                <a href="{{ url_for('teacher_select_subject') }}" style="font-size:0.9rem; text-decoration:underline;">Switch subject</a>
+                {% endif %}
+            </div>
         </div>
         <div>
             <label>Branch</label>
@@ -105,7 +110,7 @@
         </div>
         <div style="margin-top: 18px; display: flex; gap: 10px; flex-wrap: wrap; align-items: center;">
             <button type="submit">Save Attendance</button>
-            <a href="{{ url_for('generate_qr', branch_id=teacher.branch_id, subject_id=teacher.subject_id, date=selected_date, period=period) }}" class="button" style="background-color: #2196F3; text-decoration: none; display: inline-flex; align-items: center; justify-content: center;">Generate QR Code</a>
+            <a href="{{ url_for('generate_qr', branch_id=teacher.current_branch_id, subject_id=teacher.current_subject_id, date=selected_date, period=period) }}" class="button" style="background-color: #2196F3; text-decoration: none; display: inline-flex; align-items: center; justify-content: center;">Generate QR Code</a>
             <button id="copyAttendanceLinkBtn" type="button" class="button" style="background-color: #4CAF50;">Copy Attendance Scan URL</button>
             <span id="copyStatus" style="color: #4CAF50; display: none; font-weight: bold;">Link copied!</span>
             <a href="{{ url_for('teacher_dashboard') }}" class="button" style="background: var(--text-secondary); text-decoration: none;">Back to Dashboard</a>
@@ -118,8 +123,8 @@
             const copyStatus = document.getElementById('copyStatus');
             if (copyBtn) {
                 copyBtn.addEventListener('click', function() {
-                    const branchId = '{{ teacher.branch_id }}';
-                    const subjectId = '{{ teacher.subject_id }}';
+                    const branchId = '{{ teacher.current_branch_id }}';
+                    const subjectId = '{{ teacher.current_subject_id }}';
                     const date = '{{ selected_date }}';
                     const period = '{{ period }}';
                     const url = `/api/generate_qr_token?branch_id=${encodeURIComponent(branchId)}&subject_id=${encodeURIComponent(subjectId)}&date=${encodeURIComponent(date)}&period=${encodeURIComponent(period)}`;

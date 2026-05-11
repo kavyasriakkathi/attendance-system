@@ -21,10 +21,22 @@
                 </select>
             </form>
             {% endif %}
+
+            {% if teacher.assigned_subjects_count > 1 %}
+            <form method="POST" action="{{ url_for('teacher_select_subject') }}" style="margin-top: 8px; display: flex; gap: 8px;">
+                <select name="subject_id" required onchange="this.form.submit();" style="padding: 6px 10px; border: 1px solid #cbd5e0; border-radius: 6px; font-size: 0.9rem;">
+                    <option value="">Switch Subject...</option>
+                    {% for subject in teacher.assigned_subjects %}
+                    <option value="{{ subject.id }}" {% if subject.id == teacher.current_subject_id %}selected{% endif %}>{{ subject.name }}</option>
+                    {% endfor %}
+                </select>
+            </form>
+            {% endif %}
         </div>
         <div style="display: flex; gap: 10px; flex-wrap: wrap;">
             <a class="button" href="{{ url_for('teacher_mark_attendance') }}"><i class="fa-solid fa-calendar-check"></i> Mark Attendance</a>
             <a class="button" href="{{ url_for('teacher_attendance_records') }}" style="background: var(--text-secondary);"><i class="fa-solid fa-rectangle-list"></i> My Attendance Records</a>
+            <a class="button" href="{{ url_for('attendance_analytics') }}" style="background: #10b981;"><i class="fa-solid fa-chart-bar"></i> Analytics</a>
             <a class="button" href="{{ url_for('logout') }}" style="background: #c0392b;"><i class="fa-solid fa-right-from-bracket"></i> Logout</a>
         </div>
     </div>

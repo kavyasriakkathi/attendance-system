@@ -158,8 +158,7 @@ document.head.appendChild(style);
     </div>
 </div>
 
-{% if session.role == 'admin' %}
-<div class="grid" style="margin-bottom: 30px;">
+
     <div class="card">
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
             <h2 style="margin: 0;"><i class="fa-solid fa-wave-square"></i> Attendance Trend</h2>
@@ -174,10 +173,8 @@ document.head.appendChild(style);
         <div style="display: flex; flex-direction: column; gap: 12px;">
             <a href="{{ url_for('mark_attendance') }}" class="button"><i class="fa-solid fa-plus"></i> Mark Attendance</a>
             <a href="{{ url_for('download_attendance') }}" class="button" style="background-color: var(--text-secondary);"><i class="fa-solid fa-file-excel"></i> Download Attendance Report</a>
-            {% if session.role == 'admin' %}
             <a href="{{ url_for('attendance_report') }}" class="button" style="background-color: var(--text-secondary);"><i class="fa-solid fa-file-export"></i> Export Reports</a>
-            <a href="{{ url_for('students') }}" class="button" style="background-color: var(--text-secondary);"><i class="fa-solid fa-user-plus"></i> Manage Students</a>
-            {% endif %}
+            <a href="{{ url_for('students') }}" class="button" style="background-color: var(--text-secondary);"><i class="fa-solid fa-user-plus"></i> Add Student</a>
         </div>
     </div>
 </div>
@@ -200,7 +197,6 @@ document.head.appendChild(style);
         {% endfor %}
     </div>
 </div>
-{% endif %}
 
 <script>
 document.addEventListener('DOMContentLoaded', function() {
@@ -210,6 +206,7 @@ document.addEventListener('DOMContentLoaded', function() {
     const primaryColor = css.getPropertyValue('--primary-color').trim();
     const borderColor = css.getPropertyValue('--border-color').trim();
     const textSecondary = css.getPropertyValue('--text-secondary').trim();
+
 
     // 3) Line chart: Attendance trend by date
     const trendEl = document.getElementById('attendanceTrendChart');
@@ -277,7 +274,6 @@ document.addEventListener('DOMContentLoaded', function() {
     <div id="activity-feed">
         <p class="loading">Loading recent activity...</p>
     </div>
-
 </div>
 
 <script>

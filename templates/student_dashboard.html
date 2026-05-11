@@ -30,15 +30,8 @@
 </div>
 
 
-{% if percentage < 75 and total_classes > 0 %}
-<div class="card" style="background-color: #fef2f2; border: 1px solid #f87171; margin-bottom: 20px;">
-    <h3 style="color: #b91c1c; margin-top: 0;"><i class="fa-solid fa-triangle-exclamation"></i> Low Attendance Warning</h3>
-    <p style="color: #991b1b; margin-bottom: 0;">Your overall attendance is <strong>{{ percentage }}%</strong>, which is below the minimum requirement of 75%. Please attend classes regularly to avoid academic penalties.</p>
-</div>
-{% endif %}
-
 {% if student_qr_data_uri %}
-<div class="card" style="display: flex; align-items: center; justify-content: space-between; gap: 20px; flex-wrap: wrap; background: linear-gradient(135deg, #ffffff 0%, #f0f4ff 100%); margin-bottom: 20px;">
+<div class="card" style="display: flex; align-items: center; justify-content: space-between; gap: 20px; flex-wrap: wrap; background: linear-gradient(135deg, #ffffff 0%, #f0f4ff 100%);">
     <div>
         <h2 style="margin-bottom: 6px;"><i class="fa-solid fa-qrcode"></i> Your ID QR Code</h2>
         <p style="margin: 0; color: var(--text-secondary);">Show this at the entrance or for quick check-ins.</p>
@@ -48,18 +41,6 @@
     </div>
 </div>
 {% endif %}
-
-<div class="stats-grid" style="margin-bottom: 20px;">
-    <div class="card" style="margin: 0;">
-        <h3 style="margin-bottom: 15px;"><i class="fa-solid fa-chart-line"></i> Monthly Trend</h3>
-        <canvas id="monthlyChart" style="max-height: 250px;"></canvas>
-    </div>
-    <div class="card" style="margin: 0;">
-        <h3 style="margin-bottom: 15px;"><i class="fa-solid fa-chart-bar"></i> Subject-wise Analytics</h3>
-        <canvas id="subjectChart" style="max-height: 250px;"></canvas>
-    </div>
-</div>
-
 
 <div class="card">
     <h2><i class="fa-solid fa-list-ul"></i> Detailed Attendance Logs</h2>
@@ -74,6 +55,55 @@
         'electronics': 'fa-bolt',
         'electronics and communication': 'fa-bolt'
     } %}
+
+    <!-- Filters -->
+    <div style="display: flex; flex-direction: column; gap: 15px; margin-bottom: 20px;">
+        <!-- Subject Filter -->
+        <div>
+            <label style="display: block; margin-bottom: 8px; font-weight: 600; color: var(--text-secondary); font-size: 0.9rem;">Filter by Subject:</label>
+            <div style="display: flex; flex-wrap: wrap; gap: 10px;">
+                <a href="{{ url_for('student_dashboard', semester=selected_semester, academic_year=selected_year) }}" class="button small" {% if not selected_subject_id %}style="background-color: var(--primary-color);"{% endif %}>
+                    <i class="fa-solid fa-layer-group"></i> All Subjects
+                </a>
+                {% for subject in subjects %}
+                {% set subject_key = subject.name|lower %}
+                {% set icon_class = icon_map.get(subject_key, 'fa-book') %}
+                <a href="{{ url_for('student_dashboard', subject_id=subject.id, semester=selected_semester, academic_year=selected_year) }}" class="button small" {% if selected_subject_id and subject.id|string == selected_subject_id|string %}style="background-color: var(--primary-color);"{% endif %}>
+                    <i class="fa-solid {{ icon_class }}"></i> {{ subject.name }}
+                </a>
+                {% endfor %}
+            </div>
+        </div>
+
+        <!-- Semester & Year Filters -->
+        <form method="get" style="display: grid; grid-template-columns: 1fr 1fr auto; gap: 12px; align-items: flex-end;">
+            <div>
+                <label>Semester</label>
+                <select name="semester" onchange="this.form.submit();">
+                    <option value="">All Semesters</option>
+                    <option value="1" {% if selected_semester == '1' %}selected{% endif %}>Semester 1</option>
+                    <option value="2" {% if selected_semester == '2' %}selected{% endif %}>Semester 2</option>
+                    <option value="3" {% if selected_semester == '3' %}selected{% endif %}>Semester 3</option>
+                    <option value="4" {% if selected_semester == '4' %}selected{% endif %}>Semester 4</option>
+                    <option value="5" {% if selected_semester == '5' %}selected{% endif %}>Semester 5</option>
+                    <option value="6" {% if selected_semester == '6' %}selected{% endif %}>Semester 6</option>
+                    <option value="7" {% if selected_semester == '7' %}selected{% endif %}>Semester 7</option>
+                    <option value="8" {% if selected_semester == '8' %}selected{% endif %}>Semester 8</option>
+                </select>
+            </div>
+            <div>
+                <label>Academic Year</label>
+                <select name="academic_year" onchange="this.form.submit();">
+                    <option value="">All Years</option>
+                    <option value="1" {% if selected_year == '1' %}selected{% endif %}>Year 1</option>
+                    <option value="2" {% if selected_year == '2' %}selected{% endif %}>Year 2</option>
+                    <option value="3" {% if selected_year == '3' %}selected{% endif %}>Year 3</option>
+                    <option value="4" {% if selected_year == '4' %}selected{% endif %}>Year 4</option>
+                </select>
+            </div>
+            <input type="hidden" name="subject_id" value="{{ selected_subject_id }}">
+        </form>
+    </div>
 
     <div style="display: flex; flex-wrap: wrap; gap: 10px; margin: 12px 0 20px;">
         <a href="{{ url_for('student_dashboard') }}" class="button small" {% if not selected_subject_id %}style="background-color: var(--primary-color);"{% endif %}>
@@ -121,63 +151,8 @@ document.addEventListener('DOMContentLoaded', function() {
     const successColor = css.getPropertyValue('--success-color').trim();
     const dangerColor = css.getPropertyValue('--danger-color').trim();
     const textSecondary = css.getPropertyValue('--text-secondary').trim();
+    const borderColor = css.getPropertyValue('--border-color').trim();
 
-    // Subject Analytics Chart
-    const subjectDataRaw = {{ subject_analytics | tojson | safe }};
-    if (subjectDataRaw && subjectDataRaw.length > 0) {
-        const subjectCtx = document.getElementById('subjectChart').getContext('2d');
-        new Chart(subjectCtx, {
-            type: 'bar',
-            data: {
-                labels: subjectDataRaw.map(s => s.subject),
-                datasets: [{
-                    label: 'Attendance %',
-                    data: subjectDataRaw.map(s => s.percentage),
-                    backgroundColor: subjectDataRaw.map(s => s.percentage >= 75 ? successColor : dangerColor),
-                    borderRadius: 4
-                }]
-            },
-            options: {
-                responsive: true,
-                maintainAspectRatio: false,
-                scales: {
-                    y: { beginAtZero: true, max: 100 }
-                }
-            }
-        });
-    } else {
-        document.getElementById('subjectChart').parentElement.innerHTML = '<p style="color: var(--text-secondary); text-align: center; padding: 20px;">No subject data available.</p>';
-    }
-
-    // Monthly Analytics Chart
-    const monthlyDataRaw = {{ monthly_analytics | tojson | safe }};
-    if (monthlyDataRaw && monthlyDataRaw.length > 0) {
-        const monthlyCtx = document.getElementById('monthlyChart').getContext('2d');
-        new Chart(monthlyCtx, {
-            type: 'line',
-            data: {
-                labels: monthlyDataRaw.map(m => m.month),
-                datasets: [{
-                    label: 'Overall %',
-                    data: monthlyDataRaw.map(m => m.percentage),
-                    borderColor: primaryColor,
-                    backgroundColor: primaryColor + '33',
-                    fill: true,
-                    tension: 0.3,
-                    pointRadius: 4
-                }]
-            },
-            options: {
-                responsive: true,
-                maintainAspectRatio: false,
-                scales: {
-                    y: { beginAtZero: true, max: 100 }
-                }
-            }
-        });
-    } else {
-        document.getElementById('monthlyChart').parentElement.innerHTML = '<p style="color: var(--text-secondary); text-align: center; padding: 20px;">No monthly data available.</p>';
-    }
 });
 </script>
 {% endblock %}

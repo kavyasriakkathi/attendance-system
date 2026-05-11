@@ -1,0 +1,135 @@
+{% extends "layout.html" %}
+{% block content %}
+<div class="card" style="max-width: 1200px; margin: 0 auto;">
+    <h1 style="margin-top: 0;"><i class="fa-solid fa-chart-bar"></i> Attendance Analytics</h1>
+    <p style="color: var(--text-secondary); margin-bottom: 20px;">View student attendance statistics by subject, branch, and semester.</p>
+
+    <!-- Filter Section -->
+    <form method="get" class="form-row" style="background: #f0f9ff; padding: 20px; border-radius: 12px; border: 1px solid #bae6fd; margin-bottom: 24px;">
+        <div>
+            <label>Subject</label>
+            <select name="subject_id">
+                <option value="">All Subjects</option>
+                {% for subject in subjects %}
+                <option value="{{ subject.id }}" {% if subject.id|string == selected_subject %}selected{% endif %}>{{ subject.name }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div>
+            <label>Branch</label>
+            <select name="branch_id">
+                <option value="">All Branches</option>
+                {% for branch in branches %}
+                <option value="{{ branch.id }}" {% if branch.id|string == selected_branch %}selected{% endif %}>{{ branch.name }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div>
+            <label>Semester</label>
+            <select name="semester">
+                <option value="">All Semesters</option>
+                {% for sem_row in semesters %}
+                {% set sem = sem_row.semester if sem_row.semester is defined else sem_row[0] %}
+                <option value="{{ sem }}" {% if sem|string == selected_semester %}selected{% endif %}>Semester {{ sem }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div>
+            <label>Academic Year</label>
+            <select name="academic_year">
+                <option value="">All Years</option>
+                {% for year_row in academic_years %}
+                {% set yr = year_row.academic_year if year_row.academic_year is defined else year_row[0] %}
+                <option value="{{ yr }}" {% if yr|string == selected_year %}selected{% endif %}>Year {{ yr }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <button type="submit" style="align-self: flex-end;">Apply Filters</button>
+    </form>
+
+    <!-- Statistics Table -->
+    <div class="table-responsive">
+        <table>
+            <thead>
+                <tr>
+                    <th>#</th>
+                    <th>Student Name</th>
+                    <th>Enrollment</th>
+                    <th>Classes Attended</th>
+                    <th>Total Classes</th>
+                    <th>Attendance %</th>
+                    <th>Status</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% if records %}
+                    {% set counter = 0 %}
+                    {% for record in records %}
+                        {% set counter = counter + 1 %}
+                        {% set total = record.total_classes or 0 %}
+                        {% set present = record.present_classes or 0 %}
+                        {% set percentage = record.percentage or 0 %}
+                        <tr style="{% if percentage < 75 %}background: #fff5f5;{% elif percentage >= 90 %}background: #f0fdf4;{% endif %}">
+                            <td style="color: var(--text-secondary); font-weight: 600;">{{ counter }}</td>
+                            <td>{{ record.name }}</td>
+                            <td><code style="background:#f1f5f9; padding: 2px 8px; border-radius: 4px;">{{ record.enrollment }}</code></td>
+                            <td style="text-align: center; font-weight: 600;">{{ present }}</td>
+                            <td style="text-align: center;">{{ total }}</td>
+                            <td style="text-align: center; font-weight: 700;">
+                                {% if percentage >= 90 %}
+                                    <span style="color: #22c55e;">{{ percentage }}%</span>
+                                {% elif percentage >= 75 %}
+                                    <span style="color: #2196F3;">{{ percentage }}%</span>
+                                {% else %}
+                                    <span style="color: #ef4444;">{{ percentage }}%</span>
+                                {% endif %}
+                            </td>
+                            <td>
+                                {% if percentage < 75 %}
+                                    <span style="background: #fee2e2; color: #b91c1c; padding: 4px 10px; border-radius: 6px; font-size: 0.85rem;">⚠️ Low</span>
+                                {% elif percentage >= 90 %}
+                                    <span style="background: #dcfce7; color: #166534; padding: 4px 10px; border-radius: 6px; font-size: 0.85rem;">✓ Excellent</span>
+                                {% elif percentage >= 75 %}
+                                    <span style="background: #dbeafe; color: #0c4a6e; padding: 4px 10px; border-radius: 6px; font-size: 0.85rem;">○ Good</span>
+                                {% endif %}
+                            </td>
+                        </tr>
+                    {% endfor %}
+                {% else %}
+                    <tr>
+                        <td colspan="7" style="text-align: center; padding: 40px 20px; color: var(--text-secondary);">
+                            No attendance records found for the selected filters.
+                        </td>
+                    </tr>
+                {% endif %}
+            </tbody>
+        </table>
+    </div>
+
+    <!-- Summary Cards -->
+    {% if records %}
+    <div class="stats-grid" style="margin-top: 30px;">
+        {% set total_students = records|length %}
+        {% set excellent = records|selectattr('percentage', 'ge', 90)|list|length %}
+        {% set good = records|selectattr('percentage', 'ge', 75)|selectattr('percentage', 'lt', 90)|list|length %}
+        {% set low = records|selectattr('percentage', 'lt', 75)|list|length %}
+        <div class="stat-box">
+            <h3>Total Students</h3>
+            <p class="count">{{ total_students }}</p>
+        </div>
+        <div class="stat-box">
+            <h3 style="color: #22c55e;">Excellent (≥90%)</h3>
+            <p class="count" style="color: #22c55e;">{{ excellent }}</p>
+        </div>
+        <div class="stat-box">
+            <h3 style="color: #2196F3;">Good (75-90%)</h3>
+            <p class="count" style="color: #2196F3;">{{ good }}</p>
+        </div>
+        <div class="stat-box">
+            <h3 style="color: #ef4444;">Low (<75%)</h3>
+            <p class="count" style="color: #ef4444;">{{ low }}</p>
+        </div>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}

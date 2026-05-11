@@ -11,10 +11,34 @@
     </div>
     {% endif %}
 
-    <form method="get" class="form-row" style="margin-bottom: 18px;">
+    <form method="get" class="form-row" style="margin-bottom: 18px; gap: 12px;">
         <div style="flex-basis: 100%;">
             <label>Search Student</label>
             <input type="text" name="search" value="{{ search or '' }}" placeholder="Name or enrollment" />
+        </div>
+        <div style="flex: 1; min-width: 200px;">
+            <label>Semester</label>
+            <select name="semester">
+                <option value="">All Semesters</option>
+                <option value="1" {% if selected_semester == '1' %}selected{% endif %}>Semester 1</option>
+                <option value="2" {% if selected_semester == '2' %}selected{% endif %}>Semester 2</option>
+                <option value="3" {% if selected_semester == '3' %}selected{% endif %}>Semester 3</option>
+                <option value="4" {% if selected_semester == '4' %}selected{% endif %}>Semester 4</option>
+                <option value="5" {% if selected_semester == '5' %}selected{% endif %}>Semester 5</option>
+                <option value="6" {% if selected_semester == '6' %}selected{% endif %}>Semester 6</option>
+                <option value="7" {% if selected_semester == '7' %}selected{% endif %}>Semester 7</option>
+                <option value="8" {% if selected_semester == '8' %}selected{% endif %}>Semester 8</option>
+            </select>
+        </div>
+        <div style="flex: 1; min-width: 200px;">
+            <label>Academic Year</label>
+            <select name="academic_year">
+                <option value="">All Years</option>
+                <option value="1" {% if selected_year == '1' %}selected{% endif %}>Year 1</option>
+                <option value="2" {% if selected_year == '2' %}selected{% endif %}>Year 2</option>
+                <option value="3" {% if selected_year == '3' %}selected{% endif %}>Year 3</option>
+                <option value="4" {% if selected_year == '4' %}selected{% endif %}>Year 4</option>
+            </select>
         </div>
         <button type="submit">Filter</button>
         <a href="{{ url_for('teacher_attendance_records') }}" class="button" style="background: var(--text-secondary);">Clear</a>
