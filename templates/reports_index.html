@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Reports</title>
+  <style>
+    body{font-family:Arial,Helvetica,sans-serif;margin:20px;color:#111}
+    .container{max-width:1000px;margin:0 auto}
+    .card{border:1px solid #e5e7eb;padding:16px;border-radius:6px;background:#fff}
+    .row{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:12px}
+    label{font-size:13px;color:#374151}
+    select,input{padding:8px;border:1px solid #d1d5db;border-radius:4px}
+    button{background:#2563eb;color:#fff;padding:8px 12px;border-radius:4px;border:none;cursor:pointer}
+    table{width:100%;border-collapse:collapse;margin-top:12px}
+    th,td{padding:8px;border:1px solid #e5e7eb;text-align:left;font-size:13px}
+    th{background:#f3f4f6}
+    .muted{color:#6b7280;font-size:13px}
+    .controls{display:flex;gap:8px;align-items:center}
+    .exports{margin-left:auto}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h2>Attendance Reports</h2>
+    <div class="card">
+      <form method="get" action="/reports">
+        <div class="row">
+          <div style="flex:1 1 220px">
+            <label>Subject</label>
+            <select name="subject_id">
+              <option value="">All subjects</option>
+              {% for s in subjects %}
+                <option value="{{ s.id }}" {% if filters.subject_id and filters.subject_id == (s.id|string) %}selected{% endif %}>{{ s.name }}</option>
+              {% endfor %}
+            </select>
+          </div>
+
+          <div style="flex:1 1 220px">
+            <label>Branch</label>
+            <select name="branch_id">
+              <option value="">All branches</option>
+              {% for b in branches %}
+                <option value="{{ b.id }}" {% if filters.branch_id and filters.branch_id == (b.id|string) %}selected{% endif %}>{{ b.name }}</option>
+              {% endfor %}
+            </select>
+          </div>
+
+          <div style="flex:1 1 160px">
+            <label>Start date</label>
+            <input type="date" name="start_date" value="{{ filters.start_date or '' }}">
+          </div>
+
+          <div style="flex:1 1 160px">
+            <label>End date</label>
+            <input type="date" name="end_date" value="{{ filters.end_date or '' }}">
+          </div>
+
+          <div class="controls" style="flex:1 1 160px">
+            <label style="margin-right:8px">Preview</label>
+            <input type="checkbox" name="preview" value="1" {% if rows %}checked{% endif %}>
+            <div class="exports">
+              <button type="submit">Run</button>
+            </div>
+          </div>
+        </div>
+      </form>
+
+      <div style="display:flex;align-items:center;margin-top:6px">
+        <div class="muted">Daily / Subject / Branch reports. Use filters and click Run to preview results.</div>
+        <div style="margin-left:auto">
+          <a href="/reports/export.xlsx?{% if filters.subject_id %}subject_id={{filters.subject_id}}&{% endif %}{% if filters.branch_id %}branch_id={{filters.branch_id}}&{% endif %}{% if filters.start_date %}start_date={{filters.start_date}}&{% endif %}{% if filters.end_date %}end_date={{filters.end_date}}&{% endif %}" style="margin-right:8px"><button>Export XLSX</button></a>
+          <a href="/reports/export.pdf?{% if filters.subject_id %}subject_id={{filters.subject_id}}&{% endif %}{% if filters.branch_id %}branch_id={{filters.branch_id}}&{% endif %}{% if filters.start_date %}start_date={{filters.start_date}}&{% endif %}{% if filters.end_date %}end_date={{filters.end_date}}&{% endif %}"><button>Export PDF</button></a>
+        </div>
+      </div>
+
+      {% if rows %}
+        <table>
+          <thead>
+            <tr><th>Date</th><th>Subject</th><th>Branch</th><th>Student</th><th>Enrollment</th><th>Status</th><th>Note</th></tr>
+          </thead>
+          <tbody>
+            {% for r in rows %}
+              <tr>
+                <td>{{ r.date }}</td>
+                <td>{{ r.subject_name or '' }}</td>
+                <td>{{ r.branch_name or '' }}</td>
+                <td>{{ r.student_name or '' }}</td>
+                <td>{{ r.enrollment or '' }}</td>
+                <td>{{ r.status or '' }}</td>
+                <td>{{ r.note or '' }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% else %}
+        <div class="muted" style="margin-top:12px">No preview results. Check filters and click Run to preview.</div>
+      {% endif %}
+    </div>
+  </div>
+</body>
+</html>
