@@ -3239,6 +3239,17 @@ def teacher_dashboard():
         )
     except Exception as e:
         print(f"[teacher_dashboard] ERROR: {repr(e)}")
+        try:
+            import traceback as _tb
+            print(_tb.format_exc())
+        except Exception:
+            pass
+        # Log minimal session/teacher context to help debug transient failures
+        try:
+            print(f"[teacher_dashboard] session_keys={list(session.keys())}")
+            print(f"[teacher_dashboard] teacher_context={repr(teacher)[:1000]}")
+        except Exception:
+            pass
         flash("Teacher dashboard is temporarily unavailable.", "error")
         return redirect(url_for("teacher_login"))
     finally:
