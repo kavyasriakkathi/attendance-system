@@ -23,7 +23,8 @@ from flask_socketio import SocketIO, emit, join_room
 app = Flask(__name__)
 
 # Initialize SocketIO after app creation
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode="eventlet")
+# Use threading mode for compatibility with the workspace Python version and tests.
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
 # Email sending is handled by the `send_email` helper defined later in the file.
 
 
@@ -4729,6 +4730,15 @@ def trigger_low_attendance_scan():
 @app.errorhandler(500)
 def internal_error(error):
     """Global handler for Internal Server Errors."""
+
+
+@app.route("/attendance-analytics")
+@app.route("/attendance_analytics")
+@login_required
+def attendance_analytics():
+    # Lightweight compatibility route so existing dashboard links render safely.
+    # Detailed analytics were moved into the reports module.
+    return redirect(url_for("reports_index"))
     print(f"[CRITICAL] 500 ERROR: {repr(error)}")
     print(traceback.format_exc())
     return "<h1>Internal Server Error</h1><p>Our team has been notified. Please try again later.</p>", 500
