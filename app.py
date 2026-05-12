@@ -1754,14 +1754,42 @@ def branches():
         db = get_db()
         placeholder = get_placeholder()
         if request.method == "POST":
-            name = request.form.get("name")
+            name = (request.form.get("name") or "").strip()
             location = request.form.get("location")
-            if name:
-                db.execute(f"INSERT INTO branches (name, location) VALUES ({placeholder}, {placeholder})", (name, location))
-                db.commit()
-                flash("Branch added successfully.", "success")
-            else:
+            sections = (request.form.get("sections") or "").strip()
+            if not name:
                 flash("Branch name is required.", "error")
+            else:
+                # If sections provided (comma-separated), create branch entries like "Name-Section"
+                try:
+                    if sections:
+                        parts = [s.strip() for s in sections.split(",") if s.strip()]
+                        added = 0
+                        for sec in parts:
+                            branch_name = f"{name}-{sec}"
+                            try:
+                                db.execute(f"INSERT INTO branches (name, location) VALUES ({placeholder}, {placeholder})", (branch_name, location))
+                                added += 1
+                            except Exception:
+                                # Skip duplicates or other insert errors for individual section
+                                pass
+                        db.commit()
+                        if added:
+                            flash(f"Added {added} sectioned branch(es).", "success")
+                        else:
+                            flash("No new section branches were added (they may already exist).", "info")
+                    else:
+                        try:
+                            db.execute(f"INSERT INTO branches (name, location) VALUES ({placeholder}, {placeholder})", (name, location))
+                            db.commit()
+                            flash("Branch added successfully.", "success")
+                        except Exception:
+                            db.rollback()
+                            flash("Branch already exists or could not be added.", "error")
+                except Exception as e:
+                    db.rollback()
+                    print(f"[branches] insert error: {repr(e)}")
+                    flash("Error adding branch(s). See server logs.", "error")
 
         branches_list = db.execute("SELECT * FROM branches ORDER BY name").fetchall()
         return render_template("branches.html", branches=branches_list)
