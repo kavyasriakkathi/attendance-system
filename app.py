@@ -4749,6 +4749,24 @@ def _parse_date_param(val):
             return None
 
 
+def _parse_int_param(val):
+    if val is None or val == "":
+        return None
+    try:
+        return int(val)
+    except Exception:
+        return None
+
+
+def _exists_id(db, table, id_val):
+    try:
+        placeholder = get_placeholder()
+        row = db.execute(f"SELECT 1 FROM {table} WHERE id = {placeholder}", (id_val,)).fetchone()
+        return bool(row)
+    except Exception:
+        return False
+
+
 def _get_report_rows(db, subject_id=None, branch_id=None, start_date=None, end_date=None):
     placeholder = get_placeholder()
     where_clauses = []
@@ -4782,6 +4800,7 @@ def _get_report_rows(db, subject_id=None, branch_id=None, start_date=None, end_d
         ORDER BY attendance.date DESC
     """
 
+    # Allow caller to append a LIMIT by passing max_rows through params via special key
     rows = db.execute(query, tuple(params)).fetchall()
     return rows
 
@@ -4797,17 +4816,40 @@ def reports_index():
         subjects = db.execute(f"SELECT id, name FROM subjects ORDER BY name").fetchall()
         branches = db.execute(f"SELECT id, name FROM branches ORDER BY name").fetchall()
 
-        # Parse filters from query params
-        subject_id = request.args.get("subject_id") or None
-        branch_id = request.args.get("branch_id") or None
+        # Parse and validate filters from query params
+        subject_id_raw = request.args.get("subject_id") or None
+        branch_id_raw = request.args.get("branch_id") or None
+        subject_id = _parse_int_param(subject_id_raw)
+        branch_id = _parse_int_param(branch_id_raw)
         start_date = _parse_date_param(request.args.get("start_date"))
         end_date = _parse_date_param(request.args.get("end_date"))
 
+        # Validate date range
+        if start_date and end_date and start_date > end_date:
+            flash("Start date cannot be after end date.", "error")
+            return redirect(url_for("reports_index"))
+
+        # Validate provided subject/branch IDs exist
+        if subject_id_raw and subject_id is None:
+            flash("Invalid subject id.", "error")
+            return redirect(url_for("reports_index"))
+        if branch_id_raw and branch_id is None:
+            flash("Invalid branch id.", "error")
+            return redirect(url_for("reports_index"))
+
+        if subject_id and not _exists_id(db, "subjects", subject_id):
+            flash("Subject not found.", "error")
+            return redirect(url_for("reports_index"))
+        if branch_id and not _exists_id(db, "branches", branch_id):
+            flash("Branch not found.", "error")
+            return redirect(url_for("reports_index"))
+
         rows = None
         if request.args.get("preview"):
-            rows = _get_report_rows(db, subject_id=subject_id, branch_id=branch_id, start_date=start_date, end_date=end_date)
+            # small preview limit for UI responsiveness
+            rows = _get_report_rows(db, subject_id=subject_id, branch_id=branch_id, start_date=start_date, end_date=end_date)[:200]
 
-        return render_template("reports_index.html", subjects=subjects, branches=branches, rows=rows, filters={"subject_id":subject_id,"branch_id":branch_id,"start_date":request.args.get("start_date"),"end_date":request.args.get("end_date")})
+        return render_template("reports_index.html", subjects=subjects, branches=branches, rows=rows, filters={"subject_id":(subject_id_raw or ""),"branch_id":(branch_id_raw or ""),"start_date":request.args.get("start_date"),"end_date":request.args.get("end_date")})
     except Exception as e:
         print(f"[reports_index] ERROR: {repr(e)}")
         flash("Reports are temporarily unavailable.", "error")
@@ -4847,12 +4889,39 @@ def reports_export_xlsx():
     db = None
     try:
         db = get_db()
-        subject_id = request.args.get("subject_id") or None
-        branch_id = request.args.get("branch_id") or None
+        # Validate params
+        subject_id_raw = request.args.get("subject_id") or None
+        branch_id_raw = request.args.get("branch_id") or None
+        subject_id = _parse_int_param(subject_id_raw)
+        branch_id = _parse_int_param(branch_id_raw)
         start_date = _parse_date_param(request.args.get("start_date"))
         end_date = _parse_date_param(request.args.get("end_date"))
 
+        if start_date and end_date and start_date > end_date:
+            flash("Start date cannot be after end date.", "error")
+            return redirect(url_for("reports_index"))
+
+        if subject_id_raw and subject_id is None:
+            flash("Invalid subject id.", "error")
+            return redirect(url_for("reports_index"))
+        if branch_id_raw and branch_id is None:
+            flash("Invalid branch id.", "error")
+            return redirect(url_for("reports_index"))
+
+        if subject_id and not _exists_id(db, "subjects", subject_id):
+            flash("Subject not found.", "error")
+            return redirect(url_for("reports_index"))
+        if branch_id and not _exists_id(db, "branches", branch_id):
+            flash("Branch not found.", "error")
+            return redirect(url_for("reports_index"))
+
+        # Enforce maximum export rows
+        MAX_EXPORT_ROWS = int(os.environ.get("REPORT_MAX_ROWS", "10000"))
         rows = _get_report_rows(db, subject_id=subject_id, branch_id=branch_id, start_date=start_date, end_date=end_date)
+        if len(rows) > MAX_EXPORT_ROWS:
+            # Limit results to keep exports lightweight
+            rows = rows[:MAX_EXPORT_ROWS]
+            flash(f"Export limited to first {MAX_EXPORT_ROWS} rows.", "warning")
         df = _rows_to_dataframe(rows)
 
         bio = BytesIO()
@@ -4882,12 +4951,38 @@ def reports_export_pdf():
     db = None
     try:
         db = get_db()
-        subject_id = request.args.get("subject_id") or None
-        branch_id = request.args.get("branch_id") or None
+        # Validate params
+        subject_id_raw = request.args.get("subject_id") or None
+        branch_id_raw = request.args.get("branch_id") or None
+        subject_id = _parse_int_param(subject_id_raw)
+        branch_id = _parse_int_param(branch_id_raw)
         start_date = _parse_date_param(request.args.get("start_date"))
         end_date = _parse_date_param(request.args.get("end_date"))
 
+        if start_date and end_date and start_date > end_date:
+            flash("Start date cannot be after end date.", "error")
+            return redirect(url_for("reports_index"))
+
+        if subject_id_raw and subject_id is None:
+            flash("Invalid subject id.", "error")
+            return redirect(url_for("reports_index"))
+        if branch_id_raw and branch_id is None:
+            flash("Invalid branch id.", "error")
+            return redirect(url_for("reports_index"))
+
+        if subject_id and not _exists_id(db, "subjects", subject_id):
+            flash("Subject not found.", "error")
+            return redirect(url_for("reports_index"))
+        if branch_id and not _exists_id(db, "branches", branch_id):
+            flash("Branch not found.", "error")
+            return redirect(url_for("reports_index"))
+
+        # Enforce maximum export rows
+        MAX_EXPORT_ROWS = int(os.environ.get("REPORT_MAX_ROWS", "10000"))
         rows = _get_report_rows(db, subject_id=subject_id, branch_id=branch_id, start_date=start_date, end_date=end_date)
+        if len(rows) > MAX_EXPORT_ROWS:
+            rows = rows[:MAX_EXPORT_ROWS]
+            flash(f"Export limited to first {MAX_EXPORT_ROWS} rows.", "warning")
         df = _rows_to_dataframe(rows)
 
         bio = BytesIO()
