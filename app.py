@@ -93,6 +93,42 @@ app.config.from_mapping(
     LOW_ATTENDANCE_THRESHOLD=int(os.environ.get("LOW_ATTENDANCE_THRESHOLD", 75)),
 )
 app.config.setdefault("MAX_CONTENT_LENGTH", int(os.environ.get("MAX_CONTENT_LENGTH", 25 * 1024 * 1024)))
+# Session cookie and lifetime configuration
+# In production (Render) ensure cookies are secure and SECRET_KEY is set.
+is_prod = bool(os.environ.get("RENDER") or os.environ.get("RENDER_INTERNAL_HOSTNAME") or os.environ.get("FLASK_ENV", "").lower() == "production")
+app.config.setdefault("SESSION_COOKIE_SECURE", os.environ.get("SESSION_COOKIE_SECURE", "True" if is_prod else "False").lower() in ("true", "1", "yes"))
+app.config.setdefault("SESSION_COOKIE_HTTPONLY", True)
+app.config.setdefault("SESSION_COOKIE_SAMESITE", os.environ.get("SESSION_COOKIE_SAMESITE", "Lax"))
+app.config.setdefault("PERMANENT_SESSION_LIFETIME", timedelta(hours=int(os.environ.get("PERMANENT_SESSION_HOURS", "8"))))
+
+# Warn loudly if running in production without a proper SECRET_KEY
+if is_prod and app.config.get("SECRET_KEY") in (None, "", "dev-key-change-in-production"):
+    print("[SECURITY] WARNING: Running in production without a real SECRET_KEY.\nSet the SECRET_KEY environment variable to a stable secret for all instances.")
+
+# Middleware: gracefully handle invalid/unsigned session cookies (itsdangerous.BadSignature)
+class _SessionFixMiddleware:
+    def __init__(self, app_):
+        self.app = app_
+
+    def __call__(self, environ, start_response):
+        from itsdangerous import BadSignature
+        try:
+            return self.app(environ, start_response)
+        except BadSignature as e:
+            try:
+                from werkzeug.wrappers import Response
+                # Clear the session cookie and redirect to login page
+                res = Response(status=302)
+                res.headers["Location"] = "/login"
+                cookie_name = app.session_cookie_name
+                res.set_cookie(cookie_name, "", expires=0, path='/', secure=app.config.get("SESSION_COOKIE_SECURE"), httponly=app.config.get("SESSION_COOKIE_HTTPONLY"), samesite=app.config.get("SESSION_COOKIE_SAMESITE"))
+                print(f"[session] Invalid signed session detected — clearing cookie and redirecting. detail={repr(e)}")
+                return res(environ, start_response)
+            except Exception:
+                # If anything goes wrong here, re-raise the original exception
+                raise
+
+app.wsgi_app = _SessionFixMiddleware(app.wsgi_app)
 
 def get_db():
     db_url = str(app.config.get("DATABASE", ""))
