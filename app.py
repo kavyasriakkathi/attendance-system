@@ -1763,6 +1763,7 @@ def branches():
             if action == "delete":
                 if not branch_id:
                     flash("Branch ID is required for deletion.", "error")
+                    return redirect(url_for("branches"))
                 else:
                     refs = {
                         "students": db.execute(f"SELECT COUNT(*) AS count FROM students WHERE branch_id = {placeholder}", (branch_id,)).fetchone(),
@@ -1773,19 +1774,23 @@ def branches():
                     total_refs = sum(int(row_get(row, "count", 0) or 0) for row in refs.values())
                     if total_refs > 0:
                         flash("This branch cannot be deleted because it is still used by students, subjects, attendance, or teacher assignments.", "error")
+                        return redirect(url_for("branches"))
                     else:
                         try:
                             db.execute(f"DELETE FROM branches WHERE id = {placeholder}", (branch_id,))
                             db.commit()
                             flash("Branch deleted successfully.", "success")
+                            return redirect(url_for("branches"))
                         except Exception as e:
                             db.rollback()
                             print(f"[branches] delete error: {repr(e)}")
                             flash("Error deleting branch. See server logs.", "error")
+                            return redirect(url_for("branches"))
 
             elif action == "edit":
                 if not branch_id or not name:
                     flash("Branch ID and name are required for editing.", "error")
+                    return redirect(url_for("branches"))
                 else:
                     duplicate = db.execute(
                         f"SELECT id FROM branches WHERE name = {placeholder} AND id != {placeholder}",
@@ -1793,6 +1798,7 @@ def branches():
                     ).fetchone()
                     if duplicate:
                         flash("Another branch already uses that name.", "error")
+                        return redirect(url_for("branches"))
                     else:
                         try:
                             db.execute(
@@ -1801,14 +1807,17 @@ def branches():
                             )
                             db.commit()
                             flash("Branch updated successfully.", "success")
+                            return redirect(url_for("branches"))
                         except Exception as e:
                             db.rollback()
                             print(f"[branches] update error: {repr(e)}")
                             flash("Error updating branch. See server logs.", "error")
+                            return redirect(url_for("branches"))
 
             else:
                 if not name:
                     flash("Branch name is required.", "error")
+                    return redirect(url_for("branches"))
                 else:
                     # If sections provided (comma-separated), create branch entries like "Name-Section"
                     try:
@@ -1828,18 +1837,22 @@ def branches():
                                 flash(f"Added {added} sectioned branch(es).", "success")
                             else:
                                 flash("No new section branches were added (they may already exist).", "info")
+                            return redirect(url_for("branches"))
                         else:
                             try:
                                 db.execute(f"INSERT INTO branches (name, location) VALUES ({placeholder}, {placeholder})", (name, location))
                                 db.commit()
                                 flash("Branch added successfully.", "success")
+                                return redirect(url_for("branches"))
                             except Exception:
                                 db.rollback()
                                 flash("Branch already exists or could not be added.", "error")
+                                return redirect(url_for("branches"))
                     except Exception as e:
                         db.rollback()
                         print(f"[branches] insert error: {repr(e)}")
                         flash("Error adding branch(s). See server logs.", "error")
+                        return redirect(url_for("branches"))
 
         branches_list = db.execute("SELECT * FROM branches ORDER BY name").fetchall()
         return render_template("branches.html", branches=branches_list)
