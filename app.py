@@ -388,6 +388,23 @@ def get_teacher_context(db=None):
             WHERE tb.teacher_id = {placeholder}
             ORDER BY b.name
         """, (teacher_id,)).fetchall()
+
+        # Fetch assigned subjects for this teacher (junction table)
+        assigned_subjects = db.execute(f"""
+            SELECT s.id, s.name, s.branch_id
+            FROM subjects s
+            JOIN teacher_subjects ts ON s.id = ts.subject_id
+            WHERE ts.teacher_id = {placeholder}
+            ORDER BY s.name
+        """, (teacher_id,)).fetchall()
+
+        # Fall back to legacy subject_id if no junction rows
+        if not assigned_subjects:
+            legacy_sub = row_get(teacher, "subject_id")
+            if legacy_sub:
+                s_row = db.execute(f"SELECT id, name, branch_id FROM subjects WHERE id = {placeholder}", (legacy_sub,)).fetchone()
+                if s_row:
+                    assigned_subjects = [s_row]
         
         # If no current branch selected, use the first one
         if not current_branch_id and assigned_branches:
@@ -422,6 +439,8 @@ def get_teacher_context(db=None):
             "current_branch_name": row_get(current_branch, "name") if current_branch else None,
             "assigned_branches": assigned_branches,
             "assigned_branches_count": len(assigned_branches) if assigned_branches else 0,
+            "assigned_subjects": assigned_subjects,
+            "assigned_subjects_count": len(assigned_subjects) if assigned_subjects else 0,
         }
     finally:
         if created_here:
