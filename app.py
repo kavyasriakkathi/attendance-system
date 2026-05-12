@@ -4718,5 +4718,191 @@ def internal_error(error):
 def not_found_error(error):
     return "<h1>404 Not Found</h1><p>The page you requested does not exist.</p>", 404
 
+def _parse_date_param(val):
+    if not val:
+        return None
+    try:
+        return date.fromisoformat(val)
+    except Exception:
+        try:
+            return date.fromtimestamp(int(val))
+        except Exception:
+            return None
+
+
+def _get_report_rows(db, subject_id=None, branch_id=None, start_date=None, end_date=None):
+    placeholder = get_placeholder()
+    where_clauses = []
+    params = []
+
+    if subject_id:
+        where_clauses.append(f"attendance.subject_id = {placeholder}")
+        params.append(subject_id)
+    if branch_id:
+        where_clauses.append(f"attendance.branch_id = {placeholder}")
+        params.append(branch_id)
+    if start_date:
+        where_clauses.append(f"attendance.date >= {placeholder}")
+        params.append(start_date.isoformat())
+    if end_date:
+        where_clauses.append(f"attendance.date <= {placeholder}")
+        params.append(end_date.isoformat())
+
+    where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+
+    query = f"""
+        SELECT attendance.id AS attendance_id, attendance.date, attendance.status, attendance.note,
+               students.id AS student_id, students.name AS student_name, students.enrollment,
+               subjects.id AS subject_id, subjects.name AS subject_name,
+               branches.id AS branch_id, branches.name AS branch_name
+        FROM attendance
+        JOIN students ON attendance.student_id = students.id
+        LEFT JOIN subjects ON attendance.subject_id = subjects.id
+        LEFT JOIN branches ON attendance.branch_id = branches.id
+        {where_sql}
+        ORDER BY attendance.date DESC
+    """
+
+    rows = db.execute(query, tuple(params)).fetchall()
+    return rows
+
+
+@app.route("/reports", methods=["GET"])
+@login_required
+@admin_required
+def reports_index():
+    db = None
+    try:
+        db = get_db()
+        placeholder = get_placeholder()
+        subjects = db.execute(f"SELECT id, name FROM subjects ORDER BY name").fetchall()
+        branches = db.execute(f"SELECT id, name FROM branches ORDER BY name").fetchall()
+
+        # Parse filters from query params
+        subject_id = request.args.get("subject_id") or None
+        branch_id = request.args.get("branch_id") or None
+        start_date = _parse_date_param(request.args.get("start_date"))
+        end_date = _parse_date_param(request.args.get("end_date"))
+
+        rows = None
+        if request.args.get("preview"):
+            rows = _get_report_rows(db, subject_id=subject_id, branch_id=branch_id, start_date=start_date, end_date=end_date)
+
+        return render_template("reports_index.html", subjects=subjects, branches=branches, rows=rows, filters={"subject_id":subject_id,"branch_id":branch_id,"start_date":request.args.get("start_date"),"end_date":request.args.get("end_date")})
+    except Exception as e:
+        print(f"[reports_index] ERROR: {repr(e)}")
+        flash("Reports are temporarily unavailable.", "error")
+        return redirect(url_for("dashboard"))
+    finally:
+        if db:
+            try:
+                db.close()
+            except Exception:
+                pass
+
+
+def _rows_to_dataframe(rows):
+    import pandas as _pd
+    data = []
+    for r in rows:
+        data.append({
+            "attendance_id": row_get(r, "attendance_id"),
+            "date": row_get(r, "date"),
+            "status": row_get(r, "status"),
+            "note": row_get(r, "note"),
+            "student_id": row_get(r, "student_id"),
+            "student_name": row_get(r, "student_name"),
+            "enrollment": row_get(r, "enrollment"),
+            "subject_id": row_get(r, "subject_id"),
+            "subject_name": row_get(r, "subject_name"),
+            "branch_id": row_get(r, "branch_id"),
+            "branch_name": row_get(r, "branch_name"),
+        })
+    return _pd.DataFrame(data)
+
+
+@app.route("/reports/export.xlsx")
+@login_required
+@admin_required
+def reports_export_xlsx():
+    db = None
+    try:
+        db = get_db()
+        subject_id = request.args.get("subject_id") or None
+        branch_id = request.args.get("branch_id") or None
+        start_date = _parse_date_param(request.args.get("start_date"))
+        end_date = _parse_date_param(request.args.get("end_date"))
+
+        rows = _get_report_rows(db, subject_id=subject_id, branch_id=branch_id, start_date=start_date, end_date=end_date)
+        df = _rows_to_dataframe(rows)
+
+        bio = BytesIO()
+        with pd.ExcelWriter(bio, engine="openpyxl") as writer:
+            if df.empty:
+                # create an empty sheet
+                pd.DataFrame([{"info":"No records"}]).to_excel(writer, index=False, sheet_name="Report")
+            else:
+                df.to_excel(writer, index=False, sheet_name="Report")
+        bio.seek(0)
+        filename = f"attendance_report_{date.today().isoformat()}.xlsx"
+        return send_file(bio, download_name=filename, as_attachment=True, mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    except Exception as e:
+        print(f"[reports_export_xlsx] ERROR: {repr(e)}")
+        flash("Export failed.", "error")
+        return redirect(url_for("reports_index"))
+    finally:
+        if db:
+            try: db.close()
+            except: pass
+
+
+@app.route("/reports/export.pdf")
+@login_required
+@admin_required
+def reports_export_pdf():
+    db = None
+    try:
+        db = get_db()
+        subject_id = request.args.get("subject_id") or None
+        branch_id = request.args.get("branch_id") or None
+        start_date = _parse_date_param(request.args.get("start_date"))
+        end_date = _parse_date_param(request.args.get("end_date"))
+
+        rows = _get_report_rows(db, subject_id=subject_id, branch_id=branch_id, start_date=start_date, end_date=end_date)
+        df = _rows_to_dataframe(rows)
+
+        bio = BytesIO()
+        doc = SimpleDocTemplate(bio, pagesize=landscape(letter))
+        elements = []
+
+        # Build table data
+        if df.empty:
+            data = [["No records for the selected filters"]]
+        else:
+            cols = ["date", "status", "student_name", "enrollment", "subject_name", "branch_name", "note"]
+            data = [cols]
+            for _, row in df.iterrows():
+                data.append([str(row.get(c, "")) for c in cols])
+
+        table = Table(data)
+        table.setStyle(TableStyle([
+            ("BACKGROUND", (0,0), (-1,0), colors.lightgrey),
+            ("GRID", (0,0), (-1,-1), 0.25, colors.black),
+            ("VALIGN", (0,0), (-1,-1), "TOP"),
+        ]))
+        elements.append(table)
+        doc.build(elements)
+        bio.seek(0)
+        filename = f"attendance_report_{date.today().isoformat()}.pdf"
+        return send_file(bio, download_name=filename, as_attachment=True, mimetype="application/pdf")
+    except Exception as e:
+        print(f"[reports_export_pdf] ERROR: {repr(e)}")
+        flash("PDF export failed.", "error")
+        return redirect(url_for("reports_index"))
+    finally:
+        if db:
+            try: db.close()
+            except: pass
+
 if __name__ == "__main__":
     socketio.run(app, host="0.0.0.0", port=10000, debug=True)
