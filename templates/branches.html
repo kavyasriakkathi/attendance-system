@@ -56,11 +56,8 @@ function fillBranchForm(branchId, name, location) {
     document.getElementById('branch_id').value = branchId;
     document.getElementById('branch_name').value = name;
     document.getElementById('branch_location').value = location;
-    document.getElementById('branch_sections').value = '';
     document.getElementById('branch_submit_btn').textContent = 'Save Changes';
     document.getElementById('branch_cancel_btn').style.display = 'inline-block';
-    document.getElementById('branch_sections').disabled = true;
-    document.getElementById('branch_sections').placeholder = 'Disabled while editing';
     document.getElementById('branchForm').scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
@@ -72,7 +69,6 @@ function resetBranchForm() {
     document.getElementById('branch_sections').value = '';
     document.getElementById('branch_submit_btn').textContent = 'Add Branch';
     document.getElementById('branch_cancel_btn').style.display = 'none';
-    document.getElementById('branch_sections').disabled = false;
     document.getElementById('branch_sections').placeholder = 'Comma-separated, e.g. A,B,C';
 }
 
