@@ -2,20 +2,25 @@
 {% block content %}
 <div class="card">
     <h1>Branches</h1>
-    <form method="post" class="form-row">
+    <form method="post" class="form-row" id="branchForm">
+        <input type="hidden" name="action" id="branch_action" value="add" />
+        <input type="hidden" name="branch_id" id="branch_id" value="" />
         <div>
             <label>Name</label>
-            <input type="text" name="name" required />
+            <input type="text" name="name" id="branch_name" required />
         </div>
         <div>
             <label>Location</label>
-            <input type="text" name="location" />
+            <input type="text" name="location" id="branch_location" />
         </div>
         <div>
             <label>Sections (optional)</label>
-            <input type="text" name="sections" placeholder="Comma-separated, e.g. A,B,C" />
+            <input type="text" name="sections" id="branch_sections" placeholder="Comma-separated, e.g. A,B,C" />
         </div>
-        <button type="submit">Add Branch</button>
+        <div style="display:flex; gap:10px; align-items:flex-end;">
+            <button type="submit" id="branch_submit_btn">Add Branch</button>
+            <button type="button" id="branch_cancel_btn" onclick="resetBranchForm()" style="display:none; background:#6b7280;">Cancel Edit</button>
+        </div>
     </form>
 </div>
 <div class="card">
@@ -24,6 +29,7 @@
             <tr>
                 <th>Name</th>
                 <th>Location</th>
+                <th>Actions</th>
             </tr>
         </thead>
         <tbody>
@@ -31,9 +37,47 @@
             <tr>
                 <td>{{ branch.name }}</td>
                 <td>{{ branch.location or '-' }}</td>
+                <td style="white-space:nowrap;">
+                    <button type="button" onclick='fillBranchForm({{ branch.id }}, {{ branch.name|tojson }}, {{ (branch.location or "")|tojson }})' style="background:#f59e0b; margin-right:8px;">Edit</button>
+                    <form method="post" style="display:inline;" onsubmit='return confirmDeleteBranch({{ branch.name|tojson }});'>
+                        <input type="hidden" name="action" value="delete" />
+                        <input type="hidden" name="branch_id" value="{{ branch.id }}" />
+                        <button type="submit" style="background:#dc2626;">Delete</button>
+                    </form>
+                </td>
             </tr>
             {% endfor %}
         </tbody>
     </table>
 </div>
+<script>
+function fillBranchForm(branchId, name, location) {
+    document.getElementById('branch_action').value = 'edit';
+    document.getElementById('branch_id').value = branchId;
+    document.getElementById('branch_name').value = name;
+    document.getElementById('branch_location').value = location;
+    document.getElementById('branch_sections').value = '';
+    document.getElementById('branch_submit_btn').textContent = 'Save Changes';
+    document.getElementById('branch_cancel_btn').style.display = 'inline-block';
+    document.getElementById('branch_sections').disabled = true;
+    document.getElementById('branch_sections').placeholder = 'Disabled while editing';
+    document.getElementById('branchForm').scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function resetBranchForm() {
+    document.getElementById('branch_action').value = 'add';
+    document.getElementById('branch_id').value = '';
+    document.getElementById('branch_name').value = '';
+    document.getElementById('branch_location').value = '';
+    document.getElementById('branch_sections').value = '';
+    document.getElementById('branch_submit_btn').textContent = 'Add Branch';
+    document.getElementById('branch_cancel_btn').style.display = 'none';
+    document.getElementById('branch_sections').disabled = false;
+    document.getElementById('branch_sections').placeholder = 'Comma-separated, e.g. A,B,C';
+}
+
+function confirmDeleteBranch(name) {
+    return confirm(`Delete branch ${name}? This cannot be undone.`);
+}
+</script>
 {% endblock %}

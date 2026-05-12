@@ -1754,42 +1754,92 @@ def branches():
         db = get_db()
         placeholder = get_placeholder()
         if request.method == "POST":
+            action = (request.form.get("action") or "add").strip().lower()
+            branch_id = (request.form.get("branch_id") or "").strip()
             name = (request.form.get("name") or "").strip()
             location = request.form.get("location")
             sections = (request.form.get("sections") or "").strip()
-            if not name:
-                flash("Branch name is required.", "error")
-            else:
-                # If sections provided (comma-separated), create branch entries like "Name-Section"
-                try:
-                    if sections:
-                        parts = [s.strip() for s in sections.split(",") if s.strip()]
-                        added = 0
-                        for sec in parts:
-                            branch_name = f"{name}-{sec}"
-                            try:
-                                db.execute(f"INSERT INTO branches (name, location) VALUES ({placeholder}, {placeholder})", (branch_name, location))
-                                added += 1
-                            except Exception:
-                                # Skip duplicates or other insert errors for individual section
-                                pass
-                        db.commit()
-                        if added:
-                            flash(f"Added {added} sectioned branch(es).", "success")
-                        else:
-                            flash("No new section branches were added (they may already exist).", "info")
+
+            if action == "delete":
+                if not branch_id:
+                    flash("Branch ID is required for deletion.", "error")
+                else:
+                    refs = {
+                        "students": db.execute(f"SELECT COUNT(*) AS count FROM students WHERE branch_id = {placeholder}", (branch_id,)).fetchone(),
+                        "subjects": db.execute(f"SELECT COUNT(*) AS count FROM subjects WHERE branch_id = {placeholder}", (branch_id,)).fetchone(),
+                        "attendance": db.execute(f"SELECT COUNT(*) AS count FROM attendance WHERE branch_id = {placeholder}", (branch_id,)).fetchone(),
+                        "teacher_branches": db.execute(f"SELECT COUNT(*) AS count FROM teacher_branches WHERE branch_id = {placeholder}", (branch_id,)).fetchone(),
+                    }
+                    total_refs = sum(int(row_get(row, "count", 0) or 0) for row in refs.values())
+                    if total_refs > 0:
+                        flash("This branch cannot be deleted because it is still used by students, subjects, attendance, or teacher assignments.", "error")
                     else:
                         try:
-                            db.execute(f"INSERT INTO branches (name, location) VALUES ({placeholder}, {placeholder})", (name, location))
+                            db.execute(f"DELETE FROM branches WHERE id = {placeholder}", (branch_id,))
                             db.commit()
-                            flash("Branch added successfully.", "success")
-                        except Exception:
+                            flash("Branch deleted successfully.", "success")
+                        except Exception as e:
                             db.rollback()
-                            flash("Branch already exists or could not be added.", "error")
-                except Exception as e:
-                    db.rollback()
-                    print(f"[branches] insert error: {repr(e)}")
-                    flash("Error adding branch(s). See server logs.", "error")
+                            print(f"[branches] delete error: {repr(e)}")
+                            flash("Error deleting branch. See server logs.", "error")
+
+            elif action == "edit":
+                if not branch_id or not name:
+                    flash("Branch ID and name are required for editing.", "error")
+                else:
+                    duplicate = db.execute(
+                        f"SELECT id FROM branches WHERE name = {placeholder} AND id != {placeholder}",
+                        (name, branch_id),
+                    ).fetchone()
+                    if duplicate:
+                        flash("Another branch already uses that name.", "error")
+                    else:
+                        try:
+                            db.execute(
+                                f"UPDATE branches SET name = {placeholder}, location = {placeholder} WHERE id = {placeholder}",
+                                (name, location, branch_id),
+                            )
+                            db.commit()
+                            flash("Branch updated successfully.", "success")
+                        except Exception as e:
+                            db.rollback()
+                            print(f"[branches] update error: {repr(e)}")
+                            flash("Error updating branch. See server logs.", "error")
+
+            else:
+                if not name:
+                    flash("Branch name is required.", "error")
+                else:
+                    # If sections provided (comma-separated), create branch entries like "Name-Section"
+                    try:
+                        if sections:
+                            parts = [s.strip() for s in sections.split(",") if s.strip()]
+                            added = 0
+                            for sec in parts:
+                                branch_name = f"{name}-{sec}"
+                                try:
+                                    db.execute(f"INSERT INTO branches (name, location) VALUES ({placeholder}, {placeholder})", (branch_name, location))
+                                    added += 1
+                                except Exception:
+                                    # Skip duplicates or other insert errors for individual section
+                                    pass
+                            db.commit()
+                            if added:
+                                flash(f"Added {added} sectioned branch(es).", "success")
+                            else:
+                                flash("No new section branches were added (they may already exist).", "info")
+                        else:
+                            try:
+                                db.execute(f"INSERT INTO branches (name, location) VALUES ({placeholder}, {placeholder})", (name, location))
+                                db.commit()
+                                flash("Branch added successfully.", "success")
+                            except Exception:
+                                db.rollback()
+                                flash("Branch already exists or could not be added.", "error")
+                    except Exception as e:
+                        db.rollback()
+                        print(f"[branches] insert error: {repr(e)}")
+                        flash("Error adding branch(s). See server logs.", "error")
 
         branches_list = db.execute("SELECT * FROM branches ORDER BY name").fetchall()
         return render_template("branches.html", branches=branches_list)
