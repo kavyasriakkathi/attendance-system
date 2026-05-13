@@ -1242,6 +1242,72 @@ def dashboard():
         if attendance_record_count > 0:
             overall_percentage = round((present_count / attendance_record_count) * 100, 1)
 
+        # Additional analytics for upgraded dashboard
+        today_str = date.today().isoformat()
+        # Today's attendance
+        today_q = f"SELECT COUNT(CASE WHEN status='Present' THEN 1 END) as present_today, COUNT(*) as total_today FROM attendance WHERE date = {placeholder}"
+        try:
+            today_row = db.execute(today_q, (today_str,)).fetchone()
+            today_present = int(row_get(today_row, "present_today", 0) or 0)
+            today_total = int(row_get(today_row, "total_today", 0) or 0)
+            today_percentage = round((today_present / today_total) * 100, 1) if today_total > 0 else 0
+        except Exception:
+            today_present = 0
+            today_total = 0
+            today_percentage = 0
+
+        # Active classes today (unique date, subject, branch, period)
+        active_classes_today_q = f"SELECT COUNT(*) FROM (SELECT 1 FROM attendance WHERE date = {placeholder} GROUP BY subject_id, branch_id, period) AS classes"
+        active_classes_today = int(_safe_scalar(active_classes_today_q, (today_str,), default=0) or 0)
+
+        # Total teachers
+        total_teachers = int(_safe_scalar("SELECT COUNT(*) FROM teachers", default=0) or 0)
+
+        # Total semesters (distinct non-null current_semester in students)
+        try:
+            total_semesters = int(db.execute("SELECT COUNT(DISTINCT current_semester) AS cnt FROM students WHERE current_semester IS NOT NULL").fetchone()[0] or 0)
+        except Exception:
+            total_semesters = 0
+
+        # Low attendance alerts: students with < 75% attendance (and at least 1 record)
+        low_alerts_q = f"SELECT COUNT(*) FROM (SELECT s.id, SUM(CASE WHEN a.status='Present' THEN 1 ELSE 0 END) as present_marks, COUNT(a.id) as total_marks, (SUM(CASE WHEN a.status='Present' THEN 1 ELSE 0 END)*100.0)/NULLIF(COUNT(a.id),0) as pct FROM students s LEFT JOIN attendance a ON s.id = a.student_id GROUP BY s.id) sub WHERE sub.total_marks > 0 AND sub.pct < 75"
+        low_attendance_alerts = int(_safe_scalar(low_alerts_q, default=0) or 0)
+
+        # Monthly attendance trend (last 12 months) - use YYYY-MM substring for portability
+        monthly_rows = _safe_fetchall(
+            """
+            SELECT substr(date,1,7) AS month,
+                   SUM(CASE WHEN status='Present' THEN 1 ELSE 0 END) AS present_marks,
+                   COUNT(*) AS total_marks
+            FROM attendance
+            GROUP BY month
+            ORDER BY month DESC
+            LIMIT 12
+            """
+        )
+        monthly_labels = []
+        monthly_percentages = []
+        for row in reversed(monthly_rows):
+            m = row_get(row, "month", "") or ""
+            tm = int(row_get(row, "total_marks", 0) or 0)
+            pm = int(row_get(row, "present_marks", 0) or 0)
+            pct = round((pm / tm) * 100, 1) if tm > 0 else 0
+            monthly_labels.append(m)
+            monthly_percentages.append(pct)
+
+        # Recent activity (last 10 attendance records)
+        recent_activity = _safe_fetchall(
+            f"""
+            SELECT a.date, s.name AS student_name, sub.name AS subject_name, b.name AS branch_name, a.status
+            FROM attendance a
+            LEFT JOIN students s ON a.student_id = s.id
+            LEFT JOIN subjects sub ON a.subject_id = sub.id
+            LEFT JOIN branches b ON a.branch_id = b.id
+            ORDER BY a.id DESC
+            LIMIT 10
+            """
+        )
+
         subject_rows = _safe_fetchall(
             """
             SELECT
@@ -1366,6 +1432,16 @@ def dashboard():
             branch_data=branch_data,
             database_info=database_info,
             mail_info=mail_info,
+            today_percentage=today_percentage,
+            today_present=today_present,
+            today_total=today_total,
+            active_classes_today=active_classes_today,
+            total_teachers=total_teachers,
+            total_semesters=total_semesters,
+            low_attendance_alerts=low_attendance_alerts,
+            monthly_labels=monthly_labels,
+            monthly_percentages=monthly_percentages,
+            recent_activity=recent_activity,
         )
     except Exception as e:
         print(f"[dashboard] CRITICAL ERROR: {repr(e)}")
@@ -1395,6 +1471,16 @@ def dashboard():
                 "username": None,
                 "tls": False,
             },
+            today_percentage=0,
+            today_present=0,
+            today_total=0,
+            active_classes_today=0,
+            total_teachers=0,
+            total_semesters=0,
+            low_attendance_alerts=0,
+            monthly_labels=[],
+            monthly_percentages=[],
+            recent_activity=[],
         )
     finally:
         if db:

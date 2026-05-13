@@ -97,6 +97,59 @@ style.textContent = `
 `;
 document.head.appendChild(style);
 </script>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    // Monthly trend chart
+    const monthlyEl = document.getElementById('monthlyTrendChart');
+    if (monthlyEl) {
+        const monthlyLabels = {{ monthly_labels | default([]) | tojson }};
+        const monthlyPercentages = {{ monthly_percentages | default([]) | tojson }};
+        new Chart(monthlyEl.getContext('2d'), {
+            type: 'bar',
+            data: {
+                labels: monthlyLabels,
+                datasets: [{
+                    label: 'Monthly Attendance %',
+                    data: monthlyPercentages,
+                    backgroundColor: 'rgba(67,97,238,0.12)',
+                    borderColor: primaryColor,
+                    borderWidth: 1,
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: { legend: { display: false } },
+                scales: {
+                    y: { beginAtZero: true, max: 100, ticks: { callback: (v) => v + '%' } },
+                    x: { ticks: { color: getComputedStyle(document.documentElement).getPropertyValue('--text-secondary') } }
+                }
+            }
+        });
+    }
+
+    // Ensure initial activity feed is present; socket updates will append later
+    const socket = io();
+    socket.on('stats_update', function(data) {
+        if (data && data.recent_activity) {
+            const feed = document.getElementById('activity-feed');
+            if (feed) {
+                feed.innerHTML = '';
+                data.recent_activity.forEach(act => {
+                    const item = document.createElement('div');
+                    item.className = 'activity-item';
+                    item.innerHTML = `
+                        <div class="activity-time">${act.date}</div>
+                        <div class="activity-details"><strong>${act.student}</strong> marked as <span class="status-${act.status.toLowerCase()}">${act.status}</span> in <strong>${act.subject}</strong> (${act.branch})</div>
+                    `;
+                    feed.appendChild(item);
+                });
+            }
+        }
+    });
+});
+</script>
 {% endblock %}
 {% block content %}
 <div class="welcome-header" style="margin-bottom: 40px; display: flex; justify-content: space-between; align-items: flex-end;">
@@ -141,15 +194,30 @@ document.head.appendChild(style);
         <h3>Total Classes</h3>
         <p class="count">{{ total_classes }}</p>
     </div>
-    <div class="stat-box" style="border-bottom: 4px solid var(--success-color);">
-        <i class="fa-solid fa-circle-check" style="font-size: 1.5rem; color: var(--text-secondary); margin-bottom: 15px;"></i>
-        <h3>Present</h3>
-        <p class="count">{{ present_count }}</p>
+    <div class="stat-box" style="border-bottom: 4px solid var(--info-color); background: linear-gradient(135deg,#f5faff 0%,#f0f9ff 100%);">
+        <i class="fa-solid fa-calendar-day" style="font-size: 1.5rem; color: var(--text-secondary); margin-bottom: 15px;"></i>
+        <h3>Today's Attendance</h3>
+        <p class="percentage">{{ today_percentage }}%</p>
     </div>
-    <div class="stat-box" style="border-bottom: 4px solid var(--danger-color);">
-        <i class="fa-solid fa-circle-xmark" style="font-size: 1.5rem; color: var(--text-secondary); margin-bottom: 15px;"></i>
-        <h3>Absent</h3>
-        <p class="count">{{ absent_count }}</p>
+    <div class="stat-box" style="border-bottom: 4px solid var(--accent-color); background: linear-gradient(135deg,#fffaf5 0%,#fff5eb 100%);">
+        <i class="fa-solid fa-chalkboard-user" style="font-size: 1.5rem; color: var(--text-secondary); margin-bottom: 15px;"></i>
+        <h3>Active Classes Today</h3>
+        <p class="count">{{ active_classes_today }}</p>
+    </div>
+    <div class="stat-box" style="border-bottom: 4px solid var(--danger-color); background: linear-gradient(135deg,#fff5f5 0%,#fff0f0 100%);">
+        <i class="fa-solid fa-triangle-exclamation" style="font-size: 1.5rem; color: var(--text-secondary); margin-bottom: 15px;"></i>
+        <h3>Low Attendance Alerts</h3>
+        <p class="count">{{ low_attendance_alerts }}</p>
+    </div>
+    <div class="stat-box" style="border-bottom: 4px solid var(--muted-color);">
+        <i class="fa-solid fa-chalkboard-teacher" style="font-size: 1.5rem; color: var(--text-secondary); margin-bottom: 15px;"></i>
+        <h3>Teachers</h3>
+        <p class="count">{{ total_teachers }}</p>
+    </div>
+    <div class="stat-box" style="border-bottom: 4px solid var(--secondary-color);">
+        <i class="fa-solid fa-layer-group" style="font-size: 1.5rem; color: var(--text-secondary); margin-bottom: 15px;"></i>
+        <h3>Semesters</h3>
+        <p class="count">{{ total_semesters }}</p>
     </div>
     <div class="stat-box" style="border-bottom: 4px solid var(--warning-color); background: linear-gradient(135deg, #ffffff 0%, #fff9e6 100%);">
         <i class="fa-solid fa-chart-pie" style="font-size: 1.5rem; color: var(--text-secondary); margin-bottom: 15px;"></i>
@@ -165,6 +233,14 @@ document.head.appendChild(style);
         </div>
         <div style="height: 300px; position: relative;">
             <canvas id="attendanceTrendChart"></canvas>
+        </div>
+    </div>
+    <div class="card">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+            <h2 style="margin: 0;"><i class="fa-solid fa-calendar-alt"></i> Monthly Trend</h2>
+        </div>
+        <div style="height: 220px; position: relative;">
+            <canvas id="monthlyTrendChart"></canvas>
         </div>
     </div>
     
@@ -272,7 +348,19 @@ document.addEventListener('DOMContentLoaded', function() {
 <div class="card">
     <h2>Recent Activity</h2>
     <div id="activity-feed">
-        <p class="loading">Loading recent activity...</p>
+        {% if recent_activity and recent_activity|length > 0 %}
+            {% for act in recent_activity %}
+                <div class="activity-item">
+                    <div class="activity-time">{{ act.date }}</div>
+                    <div class="activity-details">
+                        <strong>{{ act.student_name or 'Unknown' }}</strong> marked as <span class="status-{{ (act.status or '')|lower }}">{{ act.status }}</span>
+                        in <strong>{{ act.subject_name or 'Unknown' }}</strong> ({{ act.branch_name or 'Branch' }})
+                    </div>
+                </div>
+            {% endfor %}
+        {% else %}
+            <p>No recent activity</p>
+        {% endif %}
     </div>
 </div>
 
