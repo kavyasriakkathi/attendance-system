@@ -354,7 +354,7 @@ def _ensure_column(db, table_name: str, column_name: str, column_definition: str
 
 
 def get_teacher_context(db=None):
-    """Return the logged-in teacher profile plus subject/branch metadata."""
+    """Return the logged-in teacher profile plus subject/branch/section metadata."""
     if session.get("role") != "teacher":
         return None
 
@@ -378,114 +378,97 @@ def get_teacher_context(db=None):
 
         legacy_subject_id = row_get(teacher, "subject_id")
         current_subject_id = session.get("teacher_subject_id") or legacy_subject_id
-        
-        # Get current selected branch from session (or first available branch)
         current_branch_id = session.get("teacher_branch_id")
-        
-        # Fetch all assigned branches for this teacher
-        assigned_branches = db.execute(f"""
-            SELECT b.id, b.name, b.location
-            FROM branches b
-            JOIN teacher_branches tb ON b.id = tb.branch_id
-            WHERE tb.teacher_id = {placeholder}
-            ORDER BY b.name
-        """, (teacher_id,)).fetchall()
+        current_section = _normalize_branch_name(session.get("teacher_section"))
 
-        allowed_branch_ids = {
-            str(row_get(b, "id"))
-            for b in (assigned_branches or [])
-            if row_get(b, "id") is not None
+        assigned_assignments = _resolve_teacher_assignments(db, teacher_id)
+        assigned_subjects = []
+        assigned_branches = []
+        for assignment in assigned_assignments:
+            if row_get(assignment, "subject_id") is not None:
+                assigned_subjects.append({
+                    "id": row_get(assignment, "subject_id"),
+                    "name": row_get(assignment, "subject_name"),
+                    "branch_id": row_get(assignment, "branch_id"),
+                })
+            if row_get(assignment, "branch_id") is not None:
+                assigned_branches.append({
+                    "id": row_get(assignment, "branch_id"),
+                    "name": row_get(assignment, "branch_name"),
+                    "location": None,
+                    "section": row_get(assignment, "section") or _branch_section_from_name(row_get(assignment, "branch_name")) or row_get(assignment, "branch_name"),
+                })
+
+        # Deduplicate helper lists while preserving order.
+        def _dedupe_rows(rows, key_name):
+            seen = set()
+            unique_rows = []
+            for item in rows:
+                key = row_get(item, key_name)
+                if key in seen:
+                    continue
+                seen.add(key)
+                unique_rows.append(item)
+            return unique_rows
+
+        assigned_subjects = _dedupe_rows(assigned_subjects, "id")
+        assigned_branches = _dedupe_rows(assigned_branches, "id")
+
+        allowed_pairs = {
+            (str(row_get(a, "subject_id")), str(row_get(a, "branch_id")), _normalize_branch_name(row_get(a, "section")))
+            for a in assigned_assignments
+            if row_get(a, "subject_id") is not None and row_get(a, "branch_id") is not None
         }
 
-        if current_branch_id and allowed_branch_ids and str(current_branch_id) not in allowed_branch_ids:
-            # Stale/tampered session branch
-            current_branch_id = None
+        if current_branch_id:
+            current_branch_row = db.execute(
+                f"SELECT id, name FROM branches WHERE id = {placeholder}",
+                (current_branch_id,),
+            ).fetchone()
+            branch_label = row_get(current_branch_row, "name") if current_branch_row else ""
+            current_section = current_section or _branch_section_from_name(branch_label) or branch_label
 
-        # Fetch assigned subjects for this teacher (junction table)
-        assigned_subjects = db.execute(f"""
-            SELECT s.id, s.name, s.branch_id
-            FROM subjects s
-            JOIN teacher_subjects ts ON s.id = ts.subject_id
-            WHERE ts.teacher_id = {placeholder}
-            ORDER BY s.name
-        """, (teacher_id,)).fetchall()
-
-        allowed_subject_ids = {
-            str(row_get(s, "id"))
-            for s in (assigned_subjects or [])
-            if row_get(s, "id") is not None
-        }
-
-        # Fall back to legacy subject_id if no junction rows
-        if not assigned_subjects:
-            if legacy_subject_id:
-                s_row = db.execute(
-                    f"SELECT id, name, branch_id FROM subjects WHERE id = {placeholder}",
-                    (legacy_subject_id,),
-                ).fetchone()
-                if s_row:
-                    assigned_subjects = [s_row]
-
-        # Choose current subject from session if valid, otherwise first assigned,
-        # finally fall back to the legacy teachers.subject_id.
-        matched_subject_id = None
-        if assigned_subjects and current_subject_id:
-            for subj in assigned_subjects:
-                subj_id = row_get(subj, "id")
-                if subj_id is not None and str(subj_id) == str(current_subject_id):
-                    matched_subject_id = subj_id
-                    break
-        if matched_subject_id is None and assigned_subjects:
-            matched_subject_id = row_get(assigned_subjects[0], "id")
-        if matched_subject_id is None:
-            matched_subject_id = legacy_subject_id
-        current_subject_id = matched_subject_id
-
-        if current_subject_id and allowed_subject_ids and str(current_subject_id) not in allowed_subject_ids:
-            # Stale/tampered session subject
-            current_subject_id = None
-        
-        # If no current branch selected, use the first one
-        if not current_branch_id and assigned_branches:
+        if assigned_subjects and current_subject_id is None:
+            current_subject_id = row_get(assigned_subjects[0], "id")
+        if assigned_branches and current_branch_id is None:
             current_branch_id = row_get(assigned_branches[0], "id")
-            session["teacher_branch_id"] = current_branch_id
+            current_section = row_get(assigned_branches[0], "section") or current_section or row_get(assigned_branches[0], "name")
 
-        # If no current subject selected, use the first assigned one
+        if current_subject_id and current_branch_id:
+            pair_key = (str(current_subject_id), str(current_branch_id), _normalize_branch_name(current_section))
+            if allowed_pairs and pair_key not in allowed_pairs:
+                current_subject_id = None
+                current_branch_id = None
+                current_section = ""
+
         if not current_subject_id and assigned_subjects:
             current_subject_id = row_get(assigned_subjects[0], "id")
             session["teacher_subject_id"] = current_subject_id
-        
-        # Get current branch details
-        current_branch = None
+
+        if not current_branch_id and assigned_branches:
+            current_branch_id = row_get(assigned_branches[0], "id")
+            current_section = row_get(assigned_branches[0], "section") or current_section or row_get(assigned_branches[0], "name")
+            session["teacher_branch_id"] = current_branch_id
+            session["teacher_section"] = current_section
+
+        if current_subject_id is None and legacy_subject_id:
+            current_subject_id = legacy_subject_id
+
+        current_branch_name = None
         if current_branch_id:
-            current_branch = db.execute(
-                f"""
-                SELECT b.id, b.name
-                FROM branches b
-                JOIN teacher_branches tb ON tb.branch_id = b.id
-                WHERE b.id = {placeholder} AND tb.teacher_id = {placeholder}
-                """,
-                (current_branch_id, teacher_id),
+            branch_row = db.execute(
+                f"SELECT id, name, location FROM branches WHERE id = {placeholder}",
+                (current_branch_id,),
             ).fetchone()
+            current_branch_name = row_get(branch_row, "name") if branch_row else None
 
         subject = None
         if current_subject_id:
-            if allowed_subject_ids:
-                subject = db.execute(
-                    f"""
-                    SELECT s.id, s.name, s.branch_id
-                    FROM subjects s
-                    JOIN teacher_subjects ts ON ts.subject_id = s.id
-                    WHERE s.id = {placeholder} AND ts.teacher_id = {placeholder}
-                    """,
-                    (current_subject_id, teacher_id),
-                ).fetchone()
-            else:
-                subject = db.execute(
-                    f"SELECT id, name, branch_id FROM subjects WHERE id = {placeholder}",
-                    (current_subject_id,),
-                ).fetchone()
-        
+            subject = db.execute(
+                f"SELECT id, name, branch_id FROM subjects WHERE id = {placeholder}",
+                (current_subject_id,),
+            ).fetchone()
+
         subject_name = row_get(subject, "name") if subject else ""
 
         return {
@@ -498,11 +481,14 @@ def get_teacher_context(db=None):
             "current_subject_id": row_get(subject, "id") if subject else current_subject_id,
             "subject_row": subject,
             "current_branch_id": current_branch_id,
-            "current_branch_name": row_get(current_branch, "name") if current_branch else None,
+            "current_branch_name": current_branch_name,
+            "current_section": current_section,
             "assigned_branches": assigned_branches,
             "assigned_branches_count": len(assigned_branches) if assigned_branches else 0,
             "assigned_subjects": assigned_subjects,
             "assigned_subjects_count": len(assigned_subjects) if assigned_subjects else 0,
+            "assigned_assignments": assigned_assignments,
+            "assigned_assignments_count": len(assigned_assignments) if assigned_assignments else 0,
         }
     finally:
         if created_here:
@@ -784,7 +770,9 @@ def init_db(db=None):
             id SERIAL PRIMARY KEY,
             name TEXT NOT NULL,
             enrollment TEXT UNIQUE NOT NULL,
+            roll_no TEXT,
             branch_id INTEGER NOT NULL,
+            section TEXT,
             email TEXT,
             parent_email TEXT,
             current_year INTEGER DEFAULT 1,
@@ -818,6 +806,7 @@ def init_db(db=None):
             student_id INTEGER NOT NULL,
             branch_id INTEGER NOT NULL,
             branch_section TEXT,
+            section TEXT,
             subject_id INTEGER NOT NULL,
             teacher_id INTEGER,
             subject_name TEXT,
@@ -833,6 +822,18 @@ def init_db(db=None):
             id SERIAL PRIMARY KEY,
             key TEXT UNIQUE NOT NULL,
             value TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS teacher_assignments (
+            id SERIAL PRIMARY KEY,
+            teacher_id INTEGER NOT NULL,
+            subject_id INTEGER NOT NULL,
+            branch_id INTEGER NOT NULL,
+            section TEXT,
+            UNIQUE(teacher_id, subject_id, branch_id, section),
+            FOREIGN KEY(teacher_id) REFERENCES teachers(id) ON DELETE CASCADE,
+            FOREIGN KEY(subject_id) REFERENCES subjects(id) ON DELETE CASCADE,
+            FOREIGN KEY(branch_id) REFERENCES branches(id) ON DELETE CASCADE
         );
         """)
 
@@ -876,7 +877,9 @@ def init_db(db=None):
             id INTEGER PRIMARY KEY,
             name TEXT NOT NULL,
             enrollment TEXT UNIQUE NOT NULL,
+            roll_no TEXT,
             branch_id INTEGER NOT NULL,
+            section TEXT,
             email TEXT,
             parent_email TEXT,
             current_year INTEGER DEFAULT 1,
@@ -889,6 +892,7 @@ def init_db(db=None):
             student_id INTEGER NOT NULL,
             branch_id INTEGER NOT NULL,
             branch_section TEXT,
+            section TEXT,
             subject_id INTEGER NOT NULL,
             teacher_id INTEGER,
             subject_name TEXT,
@@ -902,6 +906,18 @@ def init_db(db=None):
             id INTEGER PRIMARY KEY,
             key TEXT UNIQUE NOT NULL,
             value TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS teacher_assignments (
+            id INTEGER PRIMARY KEY,
+            teacher_id INTEGER NOT NULL,
+            subject_id INTEGER NOT NULL,
+            branch_id INTEGER NOT NULL,
+            section TEXT,
+            UNIQUE(teacher_id, subject_id, branch_id, section),
+            FOREIGN KEY(teacher_id) REFERENCES teachers(id) ON DELETE CASCADE,
+            FOREIGN KEY(subject_id) REFERENCES subjects(id) ON DELETE CASCADE,
+            FOREIGN KEY(branch_id) REFERENCES branches(id) ON DELETE CASCADE
         );
 
         -- Index creation moved to upgrade section to ensure columns exist first.
@@ -924,10 +940,13 @@ def init_db(db=None):
         _ensure_column(db, "attendance", "subject_name", "TEXT")
         _ensure_column(db, "attendance", "period", "INTEGER DEFAULT 1")
         _ensure_column(db, "attendance", "branch_section", "TEXT")
+        _ensure_column(db, "attendance", "section", "TEXT")
         _ensure_column(db, "students", "import_order", "INTEGER")
         _ensure_column(db, "students", "parent_email", "TEXT")
         _ensure_column(db, "students", "current_year", "INTEGER DEFAULT 1")
         _ensure_column(db, "students", "current_semester", "INTEGER DEFAULT 1")
+        _ensure_column(db, "students", "roll_no", "TEXT")
+        _ensure_column(db, "students", "section", "TEXT")
         _ensure_column(db, "users", "student_id", "INTEGER")
         _ensure_column(db, "branches", "location", "TEXT")
         _ensure_column(db, "teachers", "name", "TEXT NOT NULL")
@@ -943,6 +962,29 @@ def init_db(db=None):
                     (SELECT name FROM branches WHERE branches.id = attendance.branch_id)
                 )
                 WHERE branch_section IS NULL OR TRIM(branch_section) = ''
+                """
+            )
+        except Exception:
+            pass
+
+        try:
+            db.execute(
+                """
+                UPDATE students
+                SET roll_no = COALESCE(roll_no, enrollment),
+                    section = COALESCE(section, (SELECT CASE WHEN instr(name, '-') > 0 THEN substr(name, instr(name, '-') + 1) ELSE '' END FROM branches WHERE branches.id = students.branch_id))
+                WHERE roll_no IS NULL OR section IS NULL OR TRIM(section) = ''
+                """
+            )
+        except Exception:
+            pass
+
+        try:
+            db.execute(
+                """
+                UPDATE attendance
+                SET section = COALESCE(section, branch_section)
+                WHERE section IS NULL OR TRIM(section) = ''
                 """
             )
         except Exception:
@@ -1143,6 +1185,70 @@ def init_db(db=None):
     except Exception as ts_error:
         print(f"[DB] teacher_subjects table creation skipped: {repr(ts_error)}")
 
+    try:
+        if is_postgres:
+            db.execute("""
+                CREATE TABLE IF NOT EXISTS teacher_assignments (
+                    id SERIAL PRIMARY KEY,
+                    teacher_id INTEGER NOT NULL,
+                    subject_id INTEGER NOT NULL,
+                    branch_id INTEGER NOT NULL,
+                    section TEXT,
+                    UNIQUE(teacher_id, subject_id, branch_id, section),
+                    FOREIGN KEY(teacher_id) REFERENCES teachers(id) ON DELETE CASCADE,
+                    FOREIGN KEY(subject_id) REFERENCES subjects(id) ON DELETE CASCADE,
+                    FOREIGN KEY(branch_id) REFERENCES branches(id) ON DELETE CASCADE
+                )
+            """)
+        else:
+            db.execute("""
+                CREATE TABLE IF NOT EXISTS teacher_assignments (
+                    id INTEGER PRIMARY KEY,
+                    teacher_id INTEGER NOT NULL,
+                    subject_id INTEGER NOT NULL,
+                    branch_id INTEGER NOT NULL,
+                    section TEXT,
+                    UNIQUE(teacher_id, subject_id, branch_id, section),
+                    FOREIGN KEY(teacher_id) REFERENCES teachers(id) ON DELETE CASCADE,
+                    FOREIGN KEY(subject_id) REFERENCES subjects(id) ON DELETE CASCADE,
+                    FOREIGN KEY(branch_id) REFERENCES branches(id) ON DELETE CASCADE
+                )
+            """)
+
+        existing_assignments = db.execute("SELECT COUNT(*) as count FROM teacher_assignments").fetchone()
+        if row_get(existing_assignments, "count", 0) == 0:
+            teachers = db.execute("SELECT DISTINCT id FROM teachers").fetchall()
+            for teacher_row in teachers:
+                teacher_id = row_get(teacher_row, "id")
+                if teacher_id is None:
+                    continue
+                branch_rows = db.execute(
+                    f"SELECT b.id, b.name FROM branches b JOIN teacher_branches tb ON tb.branch_id = b.id WHERE tb.teacher_id = {placeholder}",
+                    (teacher_id,),
+                ).fetchall()
+                subject_rows = db.execute(
+                    f"SELECT s.id FROM subjects s JOIN teacher_subjects ts ON ts.subject_id = s.id WHERE ts.teacher_id = {placeholder}",
+                    (teacher_id,),
+                ).fetchall()
+                for branch_row in branch_rows:
+                    branch_id = row_get(branch_row, "id")
+                    branch_name = row_get(branch_row, "name") or ""
+                    section = _branch_section_from_name(branch_name)
+                    for subject_row in subject_rows:
+                        subject_id = row_get(subject_row, "id")
+                        if branch_id is None or subject_id is None:
+                            continue
+                        try:
+                            db.execute(
+                                f"INSERT INTO teacher_assignments (teacher_id, subject_id, branch_id, section) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder})",
+                                (teacher_id, subject_id, branch_id, section),
+                            )
+                        except Exception:
+                            pass
+            db.commit()
+    except Exception as ta_error:
+        print(f"[DB] teacher_assignments migration skipped: {repr(ta_error)}")
+
     # ✅ Admin check
     admin = db.execute(
         f"SELECT id FROM users WHERE username = {placeholder}", ("admin",)
@@ -1194,6 +1300,20 @@ def _normalize_branch_name(name):
     return (name or "").strip()
 
 
+def _branch_section_from_name(branch_name):
+    branch_name = _normalize_branch_name(branch_name)
+    if "-" not in branch_name:
+        return ""
+    return branch_name.rsplit("-", 1)[-1].strip()
+
+
+def _branch_base_from_name(branch_name):
+    branch_name = _normalize_branch_name(branch_name)
+    if "-" not in branch_name:
+        return branch_name
+    return branch_name.rsplit("-", 1)[0].strip()
+
+
 def _branch_name_exists(db, branch_name, exclude_id=None):
     placeholder = get_placeholder()
     branch_name = _normalize_branch_name(branch_name)
@@ -1240,6 +1360,74 @@ def _get_branch_section_name(db, branch_id):
         (branch_id,),
     ).fetchone()
     return row_get(row, "name") if row else None
+
+
+def _get_branch_name_and_section(db, branch_id):
+    if not branch_id:
+        return None, None
+    placeholder = get_placeholder()
+    row = db.execute(
+        f"SELECT id, name FROM branches WHERE id = {placeholder}",
+        (branch_id,),
+    ).fetchone()
+    branch_name = row_get(row, "name") if row else None
+    return branch_name, _branch_section_from_name(branch_name) if branch_name else None
+
+
+def _resolve_teacher_assignments(db, teacher_id):
+    placeholder = get_placeholder()
+    assignments = db.execute(
+        f"""
+        SELECT ta.id, ta.teacher_id, ta.subject_id, ta.branch_id, ta.section,
+               s.name AS subject_name, b.name AS branch_name
+        FROM teacher_assignments ta
+        JOIN subjects s ON ta.subject_id = s.id
+        JOIN branches b ON ta.branch_id = b.id
+        WHERE ta.teacher_id = {placeholder}
+        ORDER BY s.name, b.name, ta.section
+        """,
+        (teacher_id,),
+    ).fetchall()
+
+    if assignments:
+        return assignments
+
+    # Backward-compatible fallback from the legacy junction tables.
+    branch_rows = db.execute(
+        f"""
+        SELECT b.id, b.name, b.location
+        FROM branches b
+        JOIN teacher_branches tb ON b.id = tb.branch_id
+        WHERE tb.teacher_id = {placeholder}
+        ORDER BY b.name
+        """,
+        (teacher_id,),
+    ).fetchall()
+    subject_rows = db.execute(
+        f"""
+        SELECT s.id, s.name, s.branch_id
+        FROM subjects s
+        JOIN teacher_subjects ts ON s.id = ts.subject_id
+        WHERE ts.teacher_id = {placeholder}
+        ORDER BY s.name
+        """,
+        (teacher_id,),
+    ).fetchall()
+
+    fallback_assignments = []
+    for subject in subject_rows:
+        for branch in branch_rows:
+            branch_name = row_get(branch, "name")
+            fallback_assignments.append({
+                "id": f"legacy-{teacher_id}-{row_get(subject, 'id')}-{row_get(branch, 'id')}",
+                "teacher_id": teacher_id,
+                "subject_id": row_get(subject, "id"),
+                "branch_id": row_get(branch, "id"),
+                "section": _branch_section_from_name(branch_name),
+                "subject_name": row_get(subject, "name"),
+                "branch_name": branch_name,
+            })
+    return fallback_assignments
 
 
 def login_required(f):
@@ -2412,6 +2600,7 @@ def manage_teachers():
                         try:
                             # Insert teacher with first branch as legacy branch_id
                             first_branch_id = branch_ids[0] if branch_ids else None
+                            first_branch_name, first_branch_section = _get_branch_name_and_section(db, first_branch_id)
                             db.execute(
                                 f"INSERT INTO teachers (name, username, password, subject_id, subject_name, branch_id) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})",
                                 (name, username, generate_password_hash(password), primary_subject_id, subject_name_val, first_branch_id)
@@ -2431,6 +2620,17 @@ def manage_teachers():
                                     )
                                 except Exception:
                                     pass  # Skip duplicate entries
+
+                            for branch_id in branch_ids:
+                                branch_name, branch_section = _get_branch_name_and_section(db, branch_id)
+                                for subject_id in subject_ids:
+                                    try:
+                                        db.execute(
+                                            f"INSERT INTO teacher_assignments (teacher_id, subject_id, branch_id, section) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder})",
+                                            (new_teacher_id, subject_id, branch_id, branch_section),
+                                        )
+                                    except Exception:
+                                        pass
 
                             # Insert teacher subject assignments (junction table)
                             for subject_id in subject_ids:
@@ -2470,6 +2670,7 @@ def manage_teachers():
                             subject_name_val = ""
                         try:
                             first_branch_id = branch_ids[0] if branch_ids else None
+                            first_branch_name, first_branch_section = _get_branch_name_and_section(db, first_branch_id)
                             db.execute(
                                 f"UPDATE teachers SET name = {placeholder}, username = {placeholder}, subject_id = {placeholder}, subject_name = {placeholder}, branch_id = {placeholder} WHERE id = {placeholder}",
                                 (name, username, primary_subject_id, subject_name_val, first_branch_id, teacher_id)
@@ -2481,6 +2682,10 @@ def manage_teachers():
                             # Clear existing subject assignments
                             try:
                                 db.execute(f"DELETE FROM teacher_subjects WHERE teacher_id = {placeholder}", (teacher_id,))
+                            except Exception:
+                                pass
+                            try:
+                                db.execute(f"DELETE FROM teacher_assignments WHERE teacher_id = {placeholder}", (teacher_id,))
                             except Exception:
                                 pass
                             
@@ -2503,6 +2708,17 @@ def manage_teachers():
                                     )
                                 except Exception:
                                     pass
+
+                            for branch_id in branch_ids:
+                                branch_name, branch_section = _get_branch_name_and_section(db, branch_id)
+                                for subject_id in subject_ids:
+                                    try:
+                                        db.execute(
+                                            f"INSERT INTO teacher_assignments (teacher_id, subject_id, branch_id, section) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder})",
+                                            (teacher_id, subject_id, branch_id, branch_section),
+                                        )
+                                    except Exception:
+                                        pass
                             
                             db.commit()
                             flash(f"Teacher '{name}' updated successfully with {len(subject_ids)} subject(s) and {len(branch_ids)} branch(es).", "success")
@@ -3375,6 +3591,7 @@ def students():
             branch_id = request.form.get("branch_id", "").strip()
             email = request.form.get("email", "").strip()
             parent_email = request.form.get("parent_email", "").strip()
+            branch_name, section = _get_branch_name_and_section(db, branch_id)
 
             if not name or not enrollment or not branch_id:
                 flash("Name, enrollment, and branch are required.", "error")
@@ -3391,12 +3608,12 @@ def students():
                         if str(app.config.get("DATABASE", "")).startswith("postgres"):
                             max_order_row = db.execute("SELECT COALESCE(MAX(import_order), 0) AS max_import_order FROM students").fetchone()
                             next_import_order = int(row_get(max_order_row, "max_import_order", 0) or 0) + 1
-                            cur = db.execute(f"INSERT INTO students (name, enrollment, email, parent_email, branch_id, import_order) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}) RETURNING id", (name, enrollment, email or None, parent_email or None, branch_id, next_import_order))
+                            cur = db.execute(f"INSERT INTO students (name, enrollment, roll_no, email, parent_email, branch_id, section, import_order) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}) RETURNING id", (name, enrollment, enrollment, email or None, parent_email or None, branch_id, section, next_import_order))
                             student_id = cur.fetchone()[0]
                         else:
                             max_order_row = db.execute("SELECT COALESCE(MAX(import_order), 0) AS max_import_order FROM students").fetchone()
                             next_import_order = int(row_get(max_order_row, "max_import_order", 0) or 0) + 1
-                            cur = db.execute(f"INSERT INTO students (name, enrollment, email, parent_email, branch_id, import_order) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})", (name, enrollment, email or None, parent_email or None, branch_id, next_import_order))
+                            cur = db.execute(f"INSERT INTO students (name, enrollment, roll_no, email, parent_email, branch_id, section, import_order) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})", (name, enrollment, enrollment, email or None, parent_email or None, branch_id, section, next_import_order))
                             student_id = cur.lastrowid
                         
                         db.execute(f"INSERT INTO users (username, password, role, student_id) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder})", (enrollment, generate_password_hash(enrollment[-4:]), "student", student_id))
@@ -3799,27 +4016,33 @@ def teacher_select_branch():
         
         if request.method == "POST":
             selected_branch_id = request.form.get("branch_id")
+            selected_section = _normalize_branch_name(request.form.get("section"))
             if selected_branch_id:
-                # Verify this branch is assigned to this teacher
-                assigned = db.execute(f"""
-                    SELECT id FROM teacher_branches 
+                # Verify this branch/section pair is assigned to this teacher.
+                assigned = db.execute(
+                    f"""
+                    SELECT id, section FROM teacher_assignments
                     WHERE teacher_id = {placeholder} AND branch_id = {placeholder}
-                """, (teacher_id, selected_branch_id)).fetchone()
-                
+                    """,
+                    (teacher_id, selected_branch_id),
+                ).fetchall()
+                if not assigned:
+                    assigned = db.execute(f"""
+                        SELECT tb.branch_id AS branch_id, b.name AS branch_name
+                        FROM teacher_branches tb
+                        JOIN branches b ON b.id = tb.branch_id
+                        WHERE tb.teacher_id = {placeholder} AND tb.branch_id = {placeholder}
+                    """, (teacher_id, selected_branch_id)).fetchall()
+
                 if assigned:
                     session["teacher_branch_id"] = selected_branch_id
+                    branch_name, branch_section = _get_branch_name_and_section(db, selected_branch_id)
+                    session["teacher_section"] = selected_section or branch_section or _branch_section_from_name(branch_name)
                     return redirect(url_for("teacher_dashboard"))
                 else:
                     flash("Invalid branch selection.", "error")
         
-        # Get all assigned branches
-        branches = db.execute(f"""
-            SELECT b.id, b.name, b.location
-            FROM branches b
-            JOIN teacher_branches tb ON b.id = tb.branch_id
-            WHERE tb.teacher_id = {placeholder}
-            ORDER BY b.name
-        """, (teacher_id,)).fetchall()
+        branches = _resolve_teacher_assignments(db, teacher_id)
         
         teacher = db.execute(
             f"SELECT name FROM teachers WHERE id = {placeholder}",
@@ -4009,6 +4232,7 @@ def teacher_mark_attendance():
 
         current_branch_id = teacher["current_branch_id"]
         current_branch_name = teacher["current_branch_name"]
+        current_section = teacher.get("current_section") or _branch_section_from_name(current_branch_name or "") or current_branch_name or ""
         subject_name = teacher["subject_name"]
         subject_row = teacher["subject_row"]
         subject_id = row_get(subject_row, "id") if subject_row else None
@@ -4038,8 +4262,8 @@ def teacher_mark_attendance():
 
                         # Validate student belongs to this branch
                         ok_student = db.execute(
-                            f"SELECT 1 FROM students WHERE id = {placeholder} AND branch_id = {placeholder}",
-                            (student_id, current_branch_id),
+                            f"SELECT 1 FROM students WHERE id = {placeholder} AND branch_id = {placeholder} AND (COALESCE(section, '') = COALESCE({placeholder}, '') OR COALESCE(section, '') = '')",
+                            (student_id, current_branch_id, current_section),
                         ).fetchone()
                         if not ok_student:
                             invalid_students += 1
@@ -4075,7 +4299,7 @@ def teacher_mark_attendance():
                                 subject_name = EXCLUDED.subject_name,
                                 branch_section = EXCLUDED.branch_section
                             """,
-                            (student_id, current_branch_id, current_branch_name, subject_id, teacher["teacher_id"], subject_name, selected_date, period, status, note),
+                            (student_id, current_branch_id, current_section, subject_id, teacher["teacher_id"], subject_name, selected_date, period, status, note),
                         )
                         if str(student_id).isdigit():
                             saved_ids.append(int(student_id))
@@ -4092,8 +4316,8 @@ def teacher_mark_attendance():
                     flash("Failed to save attendance.", "error")
 
         students = db.execute(
-            f"SELECT id, name, enrollment FROM students WHERE branch_id = {placeholder} ORDER BY COALESCE(import_order, id), id",
-            (current_branch_id,),
+            f"SELECT id, name, enrollment, roll_no, section FROM students WHERE branch_id = {placeholder} AND (COALESCE(section, '') = COALESCE({placeholder}, '') OR COALESCE(section, '') = '') ORDER BY COALESCE(import_order, id), id",
+            (current_branch_id, current_section),
         ).fetchall()
 
         attendance_map = {}
@@ -4118,6 +4342,7 @@ def teacher_mark_attendance():
             selected_date=selected_date,
             period=period,
             today_date=today_str,
+            current_section=current_section,
         )
     except Exception as e:
         print(f"[teacher_mark_attendance] ERROR: {repr(e)}")

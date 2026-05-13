@@ -14,7 +14,7 @@
                 </div>
                 <div style="padding: 14px 16px; border-radius: 12px; background: #f8fafc; border: 1px solid #e2e8f0;">
                     <div style="font-size: 0.8rem; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.6px;">Current Branch / Section</div>
-                    <div style="font-weight: 700; margin-top: 6px;">{{ teacher.current_branch_name or 'Select branch' }}</div>
+                    <div style="font-weight: 700; margin-top: 6px;">{{ teacher.current_branch_name or 'Select branch' }}{% if teacher.current_section %} - Section {{ teacher.current_section }}{% endif %}</div>
                 </div>
             </div>
         </div>
@@ -36,7 +36,7 @@
                     <select name="branch_id" onchange="this.form.submit()">
                         <option value="">Select a branch</option>
                         {% for branch in teacher.assigned_branches %}
-                        <option value="{{ branch.id }}" {% if branch.id == teacher.current_branch_id %}selected{% endif %}>{{ branch.name }}</option>
+                        <option value="{{ branch.id }}" {% if branch.id == teacher.current_branch_id %}selected{% endif %}>{{ branch.name }}{% if branch.section %} - Section {{ branch.section }}{% endif %}</option>
                         {% endfor %}
                     </select>
                 </form>
@@ -87,7 +87,7 @@
             <h3 style="margin-bottom: 10px; font-size: 1rem;">Branches / Sections</h3>
             <div style="display: flex; flex-wrap: wrap; gap: 8px;">
                 {% for branch in teacher.assigned_branches %}
-                <span style="background: #dcfce7; color: #166534; padding: 6px 10px; border-radius: 999px; font-size: 0.9rem; font-weight: 600;">{{ branch.name }}</span>
+                <span style="background: #dcfce7; color: #166534; padding: 6px 10px; border-radius: 999px; font-size: 0.9rem; font-weight: 600;">{{ branch.name }}{% if branch.section %} / {{ branch.section }}{% endif %}</span>
                 {% else %}
                 <span style="color: var(--text-secondary);">No branches assigned.</span>
                 {% endfor %}

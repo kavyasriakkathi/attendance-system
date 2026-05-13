@@ -15,7 +15,7 @@
                         Welcome, <strong>{{ teacher_name }}</strong>! 
                     </p>
                     <p class="text-muted mb-4">
-                        You are assigned to teach the following branches. Please select one to mark attendance:
+                        You are assigned to teach the following branch/section combinations. Please select one to mark attendance:
                     </p>
 
                     {% if branches %}
@@ -26,6 +26,9 @@
                                     <input class="form-check-input me-2" type="radio" name="branch_id" 
                                            value="{{ branch.id }}" required {% if loop.first %}checked{% endif %}>
                                     <strong>{{ branch.name }}</strong>
+                                    {% if branch.section %}
+                                    <small class="text-muted ms-2">Section {{ branch.section }}</small>
+                                    {% endif %}
                                     {% if branch.location %}
                                     <small class="text-muted ms-2">({{ branch.location }})</small>
                                     {% endif %}
