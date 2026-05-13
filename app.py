@@ -2339,11 +2339,11 @@ def manage_teachers():
                 name = (request.form.get("name") or "").strip()
                 username = (request.form.get("username") or "").strip()
                 password = (request.form.get("password") or "").strip()
-                subject_id = request.form.get("subject_id")
+                subject_ids = [sid for sid in request.form.getlist("subject_ids") if str(sid).strip()]
                 branch_ids = request.form.getlist("branch_ids")  # Multiple branches
 
-                if not all([name, username, password, subject_id, branch_ids]):
-                    flash("Teacher name, username, password, subject, and at least one branch are required.", "error")
+                if not all([name, username, password, subject_ids, branch_ids]):
+                    flash("Teacher name, username, password, at least one subject, and at least one branch are required.", "error")
                 else:
                     # Duplicate username check
                     existing = db.execute(f"SELECT id FROM teachers WHERE username = {placeholder}", (username,)).fetchone()
@@ -2351,7 +2351,8 @@ def manage_teachers():
                         flash(f"Username '{username}' is already taken. Please choose a different username.", "error")
                     else:
                         # Look up subject name for backward compatibility
-                        sub_row = db.execute(f"SELECT name FROM subjects WHERE id = {placeholder}", (subject_id,)).fetchone()
+                        primary_subject_id = subject_ids[0]
+                        sub_row = db.execute(f"SELECT name FROM subjects WHERE id = {placeholder}", (primary_subject_id,)).fetchone()
                         subject_name_val = row_get(sub_row, "name") if sub_row else ""
                         if not subject_name_val:
                             subject_name_val = ""
@@ -2360,7 +2361,7 @@ def manage_teachers():
                             first_branch_id = branch_ids[0] if branch_ids else None
                             db.execute(
                                 f"INSERT INTO teachers (name, username, password, subject_id, subject_name, branch_id) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})",
-                                (name, username, generate_password_hash(password), subject_id, subject_name_val, first_branch_id)
+                                (name, username, generate_password_hash(password), primary_subject_id, subject_name_val, first_branch_id)
                             )
                             db.commit()
                             
@@ -2378,16 +2379,17 @@ def manage_teachers():
                                 except Exception:
                                     pass  # Skip duplicate entries
 
-                            # Insert teacher subject assignment (junction table)
-                            try:
-                                db.execute(
-                                    f"INSERT INTO teacher_subjects (teacher_id, subject_id) VALUES ({placeholder}, {placeholder})",
-                                    (new_teacher_id, subject_id),
-                                )
-                            except Exception:
-                                pass
+                            # Insert teacher subject assignments (junction table)
+                            for subject_id in subject_ids:
+                                try:
+                                    db.execute(
+                                        f"INSERT INTO teacher_subjects (teacher_id, subject_id) VALUES ({placeholder}, {placeholder})",
+                                        (new_teacher_id, subject_id),
+                                    )
+                                except Exception:
+                                    pass
                             db.commit()
-                            flash(f"Teacher '{name}' added successfully with {len(branch_ids)} branch(es). They can now log in with username: {username}", "success")
+                            flash(f"Teacher '{name}' added successfully with {len(subject_ids)} subject(s) and {len(branch_ids)} branch(es). They can now log in with username: {username}", "success")
                         except Exception as e:
                             db.rollback()
                             flash(f"Error adding teacher: {repr(e)}", "error")
@@ -2396,11 +2398,11 @@ def manage_teachers():
                 teacher_id = request.form.get("teacher_id")
                 name = (request.form.get("name") or "").strip()
                 username = (request.form.get("username") or "").strip()
-                subject_id = request.form.get("subject_id")
+                subject_ids = [sid for sid in request.form.getlist("subject_ids") if str(sid).strip()]
                 branch_ids = request.form.getlist("branch_ids")  # Multiple branches
 
-                if not all([teacher_id, name, username, subject_id, branch_ids]):
-                    flash("All fields including at least one branch are required.", "error")
+                if not all([teacher_id, name, username, subject_ids, branch_ids]):
+                    flash("All fields including at least one subject and one branch are required.", "error")
                 else:
                     # Check for duplicate username excluding self
                     dup = db.execute(f"SELECT id FROM teachers WHERE username = {placeholder} AND id != {placeholder}", (username, teacher_id)).fetchone()
@@ -2408,7 +2410,8 @@ def manage_teachers():
                         flash(f"Username '{username}' is already taken by another teacher.", "error")
                     else:
                         # Look up subject name to maintain backward compatibility
-                        sub_row = db.execute(f"SELECT name FROM subjects WHERE id = {placeholder}", (subject_id,)).fetchone()
+                        primary_subject_id = subject_ids[0]
+                        sub_row = db.execute(f"SELECT name FROM subjects WHERE id = {placeholder}", (primary_subject_id,)).fetchone()
                         subject_name_val = row_get(sub_row, "name") if sub_row else ""
                         if not subject_name_val:
                             subject_name_val = ""
@@ -2416,7 +2419,7 @@ def manage_teachers():
                             first_branch_id = branch_ids[0] if branch_ids else None
                             db.execute(
                                 f"UPDATE teachers SET name = {placeholder}, username = {placeholder}, subject_id = {placeholder}, subject_name = {placeholder}, branch_id = {placeholder} WHERE id = {placeholder}",
-                                (name, username, subject_id, subject_name_val, first_branch_id, teacher_id)
+                                (name, username, primary_subject_id, subject_name_val, first_branch_id, teacher_id)
                             )
                             
                             # Clear existing branch assignments
@@ -2438,17 +2441,18 @@ def manage_teachers():
                                 except Exception:
                                     pass  # Skip duplicates
 
-                            # Insert new subject assignment
-                            try:
-                                db.execute(
-                                    f"INSERT INTO teacher_subjects (teacher_id, subject_id) VALUES ({placeholder}, {placeholder})",
-                                    (teacher_id, subject_id),
-                                )
-                            except Exception:
-                                pass
+                            # Insert new subject assignments
+                            for subject_id in subject_ids:
+                                try:
+                                    db.execute(
+                                        f"INSERT INTO teacher_subjects (teacher_id, subject_id) VALUES ({placeholder}, {placeholder})",
+                                        (teacher_id, subject_id),
+                                    )
+                                except Exception:
+                                    pass
                             
                             db.commit()
-                            flash(f"Teacher '{name}' updated successfully with {len(branch_ids)} branch(es).", "success")
+                            flash(f"Teacher '{name}' updated successfully with {len(subject_ids)} subject(s) and {len(branch_ids)} branch(es).", "success")
                         except Exception as e:
                             db.rollback()
                             flash(f"Error updating teacher: {repr(e)}", "error")
@@ -2500,6 +2504,7 @@ def manage_teachers():
         
         # For each teacher, fetch their assigned branches
         teacher_branches_map = {}
+        teacher_subjects_map = {}
         for teacher_row in teachers_list:
             teacher_id = row_get(teacher_row, "id")
             assigned_branches = db.execute(f"""
@@ -2510,12 +2515,21 @@ def manage_teachers():
                 ORDER BY b.name
             """, (teacher_id,)).fetchall()
             teacher_branches_map[teacher_id] = assigned_branches
+            assigned_subjects = db.execute(f"""
+                SELECT s.id, s.name
+                FROM subjects s
+                JOIN teacher_subjects ts ON s.id = ts.subject_id
+                WHERE ts.teacher_id = {placeholder}
+                ORDER BY s.name
+            """, (teacher_id,)).fetchall()
+            teacher_subjects_map[teacher_id] = assigned_subjects
         
         return render_template("admin_teachers.html", 
                              teachers=teachers_list, 
                              subjects=subjects_list, 
                              branches=branches_list,
-                             teacher_branches_map=teacher_branches_map)
+                             teacher_branches_map=teacher_branches_map,
+                             teacher_subjects_map=teacher_subjects_map)
     except Exception as e:
         print(f"[manage_teachers] ERROR: {repr(e)}")
         flash("Teacher management is temporarily unavailable.", "error")
@@ -3623,6 +3637,8 @@ def teacher_login():
             ).fetchone()
 
             password_ok = False
+            assigned_branches = []
+            assigned_subjects = []
             if user:
                 stored = row_get(user, "password") or ""
                 try:
@@ -3642,10 +3658,7 @@ def teacher_login():
                             except Exception:
                                 pass
 
-            if user and password_ok:
                 teacher_id = row_get(user, "id")
-                
-                # Fetch all assigned branches for this teacher
                 assigned_branches = db.execute(f"""
                     SELECT b.id, b.name
                     FROM branches b
@@ -3653,15 +3666,44 @@ def teacher_login():
                     WHERE tb.teacher_id = {placeholder}
                     ORDER BY b.name
                 """, (teacher_id,)).fetchall()
-                
+                assigned_subjects = db.execute(f"""
+                    SELECT s.id, s.name, s.branch_id
+                    FROM subjects s
+                    JOIN teacher_subjects ts ON s.id = ts.subject_id
+                    WHERE ts.teacher_id = {placeholder}
+                    ORDER BY s.name
+                """, (teacher_id,)).fetchall()
+
+                if not assigned_subjects and row_get(user, "subject_id"):
+                    fallback_subject = db.execute(
+                        f"SELECT id, name, branch_id FROM subjects WHERE id = {placeholder}",
+                        (row_get(user, "subject_id"),),
+                    ).fetchone()
+                    if fallback_subject:
+                        assigned_subjects = [fallback_subject]
+
+            if user and password_ok:
+                teacher_id = row_get(user, "id")
                 session.clear()
                 session["user_id"] = teacher_id
                 session["username"] = row_get(user, "username")
                 session["role"] = "teacher"
                 session["teacher_id"] = teacher_id
                 session["teacher_name"] = row_get(user, "name")
-                session["teacher_subject_id"] = row_get(user, "subject_id")
+                first_subject_id = row_get(assigned_subjects[0], "id") if assigned_subjects else row_get(user, "subject_id")
+                if first_subject_id is not None:
+                    session["teacher_subject_id"] = first_subject_id
                 session.permanent = True
+
+                if not assigned_subjects:
+                    session.clear()
+                    flash("No subjects assigned to your account. Contact admin.", "error")
+                    return render_template("teacher_login.html")
+
+                if not assigned_branches:
+                    session.clear()
+                    flash("No branches assigned to your account. Contact admin.", "error")
+                    return render_template("teacher_login.html")
                 
                 # If teacher has multiple branches, show branch selection page
                 if len(assigned_branches) > 1:
@@ -3881,6 +3923,37 @@ def teacher_mark_attendance():
             return "Unauthorized Access", 403
 
         placeholder = get_placeholder()
+        branch_request_id = (request.args.get("branch_id") or "").strip()
+        subject_request_id = (request.args.get("subject_id") or "").strip()
+
+        allowed_branch_ids = {
+            str(row_get(branch, "id"))
+            for branch in (teacher.get("assigned_branches") or [])
+            if row_get(branch, "id") is not None
+        }
+        allowed_subject_ids = {
+            str(row_get(subject, "id"))
+            for subject in (teacher.get("assigned_subjects") or [])
+            if row_get(subject, "id") is not None
+        }
+
+        if branch_request_id:
+            if branch_request_id in allowed_branch_ids:
+                session["teacher_branch_id"] = branch_request_id
+            else:
+                flash("Invalid branch selection.", "error")
+                return "Unauthorized Access", 403
+
+        if subject_request_id:
+            if subject_request_id in allowed_subject_ids:
+                session["teacher_subject_id"] = subject_request_id
+            else:
+                flash("Invalid subject selection.", "error")
+                return "Unauthorized Access", 403
+
+        if branch_request_id or subject_request_id:
+            teacher = get_teacher_context(db)
+
         current_branch_id = teacher["current_branch_id"]
         subject_name = teacher["subject_name"]
         subject_row = teacher["subject_row"]
