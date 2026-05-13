@@ -121,7 +121,7 @@ class _SessionFixMiddleware:
                 # Clear the session cookie and redirect to login page
                 res = Response(status=302)
                 res.headers["Location"] = "/login"
-                cookie_name = app.session_cookie_name
+                cookie_name = app.config.get("SESSION_COOKIE_NAME", "session")
                 res.set_cookie(cookie_name, "", expires=0, path='/', secure=app.config.get("SESSION_COOKIE_SECURE"), httponly=app.config.get("SESSION_COOKIE_HTTPONLY"), samesite=app.config.get("SESSION_COOKIE_SAMESITE"))
                 print(f"[session] Invalid signed session detected — clearing cookie and redirecting. detail={repr(e)}")
                 return res(environ, start_response)
