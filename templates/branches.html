@@ -51,11 +51,28 @@
     </table>
 </div>
 <script>
+function splitBranchName(name) {
+    const sectionMatch = name.match(/^(.*?)(\s+Section\s+.+)$/i);
+    if (sectionMatch) {
+        return {
+            baseName: sectionMatch[1].trim(),
+            sections: sectionMatch[2].trim(),
+        };
+    }
+
+    return {
+        baseName: name,
+        sections: '',
+    };
+}
+
 function fillBranchForm(branchId, name, location) {
+    const parts = splitBranchName(name);
     document.getElementById('branch_action').value = 'edit';
     document.getElementById('branch_id').value = branchId;
-    document.getElementById('branch_name').value = name;
+    document.getElementById('branch_name').value = parts.baseName;
     document.getElementById('branch_location').value = location;
+    document.getElementById('branch_sections').value = parts.sections;
     document.getElementById('branch_submit_btn').textContent = 'Save Changes';
     document.getElementById('branch_cancel_btn').style.display = 'inline-block';
     document.getElementById('branchForm').scrollIntoView({ behavior: 'smooth', block: 'start' });

@@ -13,7 +13,7 @@ from urllib.parse import urlparse
 from email.message import EmailMessage
 from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 
-from flask import Flask, abort, redirect, render_template, request, session, url_for, flash, jsonify, send_file
+from flask import Flask, abort, redirect, render_template, request, session, url_for, flash, jsonify, send_file, make_response
 from functools import wraps
 from werkzeug.security import check_password_hash, generate_password_hash
 from werkzeug.exceptions import HTTPException
@@ -1772,6 +1772,15 @@ def branches():
     try:
         db = get_db()
         placeholder = get_placeholder()
+
+        def _compose_branch_name(base_name, sections_value):
+            sections_value = (sections_value or "").strip()
+            if not sections_value:
+                return base_name
+            if base_name.lower().endswith(sections_value.lower()):
+                return base_name
+            return f"{base_name} {sections_value}".strip()
+
         if request.method == "POST":
             action = (request.form.get("action") or "add").strip().lower()
             branch_id = (request.form.get("branch_id") or "").strip()
@@ -1811,9 +1820,10 @@ def branches():
                     flash("Branch ID and name are required for editing.", "error")
                     return redirect(url_for("branches"))
                 else:
+                    updated_name = _compose_branch_name(name, sections)
                     duplicate = db.execute(
                         f"SELECT id FROM branches WHERE name = {placeholder} AND id != {placeholder}",
-                        (name, branch_id),
+                        (updated_name, branch_id),
                     ).fetchone()
                     if duplicate:
                         flash("Another branch already uses that name.", "error")
@@ -1822,7 +1832,7 @@ def branches():
                         try:
                             db.execute(
                                 f"UPDATE branches SET name = {placeholder}, location = {placeholder} WHERE id = {placeholder}",
-                                (name, location, branch_id),
+                                (updated_name, location, branch_id),
                             )
                             db.commit()
                             flash("Branch updated successfully.", "success")
@@ -1874,7 +1884,11 @@ def branches():
                         return redirect(url_for("branches"))
 
         branches_list = db.execute("SELECT * FROM branches ORDER BY name").fetchall()
-        return render_template("branches.html", branches=branches_list)
+        response = make_response(render_template("branches.html", branches=branches_list))
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+        return response
     except Exception as e:
         print(f"[branches] ERROR: {repr(e)}")
         flash("Branch management is temporarily unavailable.", "error")
