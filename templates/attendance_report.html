@@ -8,7 +8,7 @@
             <input type="text" name="search" placeholder="Name or Enrollment..." value="{{ filters.search or '' }}" style="width: 100%;" />
         </div>
         <div>
-            <label>Branch</label>
+            <label>Branch / Section</label>
             <select name="branch_id" onchange="this.form.submit()">
                 <option value="">All branches</option>
                 {% for branch in branches %}

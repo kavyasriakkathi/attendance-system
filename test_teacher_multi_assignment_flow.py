@@ -178,7 +178,7 @@ def test_teacher_multi_subject_branch_flow(client):
 
         saved_row = db.execute(
             """
-            SELECT id, status, note
+            SELECT id, status, note, branch_section
             FROM attendance
             WHERE student_id = ? AND branch_id = ? AND subject_id = ? AND date = ? AND period = ?
             """,
@@ -192,6 +192,7 @@ def test_teacher_multi_subject_branch_flow(client):
         ).fetchone()
         assert saved_row is not None
         assert row_get(saved_row, "status") == "Present"
+        assert row_get(saved_row, "branch_section") == row_get(branch_rows[0], "name")
 
         _admin_session(client)
         unassigned_name = f"UNASSIGNED_{uuid.uuid4().hex[:6]}"

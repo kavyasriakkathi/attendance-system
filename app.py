@@ -817,6 +817,7 @@ def init_db(db=None):
             id SERIAL PRIMARY KEY,
             student_id INTEGER NOT NULL,
             branch_id INTEGER NOT NULL,
+            branch_section TEXT,
             subject_id INTEGER NOT NULL,
             teacher_id INTEGER,
             subject_name TEXT,
@@ -887,6 +888,7 @@ def init_db(db=None):
             id INTEGER PRIMARY KEY,
             student_id INTEGER NOT NULL,
             branch_id INTEGER NOT NULL,
+            branch_section TEXT,
             subject_id INTEGER NOT NULL,
             teacher_id INTEGER,
             subject_name TEXT,
@@ -921,6 +923,7 @@ def init_db(db=None):
         _ensure_column(db, "attendance", "teacher_id", "INTEGER")
         _ensure_column(db, "attendance", "subject_name", "TEXT")
         _ensure_column(db, "attendance", "period", "INTEGER DEFAULT 1")
+        _ensure_column(db, "attendance", "branch_section", "TEXT")
         _ensure_column(db, "students", "import_order", "INTEGER")
         _ensure_column(db, "students", "parent_email", "TEXT")
         _ensure_column(db, "students", "current_year", "INTEGER DEFAULT 1")
@@ -930,6 +933,20 @@ def init_db(db=None):
         _ensure_column(db, "teachers", "name", "TEXT NOT NULL")
         _ensure_column(db, "teachers", "subject_id", "INTEGER")
         _ensure_column(db, "teachers", "subject_name", "TEXT")
+
+        try:
+            db.execute(
+                """
+                UPDATE attendance
+                SET branch_section = COALESCE(
+                    branch_section,
+                    (SELECT name FROM branches WHERE branches.id = attendance.branch_id)
+                )
+                WHERE branch_section IS NULL OR TRIM(branch_section) = ''
+                """
+            )
+        except Exception:
+            pass
         
         # Drop the NOT NULL constraint on teachers.subject_name so new inserts
         # that use subject_id instead of subject_name don't violate the constraint.
@@ -1171,6 +1188,58 @@ def init_db(db=None):
             db.close()
         except Exception:
             pass
+
+
+def _normalize_branch_name(name):
+    return (name or "").strip()
+
+
+def _branch_name_exists(db, branch_name, exclude_id=None):
+    placeholder = get_placeholder()
+    branch_name = _normalize_branch_name(branch_name)
+    if not branch_name:
+        return False
+
+    if exclude_id:
+        row = db.execute(
+            f"SELECT 1 FROM branches WHERE LOWER(name) = LOWER({placeholder}) AND id != {placeholder}",
+            (branch_name, exclude_id),
+        ).fetchone()
+    else:
+        row = db.execute(
+            f"SELECT 1 FROM branches WHERE LOWER(name) = LOWER({placeholder})",
+            (branch_name,),
+        ).fetchone()
+    return bool(row)
+
+
+def _build_branch_section_names(base_name, sections_value):
+    base_name = _normalize_branch_name(base_name)
+    sections_value = _normalize_branch_name(sections_value)
+
+    if not sections_value:
+        return [base_name] if base_name else []
+
+    branch_names = []
+    for section in sections_value.split(","):
+        section = _normalize_branch_name(section)
+        if not section:
+            continue
+        branch_name = f"{base_name}-{section}" if base_name else section
+        if branch_name not in branch_names:
+            branch_names.append(branch_name)
+    return branch_names
+
+
+def _get_branch_section_name(db, branch_id):
+    if not branch_id:
+        return None
+    placeholder = get_placeholder()
+    row = db.execute(
+        f"SELECT name FROM branches WHERE id = {placeholder}",
+        (branch_id,),
+    ).fetchone()
+    return row_get(row, "name") if row else None
 
 
 def login_required(f):
@@ -2126,20 +2195,12 @@ def branches():
         db = get_db()
         placeholder = get_placeholder()
 
-        def _compose_branch_name(base_name, sections_value):
-            sections_value = (sections_value or "").strip()
-            if not sections_value:
-                return base_name
-            if base_name.lower().endswith(sections_value.lower()):
-                return base_name
-            return f"{base_name} {sections_value}".strip()
-
         if request.method == "POST":
             action = (request.form.get("action") or "add").strip().lower()
             branch_id = (request.form.get("branch_id") or "").strip()
-            name = (request.form.get("name") or "").strip()
+            name = _normalize_branch_name(request.form.get("name"))
             location = request.form.get("location")
-            sections = (request.form.get("sections") or "").strip()
+            sections = _normalize_branch_name(request.form.get("sections"))
 
             if action == "delete":
                 if not branch_id:
@@ -2173,19 +2234,14 @@ def branches():
                     flash("Branch ID and name are required for editing.", "error")
                     return redirect(url_for("branches"))
                 else:
-                    updated_name = _compose_branch_name(name, sections)
-                    duplicate = db.execute(
-                        f"SELECT id FROM branches WHERE name = {placeholder} AND id != {placeholder}",
-                        (updated_name, branch_id),
-                    ).fetchone()
-                    if duplicate:
+                    if _branch_name_exists(db, name, exclude_id=branch_id):
                         flash("Another branch already uses that name.", "error")
                         return redirect(url_for("branches"))
                     else:
                         try:
                             db.execute(
                                 f"UPDATE branches SET name = {placeholder}, location = {placeholder} WHERE id = {placeholder}",
-                                (updated_name, location, branch_id),
+                                (name, location, branch_id),
                             )
                             db.commit()
                             flash("Branch updated successfully.", "success")
@@ -2201,35 +2257,32 @@ def branches():
                     flash("Branch name is required.", "error")
                     return redirect(url_for("branches"))
                 else:
-                    # If sections provided (comma-separated), create branch entries like "Name-Section"
                     try:
-                        if sections:
-                            parts = [s.strip() for s in sections.split(",") if s.strip()]
-                            added = 0
-                            for sec in parts:
-                                branch_name = f"{name}-{sec}"
-                                try:
-                                    db.execute(f"INSERT INTO branches (name, location) VALUES ({placeholder}, {placeholder})", (branch_name, location))
-                                    added += 1
-                                except Exception:
-                                    # Skip duplicates or other insert errors for individual section
-                                    pass
-                            db.commit()
-                            if added:
-                                flash(f"Added {added} sectioned branch(es).", "success")
-                            else:
-                                flash("No new section branches were added (they may already exist).", "info")
+                        branch_names = _build_branch_section_names(name, sections)
+                        if not branch_names:
+                            flash("Branch name is required.", "error")
                             return redirect(url_for("branches"))
+
+                        added = 0
+                        skipped = []
+                        for branch_name in branch_names:
+                            if _branch_name_exists(db, branch_name):
+                                skipped.append(branch_name)
+                                continue
+                            db.execute(
+                                f"INSERT INTO branches (name, location) VALUES ({placeholder}, {placeholder})",
+                                (branch_name, location),
+                            )
+                            added += 1
+
+                        db.commit()
+                        if added and skipped:
+                            flash(f"Added {added} section(s); skipped {len(skipped)} duplicate(s).", "warning")
+                        elif added:
+                            flash("Branch added successfully.", "success")
                         else:
-                            try:
-                                db.execute(f"INSERT INTO branches (name, location) VALUES ({placeholder}, {placeholder})", (name, location))
-                                db.commit()
-                                flash("Branch added successfully.", "success")
-                                return redirect(url_for("branches"))
-                            except Exception:
-                                db.rollback()
-                                flash("Branch already exists or could not be added.", "error")
-                                return redirect(url_for("branches"))
+                            flash("No new sections were added because they already exist.", "info")
+                        return redirect(url_for("branches"))
                     except Exception as e:
                         db.rollback()
                         print(f"[branches] insert error: {repr(e)}")
@@ -3955,6 +4008,7 @@ def teacher_mark_attendance():
             teacher = get_teacher_context(db)
 
         current_branch_id = teacher["current_branch_id"]
+        current_branch_name = teacher["current_branch_name"]
         subject_name = teacher["subject_name"]
         subject_row = teacher["subject_row"]
         subject_id = row_get(subject_row, "id") if subject_row else None
@@ -4011,16 +4065,17 @@ def teacher_mark_attendance():
                         db.execute(
                             f"""
                             INSERT INTO attendance (
-                                student_id, branch_id, subject_id, teacher_id, subject_name,
+                                student_id, branch_id, branch_section, subject_id, teacher_id, subject_name,
                                 date, period, status, note
-                            ) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})
+                            ) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})
                             ON CONFLICT (student_id, subject_id, date, period) DO UPDATE
                             SET status = EXCLUDED.status,
                                 note = EXCLUDED.note,
                                 teacher_id = EXCLUDED.teacher_id,
-                                subject_name = EXCLUDED.subject_name
+                                subject_name = EXCLUDED.subject_name,
+                                branch_section = EXCLUDED.branch_section
                             """,
-                            (student_id, current_branch_id, subject_id, teacher["teacher_id"], subject_name, selected_date, period, status, note),
+                            (student_id, current_branch_id, current_branch_name, subject_id, teacher["teacher_id"], subject_name, selected_date, period, status, note),
                         )
                         if str(student_id).isdigit():
                             saved_ids.append(int(student_id))
@@ -4348,15 +4403,15 @@ def mark_attendance():
                         is_pg = str(app.config.get("DATABASE", "")).startswith("postgres")
                         if is_pg:
                             db.execute(f"""
-                                INSERT INTO attendance (student_id, branch_id, subject_id, date, period, status, note)
-                                VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})
+                                INSERT INTO attendance (student_id, branch_id, branch_section, subject_id, date, period, status, note)
+                                VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})
                                 ON CONFLICT (student_id, subject_id, date, period) DO UPDATE 
-                                SET status = EXCLUDED.status, note = EXCLUDED.note
-                            """, (student_id, branch_id, subject_id, selected_date, period, status, note))
+                                SET status = EXCLUDED.status, note = EXCLUDED.note, branch_section = EXCLUDED.branch_section
+                            """, (student_id, branch_id, _get_branch_section_name(db, branch_id), subject_id, selected_date, period, status, note))
                         else:
                             # SQLite manual update
                             db.execute(f"DELETE FROM attendance WHERE student_id={placeholder} AND subject_id={placeholder} AND date={placeholder} AND period={placeholder}", (student_id, subject_id, selected_date, period))
-                            db.execute(f"INSERT INTO attendance (student_id, branch_id, subject_id, date, period, status, note) VALUES ({placeholder},{placeholder},{placeholder},{placeholder},{placeholder},{placeholder},{placeholder})", (student_id, branch_id, subject_id, selected_date, period, status, note))
+                            db.execute(f"INSERT INTO attendance (student_id, branch_id, branch_section, subject_id, date, period, status, note) VALUES ({placeholder},{placeholder},{placeholder},{placeholder},{placeholder},{placeholder},{placeholder},{placeholder})", (student_id, branch_id, _get_branch_section_name(db, branch_id), subject_id, selected_date, period, status, note))
                         
                         if str(student_id).isdigit():
                             saved_ids.append(int(student_id))
@@ -4491,8 +4546,8 @@ def attendance_scan():
     if existing:
         if row_get(existing, "status") != "Present":
             db.execute(
-                f"UPDATE attendance SET status = {placeholder}, note = {placeholder} WHERE id = {placeholder}",
-                ("Present", "Marked via QR scan", row_get(existing, "id")),
+                f"UPDATE attendance SET status = {placeholder}, note = {placeholder}, branch_section = {placeholder} WHERE id = {placeholder}",
+                ("Present", "Marked via QR scan", row_get(branch, "name"), row_get(existing, "id")),
             )
             db.commit()
             message = "Your attendance has been updated to Present."
@@ -4500,8 +4555,8 @@ def attendance_scan():
             message = "Your attendance is already marked as Present."
     else:
         db.execute(
-            f"INSERT INTO attendance (student_id, branch_id, subject_id, date, period, status, note) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})",
-            (student_id, branch_id, subject_id, selected_date, period, "Present", "Marked via QR scan"),
+            f"INSERT INTO attendance (student_id, branch_id, branch_section, subject_id, date, period, status, note) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})",
+            (student_id, branch_id, row_get(branch, "name"), subject_id, selected_date, period, "Present", "Marked via QR scan"),
         )
         db.commit()
         message = "Attendance recorded successfully."
@@ -4589,7 +4644,7 @@ def fetch_report_records(db, filters):
     placeholder = get_placeholder()
     query = (
         "SELECT attendance.*, students.name AS student_name, students.enrollment, "
-        "branches.name AS branch_name, subjects.name AS subject_name "
+        "COALESCE(attendance.branch_section, branches.name) AS branch_name, subjects.name AS subject_name "
         "FROM attendance "
         "JOIN students ON attendance.student_id = students.id "
         "JOIN branches ON attendance.branch_id = branches.id "
@@ -5086,7 +5141,7 @@ def handle_request_stats():
             
         # Get last 5 activity items
         activity_rows = db.execute("""
-            SELECT a.date, s.name as student_name, sub.name as subject_name, a.status, b.name as branch_name
+            SELECT a.date, s.name as student_name, sub.name as subject_name, a.status, COALESCE(a.branch_section, b.name) AS branch_name
             FROM attendance a
             JOIN students s ON a.student_id = s.id
             JOIN subjects sub ON a.subject_id = sub.id
@@ -5499,7 +5554,7 @@ def _get_report_rows(db, subject_id=None, branch_id=None, start_date=None, end_d
         SELECT attendance.id AS attendance_id, attendance.date, attendance.status, attendance.note,
                students.id AS student_id, students.name AS student_name, students.enrollment,
                subjects.id AS subject_id, subjects.name AS subject_name,
-               branches.id AS branch_id, branches.name AS branch_name
+                             branches.id AS branch_id, COALESCE(attendance.branch_section, branches.name) AS branch_name
         FROM attendance
         JOIN students ON attendance.student_id = students.id
         LEFT JOIN subjects ON attendance.subject_id = subjects.id
