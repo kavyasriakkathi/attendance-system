@@ -376,7 +376,8 @@ def get_teacher_context(db=None):
         if not teacher:
             return None
 
-        subject_id = row_get(teacher, "subject_id")
+        legacy_subject_id = row_get(teacher, "subject_id")
+        current_subject_id = session.get("teacher_subject_id") or legacy_subject_id
         
         # Get current selected branch from session (or first available branch)
         current_branch_id = session.get("teacher_branch_id")
@@ -401,11 +402,28 @@ def get_teacher_context(db=None):
 
         # Fall back to legacy subject_id if no junction rows
         if not assigned_subjects:
-            legacy_sub = row_get(teacher, "subject_id")
-            if legacy_sub:
-                s_row = db.execute(f"SELECT id, name, branch_id FROM subjects WHERE id = {placeholder}", (legacy_sub,)).fetchone()
+            if legacy_subject_id:
+                s_row = db.execute(
+                    f"SELECT id, name, branch_id FROM subjects WHERE id = {placeholder}",
+                    (legacy_subject_id,),
+                ).fetchone()
                 if s_row:
                     assigned_subjects = [s_row]
+
+        # Choose current subject from session if valid, otherwise first assigned,
+        # finally fall back to the legacy teachers.subject_id.
+        matched_subject_id = None
+        if assigned_subjects and current_subject_id:
+            for subj in assigned_subjects:
+                subj_id = row_get(subj, "id")
+                if subj_id is not None and str(subj_id) == str(current_subject_id):
+                    matched_subject_id = subj_id
+                    break
+        if matched_subject_id is None and assigned_subjects:
+            matched_subject_id = row_get(assigned_subjects[0], "id")
+        if matched_subject_id is None:
+            matched_subject_id = legacy_subject_id
+        current_subject_id = matched_subject_id
         
         # If no current branch selected, use the first one
         if not current_branch_id and assigned_branches:
@@ -420,10 +438,10 @@ def get_teacher_context(db=None):
             ).fetchone()
 
         subject = None
-        if subject_id:
+        if current_subject_id:
             subject = db.execute(
                 f"SELECT id, name, branch_id FROM subjects WHERE id = {placeholder}",
-                (subject_id,),
+                (current_subject_id,),
             ).fetchone()
         
         subject_name = row_get(subject, "name") if subject else ""
@@ -434,7 +452,8 @@ def get_teacher_context(db=None):
             "name": row_get(teacher, "name"),
             "username": row_get(teacher, "username"),
             "subject_name": subject_name,
-            "subject_id": subject_id,
+            "subject_id": row_get(subject, "id") if subject else legacy_subject_id,
+            "current_subject_id": row_get(subject, "id") if subject else current_subject_id,
             "subject_row": subject,
             "current_branch_id": current_branch_id,
             "current_branch_name": row_get(current_branch, "name") if current_branch else None,
@@ -3286,6 +3305,51 @@ def teacher_select_branch():
         print(f"[teacher_select_branch] ERROR: {repr(e)}")
         flash("Error loading branch selection.", "error")
         return redirect(url_for("teacher_login"))
+    finally:
+        if db:
+            try:
+                db.close()
+            except Exception:
+                pass
+
+
+@app.route("/teacher/select-subject", methods=["GET", "POST"])
+@login_required
+@teacher_required
+def teacher_select_subject():
+    """Allow teacher to select which assigned subject is active."""
+    db = None
+    try:
+        db = get_db()
+        teacher = get_teacher_context(db)
+        if not teacher:
+            return "Unauthorized Access", 403
+
+        if request.method == "POST":
+            selected_subject_id = (request.form.get("subject_id") or "").strip()
+            allowed_ids = {
+                str(row_get(subject, "id"))
+                for subject in (teacher.get("assigned_subjects") or [])
+                if row_get(subject, "id") is not None
+            }
+
+            if selected_subject_id and selected_subject_id in allowed_ids:
+                session["teacher_subject_id"] = selected_subject_id
+                return redirect(url_for("teacher_dashboard"))
+
+            flash("Invalid subject selection.", "error")
+            return redirect(url_for("teacher_select_subject"))
+
+        return render_template(
+            "teacher_select_subject.html",
+            subjects=teacher.get("assigned_subjects") or [],
+            teacher_name=teacher.get("name") or "Teacher",
+            current_subject_id=teacher.get("current_subject_id"),
+        )
+    except Exception as e:
+        print(f"[teacher_select_subject] ERROR: {repr(e)}")
+        flash("Error loading subject selection.", "error")
+        return redirect(url_for("teacher_dashboard"))
     finally:
         if db:
             try:

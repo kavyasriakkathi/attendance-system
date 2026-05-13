@@ -24,7 +24,7 @@
                                 {% for subject in subjects %}
                                 <label class="list-group-item list-group-item-action">
                                     <input class="form-check-input me-2" type="radio" name="subject_id" 
-                                           value="{{ subject.id }}" required {% if loop.first %}checked{% endif %}>
+                                           value="{{ subject.id }}" required {% if subject.id == current_subject_id or (not current_subject_id and loop.first) %}checked{% endif %}>
                                     <strong>{{ subject.name }}</strong>
                                 </label>
                                 {% endfor %}
