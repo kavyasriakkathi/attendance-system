@@ -179,6 +179,34 @@ main {
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
 }
 
+/* Login specific styles */
+.login-wrapper {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: calc(100vh - 120px);
+    padding: 40px 16px;
+}
+
+.login-card {
+    max-width: 420px;
+    width: 100%;
+    padding: 36px;
+    border-radius: 14px;
+}
+
+.login-header { text-align: center; margin-bottom: 20px; }
+.login-icon { font-size: 3rem; color: var(--primary-color); margin-bottom: 10px; display: block; }
+.muted { color: var(--text-secondary); margin-top: 6px; font-weight: 600; }
+
+.login-form .form-group { margin-bottom: 14px; }
+.primary-btn { width: 100%; padding: 12px 16px; border-radius: 10px; }
+
+@media (max-width: 480px) {
+    .login-card { margin: 20px 12px; padding: 20px; }
+    .login-icon { font-size: 2.4rem; }
+}
+
 h1, h2, h3 {
     margin-top: 0;
     font-weight: 700;

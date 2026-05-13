@@ -1,32 +1,28 @@
 {% extends "layout.html" %}
 {% block content %}
-<div class="card login-card" style="max-width: 450px; margin: 60px auto; padding: 40px;">
-    <div style="text-align: center; margin-bottom: 30px;">
-        <i class="fa-solid fa-user-shield" style="font-size: 3rem; color: var(--primary-color); margin-bottom: 20px;"></i>
-        <h1 style="margin: 0;">Admin Login</h1>
-        <p style="color: var(--text-secondary);">Access the management console</p>
-    </div>
-    <form method="post">
-        <div>
-            <label><i class="fa-solid fa-user"></i> Username</label>
-            <input type="text" name="username" required autofocus placeholder="Enter admin username" />
+<div class="login-wrapper">
+    <div class="card login-card">
+        <div class="login-header">
+            <i class="fa-solid fa-user-shield login-icon"></i>
+            <h1>Admin Login</h1>
+            <p class="muted">Access the management console</p>
         </div>
-        <div>
-            <label><i class="fa-solid fa-lock"></i> Password</label>
-            <input type="password" name="password" required placeholder="••••••••" />
-        </div>
-        <button type="submit" style="width: 100%; margin-top: 10px;">
-            Sign In <i class="fa-solid fa-right-to-bracket"></i>
-        </button>
-    </form>
-    <div style="margin-top: 28px; display: flex; justify-content: center; gap: 14px; flex-wrap: wrap;">
-        <a class="button" href="{{ url_for('teacher_login') }}" style="background-color: var(--text-secondary);">
-            <i class="fa-solid fa-chalkboard-user"></i> Teacher Login
-        </a>
-        <a class="button" href="{{ url_for('student_login') }}" style="background-color: var(--text-secondary);">
-            <i class="fa-solid fa-user-graduate"></i> Student Login
-        </a>
-    </div>
 
+        <form method="post" class="login-form">
+            <div class="form-group">
+                <label for="username">Username</label>
+                <input id="username" type="text" name="username" required autofocus placeholder="Enter admin username" />
+            </div>
+
+            <div class="form-group">
+                <label for="password">Password</label>
+                <input id="password" type="password" name="password" required placeholder="••••••••" />
+            </div>
+
+            <button type="submit" class="primary-btn">
+                Sign In <i class="fa-solid fa-right-to-bracket"></i>
+            </button>
+        </form>
+    </div>
 </div>
 {% endblock %}
