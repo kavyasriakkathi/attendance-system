@@ -1,12 +1,18 @@
 import os
+import shutil
+import tempfile
 import unittest
+from pathlib import Path
 
 os.environ.setdefault("SECRET_KEY", "test-secret-key")
 os.environ.setdefault("FLASK_ENV", "development")
 
 from flask import session
 
+import app as app_module
 from app import app, get_db, get_teacher_context, row_get
+
+from werkzeug.security import generate_password_hash
 
 
 def _select_teacher_with_assignments():
@@ -36,6 +42,63 @@ def _select_teacher_with_assignments():
 
 
 class TeacherContextSmokeTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        # Use an isolated DB so this test never depends on (or mutates) the real app DB.
+        cls._tmpdir = tempfile.mkdtemp(prefix="teacher-context-")
+        db_path = Path(cls._tmpdir) / "teacher_context_test.db"
+        app.config.update(
+            TESTING=True,
+            DATABASE=str(db_path),
+            SECRET_KEY=os.environ.get("SECRET_KEY", "test-secret-key"),
+        )
+        app_module._DB_INIT_DONE = False
+
+        db = get_db()
+        try:
+            branch = db.execute("SELECT id FROM branches ORDER BY id LIMIT 1").fetchone()
+            subject = db.execute("SELECT id, name FROM subjects ORDER BY id LIMIT 1").fetchone()
+            if not branch or not subject:
+                raise AssertionError("Branches/subjects did not initialize correctly")
+
+            db.execute(
+                "INSERT INTO teachers (name, username, password, subject_id, branch_id, subject_name) VALUES (?,?,?,?,?,?)",
+                (
+                    "Test Teacher",
+                    "teacher_smoke",
+                    generate_password_hash("pass123"),
+                    row_get(subject, "id"),
+                    row_get(branch, "id"),
+                    row_get(subject, "name"),
+                ),
+            )
+            teacher_id = db.execute(
+                "SELECT id FROM teachers WHERE username = ?",
+                ("teacher_smoke",),
+            ).fetchone()[0]
+
+            db.execute(
+                "INSERT INTO teacher_branches (teacher_id, branch_id) VALUES (?,?)",
+                (teacher_id, row_get(branch, "id")),
+            )
+            db.execute(
+                "INSERT INTO teacher_subjects (teacher_id, subject_id) VALUES (?,?)",
+                (teacher_id, row_get(subject, "id")),
+            )
+            db.commit()
+        finally:
+            try:
+                db.close()
+            except Exception:
+                pass
+
+    @classmethod
+    def tearDownClass(cls):
+        try:
+            shutil.rmtree(cls._tmpdir, ignore_errors=True)
+        except Exception:
+            pass
+
     def setUp(self):
         self.teacher = _select_teacher_with_assignments()
         if not self.teacher:
@@ -112,8 +175,8 @@ class TeacherContextSmokeTest(unittest.TestCase):
         with app.test_client() as client:
             self._seed_teacher_session(client, include_teacher_id=False)
             resp = client.get("/teacher/dashboard")
-            self.assertEqual(resp.status_code, 403)
-            self.assertIn("Unauthorized Access", resp.data.decode("utf-8", errors="ignore"))
+            self.assertIn(resp.status_code, (302, 303))
+            self.assertIn("/teacher_login", resp.headers.get("Location", ""))
 
 
 if __name__ == "__main__":

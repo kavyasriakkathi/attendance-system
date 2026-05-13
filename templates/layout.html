@@ -27,6 +27,9 @@
             <a class="nav-link" href="{{ url_for('dashboard') }}"><i class="fa-solid fa-chart-line"></i> Dashboard</a>
             <a class="nav-link" href="{{ url_for('students') }}"><i class="fa-solid fa-users"></i> Students</a>
             <a class="nav-link" href="{{ url_for('branches') }}"><i class="fa-solid fa-building"></i> Depts</a>
+            <a class="nav-link" href="{{ url_for('subjects') }}"><i class="fa-solid fa-book-open"></i> Subjects</a>
+            <a class="nav-link" href="{{ url_for('manage_teachers') }}"><i class="fa-solid fa-user-tie"></i> Teachers</a>
+            <a class="nav-link" href="{{ url_for('admin_academic') }}"><i class="fa-solid fa-graduation-cap"></i> Academic</a>
             <a class="nav-link" href="{{ url_for('mark_attendance') }}"><i class="fa-solid fa-calendar-check"></i> Attendance</a>
             <a class="nav-link" href="{{ url_for('department_dashboard') }}"><i class="fa-solid fa-chart-pie"></i> Summary</a>
             <a class="nav-link" href="{{ url_for('attendance_report') }}"><i class="fa-solid fa-file-invoice"></i> Reports</a>
@@ -34,8 +37,11 @@
             <a class="nav-link" href="{{ url_for('settings') }}"><i class="fa-solid fa-gear"></i> Settings</a>
             <a class="logout" href="{{ url_for('logout') }}"><i class="fa-solid fa-right-from-bracket"></i></a>
             {% elif session.role == 'teacher' %}
-            <a class="nav-link" href="{{ url_for('mark_attendance') }}"><i class="fa-solid fa-calendar-check"></i> Attendance</a>
-            <a class="nav-link" href="{{ url_for('attendance_report') }}"><i class="fa-solid fa-file-invoice"></i> Reports</a>
+            <a class="nav-link" href="{{ url_for('teacher_dashboard') }}"><i class="fa-solid fa-gauge"></i> Dashboard</a>
+            <a class="nav-link" href="{{ url_for('teacher_mark_attendance') }}"><i class="fa-solid fa-calendar-check"></i> Attendance</a>
+            <a class="nav-link" href="{{ url_for('teacher_attendance_records') }}"><i class="fa-solid fa-clipboard-list"></i> Records</a>
+            <a class="nav-link" href="{{ url_for('teacher_select_branch') }}"><i class="fa-solid fa-building"></i> Branch</a>
+            <a class="nav-link" href="{{ url_for('teacher_select_subject') }}"><i class="fa-solid fa-book"></i> Subject</a>
             <a class="logout" href="{{ url_for('logout') }}"><i class="fa-solid fa-right-from-bracket"></i></a>
             {% else %}
             <a class="logout" href="{{ url_for('logout') }}"><i class="fa-solid fa-right-from-bracket"></i></a>

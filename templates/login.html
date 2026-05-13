@@ -19,10 +19,14 @@
             Sign In <i class="fa-solid fa-right-to-bracket"></i>
         </button>
     </form>
-    <div style="margin-top: 30px; padding: 15px; background: #f8f9fa; border-radius: 12px; font-size: 0.85rem; color: var(--text-secondary); text-align: center;">
-        <p style="margin: 0;">Default admin credentials:</p>
-        <code style="display: block; margin-top: 5px; color: var(--primary-color);">admin / admin123</code>
+    <div style="margin-top: 28px; display: flex; justify-content: center; gap: 14px; flex-wrap: wrap;">
+        <a class="button" href="{{ url_for('teacher_login') }}" style="background-color: var(--text-secondary);">
+            <i class="fa-solid fa-chalkboard-user"></i> Teacher Login
+        </a>
+        <a class="button" href="{{ url_for('student_login') }}" style="background-color: var(--text-secondary);">
+            <i class="fa-solid fa-user-graduate"></i> Student Login
+        </a>
     </div>
-    
+
 </div>
 {% endblock %}

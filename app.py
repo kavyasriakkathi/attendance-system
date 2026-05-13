@@ -391,6 +391,16 @@ def get_teacher_context(db=None):
             ORDER BY b.name
         """, (teacher_id,)).fetchall()
 
+        allowed_branch_ids = {
+            str(row_get(b, "id"))
+            for b in (assigned_branches or [])
+            if row_get(b, "id") is not None
+        }
+
+        if current_branch_id and allowed_branch_ids and str(current_branch_id) not in allowed_branch_ids:
+            # Stale/tampered session branch
+            current_branch_id = None
+
         # Fetch assigned subjects for this teacher (junction table)
         assigned_subjects = db.execute(f"""
             SELECT s.id, s.name, s.branch_id
@@ -399,6 +409,12 @@ def get_teacher_context(db=None):
             WHERE ts.teacher_id = {placeholder}
             ORDER BY s.name
         """, (teacher_id,)).fetchall()
+
+        allowed_subject_ids = {
+            str(row_get(s, "id"))
+            for s in (assigned_subjects or [])
+            if row_get(s, "id") is not None
+        }
 
         # Fall back to legacy subject_id if no junction rows
         if not assigned_subjects:
@@ -424,25 +440,51 @@ def get_teacher_context(db=None):
         if matched_subject_id is None:
             matched_subject_id = legacy_subject_id
         current_subject_id = matched_subject_id
+
+        if current_subject_id and allowed_subject_ids and str(current_subject_id) not in allowed_subject_ids:
+            # Stale/tampered session subject
+            current_subject_id = None
         
         # If no current branch selected, use the first one
         if not current_branch_id and assigned_branches:
             current_branch_id = row_get(assigned_branches[0], "id")
+            session["teacher_branch_id"] = current_branch_id
+
+        # If no current subject selected, use the first assigned one
+        if not current_subject_id and assigned_subjects:
+            current_subject_id = row_get(assigned_subjects[0], "id")
+            session["teacher_subject_id"] = current_subject_id
         
         # Get current branch details
         current_branch = None
         if current_branch_id:
             current_branch = db.execute(
-                f"SELECT id, name FROM branches WHERE id = {placeholder}",
-                (current_branch_id,),
+                f"""
+                SELECT b.id, b.name
+                FROM branches b
+                JOIN teacher_branches tb ON tb.branch_id = b.id
+                WHERE b.id = {placeholder} AND tb.teacher_id = {placeholder}
+                """,
+                (current_branch_id, teacher_id),
             ).fetchone()
 
         subject = None
         if current_subject_id:
-            subject = db.execute(
-                f"SELECT id, name, branch_id FROM subjects WHERE id = {placeholder}",
-                (current_subject_id,),
-            ).fetchone()
+            if allowed_subject_ids:
+                subject = db.execute(
+                    f"""
+                    SELECT s.id, s.name, s.branch_id
+                    FROM subjects s
+                    JOIN teacher_subjects ts ON ts.subject_id = s.id
+                    WHERE s.id = {placeholder} AND ts.teacher_id = {placeholder}
+                    """,
+                    (current_subject_id, teacher_id),
+                ).fetchone()
+            else:
+                subject = db.execute(
+                    f"SELECT id, name, branch_id FROM subjects WHERE id = {placeholder}",
+                    (current_subject_id,),
+                ).fetchone()
         
         subject_name = row_get(subject, "name") if subject else ""
 
@@ -1029,6 +1071,61 @@ def init_db(db=None):
     except Exception as tb_error:
         print(f"[DB] teacher_branches table creation skipped: {repr(tb_error)}")
 
+    # ✅ Create teacher_subjects junction table for multi-subject support
+    try:
+        if is_postgres:
+            db.execute("""
+                CREATE TABLE IF NOT EXISTS teacher_subjects (
+                    id SERIAL PRIMARY KEY,
+                    teacher_id INTEGER NOT NULL,
+                    subject_id INTEGER NOT NULL,
+                    UNIQUE(teacher_id, subject_id),
+                    FOREIGN KEY(teacher_id) REFERENCES teachers(id) ON DELETE CASCADE,
+                    FOREIGN KEY(subject_id) REFERENCES subjects(id) ON DELETE CASCADE
+                )
+            """)
+        else:
+            db.execute("""
+                CREATE TABLE IF NOT EXISTS teacher_subjects (
+                    id INTEGER PRIMARY KEY,
+                    teacher_id INTEGER NOT NULL,
+                    subject_id INTEGER NOT NULL,
+                    UNIQUE(teacher_id, subject_id),
+                    FOREIGN KEY(teacher_id) REFERENCES teachers(id) ON DELETE CASCADE,
+                    FOREIGN KEY(subject_id) REFERENCES subjects(id) ON DELETE CASCADE
+                )
+            """)
+
+        # One-time migration from legacy teachers.subject_id
+        try:
+            existing_assignments = db.execute("SELECT COUNT(*) as count FROM teacher_subjects").fetchone()
+            count = row_get(existing_assignments, "count", 0)
+            if count == 0:
+                teachers_with_subjects = db.execute(
+                    "SELECT DISTINCT id, subject_id FROM teachers WHERE subject_id IS NOT NULL"
+                ).fetchall()
+                for teacher_row in teachers_with_subjects:
+                    t_id = row_get(teacher_row, "id")
+                    s_id = row_get(teacher_row, "subject_id")
+                    if t_id and s_id:
+                        try:
+                            db.execute(
+                                f"INSERT INTO teacher_subjects (teacher_id, subject_id) VALUES ({placeholder}, {placeholder})",
+                                (t_id, s_id),
+                            )
+                        except Exception:
+                            pass
+                db.commit()
+                print("[DB] Migrated teacher-subject assignments to new junction table")
+        except Exception as migration_error:
+            print(f"[DB] teacher_subjects migration skipped: {repr(migration_error)}")
+            if hasattr(db, 'rollback'):
+                db.rollback()
+
+        db.commit()
+    except Exception as ts_error:
+        print(f"[DB] teacher_subjects table creation skipped: {repr(ts_error)}")
+
     # ✅ Admin check
     admin = db.execute(
         f"SELECT id FROM users WHERE username = {placeholder}", ("admin",)
@@ -1086,6 +1183,46 @@ def login_required(f):
     return decorated_function
 
 
+def teacher_login_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if "user_id" not in session:
+            flash("Please login first.", "warning")
+            return redirect(url_for("teacher_login", next=request.path))
+        if session.get("role") != "teacher":
+            return "Unauthorized Access", 403
+        return f(*args, **kwargs)
+
+    return decorated_function
+
+
+def student_login_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if "user_id" not in session:
+            flash("Please login first.", "warning")
+            return redirect(url_for("student_login", next=request.path))
+        if session.get("role") != "student":
+            return "Unauthorized Access", 403
+        return f(*args, **kwargs)
+
+    return decorated_function
+
+
+def student_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if session.get("role") != "student":
+            return "Unauthorized Access", 403
+        if not session.get("student_id"):
+            session.clear()
+            flash("Please login first.", "warning")
+            return redirect(url_for("student_login"))
+        return f(*args, **kwargs)
+
+    return decorated_function
+
+
 def admin_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
@@ -1105,11 +1242,108 @@ def admin_required(f):
 def teacher_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        if session.get("role") != "teacher" or not session.get("teacher_id"):
+        if session.get("role") != "teacher":
+            return "Unauthorized Access", 403
+        teacher_id = session.get("teacher_id")
+        if not teacher_id:
+            return "Unauthorized Access", 403
+        if str(session.get("user_id")) != str(teacher_id):
+            session.clear()
             return "Unauthorized Access", 403
         return f(*args, **kwargs)
 
     return decorated_function
+
+
+@app.before_request
+def _validate_role_session():
+    """Lightweight session validation to improve stability.
+
+    - Validates session structure on every request.
+    - Periodically validates that the referenced user/teacher still exists.
+    """
+    try:
+        if request.path.startswith("/static/"):
+            return
+
+        role = session.get("role")
+        if not role:
+            return
+
+        if role not in ("admin", "teacher", "student"):
+            session.clear()
+            return
+
+        if "user_id" not in session:
+            session.clear()
+            return
+
+        if role == "teacher":
+            if not session.get("teacher_id"):
+                session.clear()
+                return
+            if str(session.get("user_id")) != str(session.get("teacher_id")):
+                session.clear()
+                return
+
+        # DB validation at most once per 5 minutes
+        now = int(time.time())
+        last = int(session.get("_validated_at") or 0)
+        if now - last < 300:
+            return
+
+        db = None
+        try:
+            db = get_db()
+            placeholder = get_placeholder()
+
+            if role in ("admin", "student"):
+                row = db.execute(
+                    f"SELECT role FROM users WHERE id = {placeholder}",
+                    (session.get("user_id"),),
+                ).fetchone()
+                if not row or row_get(row, "role") != role:
+                    session.clear()
+                    return
+
+            if role == "teacher":
+                row = db.execute(
+                    f"SELECT id FROM teachers WHERE id = {placeholder}",
+                    (session.get("teacher_id"),),
+                ).fetchone()
+                if not row:
+                    session.clear()
+                    return
+        except Exception:
+            # Do not block requests if DB is down; routes will handle errors.
+            return
+        finally:
+            try:
+                if db is not None:
+                    db.close()
+            except Exception:
+                pass
+
+        session["_validated_at"] = now
+    except Exception:
+        return
+
+
+@app.after_request
+def _add_no_cache_headers(response):
+    try:
+        if request.path.startswith("/static/"):
+            return response
+        if session.get("user_id"):
+            # Prevent cached authenticated pages showing after logout
+            response.headers.setdefault("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+            response.headers.setdefault("Pragma", "no-cache")
+            response.headers.setdefault("Expires", "0")
+    except Exception:
+        pass
+    return response
+
+
 @app.route("/login", methods=["GET", "POST"])
 @app.route("/admin_login", methods=["GET", "POST"])  # compatibility URL
 @app.route("/admin-login", methods=["GET", "POST"])  # compatibility URL
@@ -1138,7 +1372,28 @@ def login():
                 (username,),
             ).fetchone()
 
-            if user and check_password_hash(row_get(user, "password"), password):
+            password_ok = False
+            if user:
+                stored = row_get(user, "password") or ""
+                try:
+                    password_ok = check_password_hash(stored, password)
+                except Exception:
+                    # Legacy plaintext password detected; upgrade on successful match
+                    password_ok = (stored == password)
+                    if password_ok:
+                        try:
+                            db.execute(
+                                f"UPDATE users SET password = {placeholder} WHERE id = {placeholder}",
+                                (generate_password_hash(password), row_get(user, "id")),
+                            )
+                            db.commit()
+                        except Exception:
+                            try:
+                                db.rollback()
+                            except Exception:
+                                pass
+
+            if user and password_ok:
                 if row_get(user, "role") == "student":
                     flash("Please use the student login page.", "error")
                     return redirect(url_for("student_login"))
@@ -1147,6 +1402,7 @@ def login():
                 session["user_id"] = row_get(user, "id")
                 session["username"] = row_get(user, "username")
                 session["role"] = row_get(user, "role")
+                session.permanent = True
                 return redirect(url_for("dashboard"))
 
             flash("Invalid username or password.", "error")
@@ -1167,9 +1423,20 @@ def login():
 
 
 @app.route("/logout")
+@login_required
 def logout():
+    role = session.get("role")
     session.clear()
-    return redirect(url_for("login"))
+    dest = "login"
+    if role == "teacher":
+        dest = "teacher_login"
+    elif role == "student":
+        dest = "student_login"
+    resp = redirect(url_for(dest))
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    resp.headers["Pragma"] = "no-cache"
+    resp.headers["Expires"] = "0"
+    return resp
 
 
 @app.route("/")
@@ -2110,6 +2377,15 @@ def manage_teachers():
                                     )
                                 except Exception:
                                     pass  # Skip duplicate entries
+
+                            # Insert teacher subject assignment (junction table)
+                            try:
+                                db.execute(
+                                    f"INSERT INTO teacher_subjects (teacher_id, subject_id) VALUES ({placeholder}, {placeholder})",
+                                    (new_teacher_id, subject_id),
+                                )
+                            except Exception:
+                                pass
                             db.commit()
                             flash(f"Teacher '{name}' added successfully with {len(branch_ids)} branch(es). They can now log in with username: {username}", "success")
                         except Exception as e:
@@ -2145,6 +2421,12 @@ def manage_teachers():
                             
                             # Clear existing branch assignments
                             db.execute(f"DELETE FROM teacher_branches WHERE teacher_id = {placeholder}", (teacher_id,))
+
+                            # Clear existing subject assignments
+                            try:
+                                db.execute(f"DELETE FROM teacher_subjects WHERE teacher_id = {placeholder}", (teacher_id,))
+                            except Exception:
+                                pass
                             
                             # Insert new branch assignments
                             for branch_id in branch_ids:
@@ -2155,6 +2437,15 @@ def manage_teachers():
                                     )
                                 except Exception:
                                     pass  # Skip duplicates
+
+                            # Insert new subject assignment
+                            try:
+                                db.execute(
+                                    f"INSERT INTO teacher_subjects (teacher_id, subject_id) VALUES ({placeholder}, {placeholder})",
+                                    (teacher_id, subject_id),
+                                )
+                            except Exception:
+                                pass
                             
                             db.commit()
                             flash(f"Teacher '{name}' updated successfully with {len(branch_ids)} branch(es).", "success")
@@ -3265,12 +3556,33 @@ def student_login():
                 (username,),
             ).fetchone()
 
-            if user and row_get(user, "role") == "student" and check_password_hash(row_get(user, "password"), password):
+            password_ok = False
+            if user and row_get(user, "role") == "student":
+                stored = row_get(user, "password") or ""
+                try:
+                    password_ok = check_password_hash(stored, password)
+                except Exception:
+                    password_ok = (stored == password)
+                    if password_ok:
+                        try:
+                            db.execute(
+                                f"UPDATE users SET password = {placeholder} WHERE id = {placeholder}",
+                                (generate_password_hash(password), row_get(user, "id")),
+                            )
+                            db.commit()
+                        except Exception:
+                            try:
+                                db.rollback()
+                            except Exception:
+                                pass
+
+            if user and row_get(user, "role") == "student" and password_ok:
                 session.clear()
                 session["user_id"] = row_get(user, "id")
                 session["username"] = row_get(user, "username")
                 session["role"] = row_get(user, "role")
                 session["student_id"] = row_get(user, "student_id")
+                session.permanent = True
                 if next_url:
                     return redirect(next_url)
                 return redirect(url_for("student_dashboard"))
@@ -3310,7 +3622,27 @@ def teacher_login():
                 (username,),
             ).fetchone()
 
-            if user and check_password_hash(row_get(user, "password"), password):
+            password_ok = False
+            if user:
+                stored = row_get(user, "password") or ""
+                try:
+                    password_ok = check_password_hash(stored, password)
+                except Exception:
+                    password_ok = (stored == password)
+                    if password_ok:
+                        try:
+                            db.execute(
+                                f"UPDATE teachers SET password = {placeholder} WHERE id = {placeholder}",
+                                (generate_password_hash(password), row_get(user, "id")),
+                            )
+                            db.commit()
+                        except Exception:
+                            try:
+                                db.rollback()
+                            except Exception:
+                                pass
+
+            if user and password_ok:
                 teacher_id = row_get(user, "id")
                 
                 # Fetch all assigned branches for this teacher
@@ -3329,6 +3661,7 @@ def teacher_login():
                 session["teacher_id"] = teacher_id
                 session["teacher_name"] = row_get(user, "name")
                 session["teacher_subject_id"] = row_get(user, "subject_id")
+                session.permanent = True
                 
                 # If teacher has multiple branches, show branch selection page
                 if len(assigned_branches) > 1:
@@ -3359,7 +3692,7 @@ def teacher_login():
 
 
 @app.route("/teacher/select-branch", methods=["GET", "POST"])
-@login_required
+@teacher_login_required
 @teacher_required
 def teacher_select_branch():
     """Allow teacher to select which branch to mark attendance for."""
@@ -3414,7 +3747,7 @@ def teacher_select_branch():
 
 
 @app.route("/teacher/select-subject", methods=["GET", "POST"])
-@login_required
+@teacher_login_required
 @teacher_required
 def teacher_select_subject():
     """Allow teacher to select which assigned subject is active."""
@@ -3460,7 +3793,7 @@ def teacher_select_subject():
 
 @app.route("/teacher/dashboard")
 @app.route("/teacher-dashboard")
-@login_required
+@teacher_login_required
 @teacher_required
 def teacher_dashboard():
     db = None
@@ -3537,7 +3870,7 @@ def teacher_dashboard():
 
 @app.route("/teacher/attendance", methods=["GET", "POST"])
 @app.route("/teacher-mark-attendance", methods=["GET", "POST"])
-@login_required
+@teacher_login_required
 @teacher_required
 def teacher_mark_attendance():
     db = None
@@ -3569,10 +3902,39 @@ def teacher_mark_attendance():
                 flash("Please select at least one student.", "error")
             else:
                 saved_ids = []
+                blocked_overwrites = 0
+                invalid_students = 0
                 try:
                     for student_id in student_ids:
                         status = request.form.get(f"status_{student_id}", "Absent")
                         note = request.form.get(f"note_{student_id}", "")
+
+                        # Validate student belongs to this branch
+                        ok_student = db.execute(
+                            f"SELECT 1 FROM students WHERE id = {placeholder} AND branch_id = {placeholder}",
+                            (student_id, current_branch_id),
+                        ).fetchone()
+                        if not ok_student:
+                            invalid_students += 1
+                            continue
+
+                        # Do not allow overwriting attendance created by another teacher
+                        existing = db.execute(
+                            f"""
+                            SELECT teacher_id
+                            FROM attendance
+                            WHERE student_id = {placeholder}
+                              AND subject_id = {placeholder}
+                              AND date = {placeholder}
+                              AND period = {placeholder}
+                            """,
+                            (student_id, subject_id, selected_date, period),
+                        ).fetchone()
+                        existing_teacher_id = row_get(existing, "teacher_id") if existing else None
+                        if existing_teacher_id and str(existing_teacher_id) != str(teacher["teacher_id"]):
+                            blocked_overwrites += 1
+                            continue
+
                         db.execute(
                             f"""
                             INSERT INTO attendance (
@@ -3590,6 +3952,10 @@ def teacher_mark_attendance():
                         if str(student_id).isdigit():
                             saved_ids.append(int(student_id))
                     db.commit()
+                    if invalid_students:
+                        flash(f"Skipped {invalid_students} invalid student(s).", "warning")
+                    if blocked_overwrites:
+                        flash(f"Skipped {blocked_overwrites} record(s) already owned by another teacher.", "warning")
                     flash(f"Attendance for Period {period} saved successfully.", "success")
                     return redirect(url_for("teacher_mark_attendance", date=selected_date, period=period))
                 except Exception as save_error:
@@ -3639,7 +4005,7 @@ def teacher_mark_attendance():
 
 @app.route("/teacher/records")
 @app.route("/teacher-records")
-@login_required
+@teacher_login_required
 @teacher_required
 def teacher_attendance_records():
     db = None
@@ -3694,7 +4060,8 @@ def teacher_attendance_records():
 
 @app.route("/student_dashboard")
 @app.route("/student/dashboard")
-@login_required
+@student_login_required
+@student_required
 def student_dashboard():
     student_id = session.get("student_id")
     if not student_id:
@@ -3806,6 +4173,7 @@ def student_dashboard():
 
 @app.route("/student_dashboard/<int:student_id>")
 @login_required
+@admin_required
 def student_dashboard_by_id(student_id):
     db = get_db()
     placeholder = get_placeholder()
@@ -3871,6 +4239,7 @@ def student_dashboard_by_id(student_id):
 
 @app.route("/mark_attendance", methods=["GET", "POST"])
 @login_required
+@admin_required
 def mark_attendance():
     """Clean, high-performance route to mark student attendance."""
     db = None
@@ -3967,6 +4336,7 @@ def mark_attendance():
 
 @app.route("/attendance/qr")
 @login_required
+@admin_required
 def generate_qr():
     branch_id = request.args.get("branch_id")
     subject_id = request.args.get("subject_id")
