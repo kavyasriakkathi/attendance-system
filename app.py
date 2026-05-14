@@ -244,16 +244,16 @@ class _SessionFixMiddleware:
 app.wsgi_app = _SessionFixMiddleware(app.wsgi_app)
 
 def get_db():
-    db_url = str(app.config.get("DATABASE", ""))
-    db = None
-    if db_url.startswith("postgres"):
-        try:
-            import psycopg2
-            from psycopg2.extras import DictCursor
-        except Exception as e:
-            print("[DB] psycopg2 import failed.")
-            raise
 
+                def is_mail_configured():
+                    # Prefer centralized mail_config check if available
+                    try:
+                        return mc_is_mail_configured(app)
+                    except Exception:
+                        # Fallback to previous heuristic
+                        api_key = app.config.get("RESEND_API_KEY")
+                        from_email = app.config.get("MAIL_FROM")
+                        return bool(api_key and str(api_key).strip() and from_email and str(from_email).strip())
         def _ensure_sslmode(url: str) -> str:
             if "sslmode=" in url: return url
             is_render = bool(os.environ.get("RENDER") or os.environ.get("RENDER_INTERNAL_HOSTNAME"))

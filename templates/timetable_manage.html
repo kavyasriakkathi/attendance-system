@@ -1,0 +1,40 @@
+{% extends "layout.html" %}
+{% block content %}
+<div class="card">
+    <h1>Timetable Management</h1>
+    <p>Upload a DOCX or PDF timetable to import slots (best-effort parser).</p>
+
+    <form method="post" enctype="multipart/form-data">
+        <div class="form-group">
+            <label for="timetable_file">Timetable file (.docx or .pdf)</label>
+            <input type="file" name="timetable_file" id="timetable_file" accept=".docx,.pdf" required>
+        </div>
+        <button type="submit" class="button">Upload & Import</button>
+    </form>
+
+    <hr>
+    <h2>Imported slots</h2>
+    <table style="width:100%; border-collapse:collapse;">
+        <thead>
+            <tr style="text-align:left; border-bottom:1px solid #ddd;">
+                <th>Day</th><th>Start</th><th>End</th><th>Branch</th><th>Section</th><th>Sem</th><th>Subject</th><th>Faculty</th><th>Room</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for r in rows %}
+            <tr>
+                <td>{{ r['day'] }}</td>
+                <td>{{ r['start_time'] }}</td>
+                <td>{{ r['end_time'] }}</td>
+                <td>{{ r['branch'] }}</td>
+                <td>{{ r['section'] }}</td>
+                <td>{{ r['semester'] }}</td>
+                <td>{{ r['subject_name'] }}</td>
+                <td>{{ r['faculty_name'] }}</td>
+                <td>{{ r['room'] }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}
