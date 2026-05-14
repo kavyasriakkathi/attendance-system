@@ -214,13 +214,15 @@ def ensure_db_initialized(db) -> bool:
     # Set flag early to prevent recursion if init_db calls get_db()
     _DB_INIT_DONE = True
     try:
+        _db_log("INFO", "db.init", "Starting database initialization...")
         init_db(db=db)
         _DB_INIT_LAST_ERROR = None
+        _db_log("SUCCESS", "db.init", "Database initialization completed")
         return True
     except Exception as e:
         _DB_INIT_DONE = False # Reset on failure
         _DB_INIT_LAST_ERROR = repr(e)
-        print(f"[DB] init_db failed: {_DB_INIT_LAST_ERROR}")
+        _db_log("ERROR", "db.init", f"Database initialization failed: {_DB_INIT_LAST_ERROR}")
         print(traceback.format_exc())
         return False
 
@@ -308,25 +310,48 @@ def _clean_identifier(value: object) -> str:
     return text.strip("_")
 
 
-def _table_columns(db, table_name: str):
-    if str(app.config.get("DATABASE", "")).startswith("postgres"):
-        rows = db.execute(
-            """
-            SELECT column_name
-            FROM information_schema.columns
-            WHERE table_name = %s AND table_schema = 'public'
-            ORDER BY ordinal_position
-            """,
-            (table_name,),
-        ).fetchall()
-        return {row_get(row, "column_name") for row in rows}
+def _db_log(level: str, module: str, message: str):
+    """Log database operations with consistent formatting.
+    
+    Args:
+        level: 'INFO', 'SUCCESS', 'WARNING', 'ERROR'
+        module: Module name (e.g., 'db.init', 'db.schema')
+        message: Log message
+    """
+    level_symbols = {
+        'INFO': '▶',
+        'SUCCESS': '✓',
+        'WARNING': '⚠',
+        'ERROR': '✗',
+    }
+    symbol = level_symbols.get(level, '•')
+    print(f"[{level}] [{module}] {symbol} {message}")
 
-    rows = db.execute(f"PRAGMA table_info({table_name})").fetchall()
-    return {row_get(row, "name") for row in rows}
+
+def _table_columns(db, table_name: str):
+    """Get all column names from a table (SQLite and PostgreSQL compatible)."""
+    try:
+        if str(app.config.get("DATABASE", "")).startswith("postgres"):
+            rows = db.execute(
+                """
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_name = %s AND table_schema = 'public'
+                ORDER BY ordinal_position
+                """,
+                (table_name,),
+            ).fetchall()
+            return {row_get(row, "column_name") for row in rows}
+
+        rows = db.execute(f"PRAGMA table_info({table_name})").fetchall()
+        return {row_get(row, "name") for row in rows}
+    except Exception as e:
+        _db_log("ERROR", "db.schema", f"Failed to get columns for table '{table_name}': {repr(e)}")
+        return set()
 
 
 def _ensure_column(db, table_name: str, column_name: str, column_definition: str):
-    """Add a column to a table if it doesn't exist.
+    """Add a column to a table if it doesn't exist with enhanced logging.
     
     For PostgreSQL, each ALTER is wrapped in a SAVEPOINT so that if it fails
     (e.g. duplicate column from a concurrent worker), only that statement is
@@ -335,34 +360,45 @@ def _ensure_column(db, table_name: str, column_name: str, column_definition: str
     """
     is_postgres = str(app.config.get("DATABASE", "")).startswith("postgres")
     
-    if is_postgres:
-        # Use savepoint so a failure here doesn't abort the outer transaction
-        try:
-            db.execute("SAVEPOINT ensure_col")
+    try:
+        if is_postgres:
+            # Use savepoint so a failure here doesn't abort the outer transaction
+            try:
+                db.execute("SAVEPOINT ensure_col")
+            except Exception as sp_err:
+                _db_log("WARNING", "db.schema", f"Failed to create savepoint for {table_name}.{column_name}: {repr(sp_err)}")
+                return
+            
+            try:
+                columns = _table_columns(db, table_name)
+                if column_name not in columns:
+                    _db_log("INFO", "db.schema", f"Checking {table_name}.{column_name}")
+                    db.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}")
+                    _db_log("SUCCESS", "db.schema", f"Column added: {table_name}.{column_name} ({column_definition})")
+                else:
+                    _db_log("INFO", "db.schema", f"Column exists: {table_name}.{column_name}")
+                db.execute("RELEASE SAVEPOINT ensure_col")
+            except Exception as e:
+                _db_log("ERROR", "db.schema", f"Failed to add column {table_name}.{column_name}: {repr(e)}")
+                try:
+                    db.execute("ROLLBACK TO SAVEPOINT ensure_col")
+                    db.execute("RELEASE SAVEPOINT ensure_col")
+                except Exception:
+                    pass
+        else:
+            # SQLite
             columns = _table_columns(db, table_name)
             if column_name not in columns:
-                print(f"[_ensure_column] Adding {table_name}.{column_name}")
-                db.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}")
-                print(f"[_ensure_column] Successfully added {table_name}.{column_name}")
+                try:
+                    _db_log("INFO", "db.schema", f"Checking {table_name}.{column_name}")
+                    db.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}")
+                    _db_log("SUCCESS", "db.schema", f"Column added: {table_name}.{column_name} ({column_definition})")
+                except Exception as e:
+                    _db_log("ERROR", "db.schema", f"Failed to add column {table_name}.{column_name}: {repr(e)}")
             else:
-                print(f"[_ensure_column] Column {table_name}.{column_name} already exists")
-            db.execute("RELEASE SAVEPOINT ensure_col")
-        except Exception as e:
-            print(f"[_ensure_column] {table_name}.{column_name} failed: {repr(e)}")
-            try:
-                db.execute("ROLLBACK TO SAVEPOINT ensure_col")
-                db.execute("RELEASE SAVEPOINT ensure_col")
-            except Exception:
-                pass
-    else:
-        columns = _table_columns(db, table_name)
-        if column_name not in columns:
-            try:
-                print(f"[_ensure_column] Adding {table_name}.{column_name}")
-                db.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}")
-                print(f"[_ensure_column] Successfully added {table_name}.{column_name}")
-            except Exception as e:
-                print(f"[_ensure_column] {table_name}.{column_name} failed: {repr(e)}")
+                _db_log("INFO", "db.schema", f"Column exists: {table_name}.{column_name}")
+    except Exception as outer_err:
+        _db_log("ERROR", "db.schema", f"Unexpected error in _ensure_column for {table_name}.{column_name}: {repr(outer_err)}")
 
 
 def get_teacher_context(db=None):
@@ -1029,38 +1065,64 @@ def init_db(db=None):
         
         db.commit() # Commit column additions before index creation
         
-        # Verify critical columns exist and add them if missing
-        print("[DB] Verifying critical columns...")
+        # Verify and ensure critical columns exist
+        _db_log("INFO", "db.init", "Starting critical column verification...")
         critical_columns = [
-            ("students", "roll_no", "TEXT"),
-            ("students", "section", "TEXT"),
-            ("students", "import_order", "INTEGER"),
-            ("attendance", "subject_id", "INTEGER"),
-            ("attendance", "period", "INTEGER DEFAULT 1"),
+            ("students", "roll_no", "TEXT", "Student roll number"),
+            ("students", "section", "TEXT", "Student section/class"),
+            ("students", "import_order", "INTEGER", "Import order for data consistency"),
+            ("attendance", "subject_id", "INTEGER", "Subject ID foreign key"),
+            ("attendance", "period", "INTEGER DEFAULT 1", "Period number for multiple attendance periods"),
         ]
         
-        for table, col, col_type in critical_columns:
+        columns_verified = 0
+        columns_added = 0
+        columns_failed = 0
+        
+        for table, col, col_type, description in critical_columns:
             try:
+                _db_log("INFO", "db.verify", f"Checking {table}.{col} - {description}")
                 columns = _table_columns(db, table)
                 if col not in columns:
-                    print(f"[DB] CRITICAL: Column {table}.{col} missing, adding...")
-                    if is_postgres:
-                        db.execute("SAVEPOINT verify_col")
-                    db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}")
-                    if is_postgres:
-                        db.execute("RELEASE SAVEPOINT verify_col")
-                    db.commit()
-                    print(f"[DB] Successfully added {table}.{col}")
-            except Exception as e:
-                print(f"[DB] Column verification for {table}.{col} failed: {repr(e)}")
-                if is_postgres:
+                    _db_log("WARNING", "db.verify", f"Missing column: {table}.{col}")
                     try:
-                        db.execute("ROLLBACK TO SAVEPOINT verify_col")
-                        db.execute("RELEASE SAVEPOINT verify_col")
-                    except Exception:
-                        pass
+                        if is_postgres:
+                            db.execute("SAVEPOINT verify_col")
+                        db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}")
+                        if is_postgres:
+                            db.execute("RELEASE SAVEPOINT verify_col")
+                        db.commit()
+                        _db_log("SUCCESS", "db.verify", f"Column added: {table}.{col}")
+                        columns_added += 1
+                    except Exception as add_err:
+                        _db_log("ERROR", "db.verify", f"Failed to add {table}.{col}: {repr(add_err)}")
+                        if is_postgres:
+                            try:
+                                db.execute("ROLLBACK TO SAVEPOINT verify_col")
+                                db.execute("RELEASE SAVEPOINT verify_col")
+                            except Exception:
+                                pass
+                        columns_failed += 1
+                        if hasattr(db, 'rollback'):
+                            db.rollback()
+                else:
+                    _db_log("SUCCESS", "db.verify", f"Column exists: {table}.{col}")
+                    columns_verified += 1
+            except Exception as verify_err:
+                _db_log("ERROR", "db.verify", f"Verification failed for {table}.{col}: {repr(verify_err)}")
+                columns_failed += 1
+        
+        # Summary of verification
+        _db_log("INFO", "db.init", f"Critical columns verification summary:")
+        _db_log("INFO", "db.init", f"  ✓ Verified: {columns_verified}")
+        _db_log("INFO", "db.init", f"  + Added: {columns_added}")
+        if columns_failed > 0:
+            _db_log("WARNING", "db.init", f"  ✗ Failed: {columns_failed}")
+        else:
+            _db_log("SUCCESS", "db.init", f"  ✗ Failed: 0")
         
         # Upgrade index if it doesn't support period
+        _db_log("INFO", "db.init", "Upgrading database indexes...")
         try:
             if is_postgres:
                 db.execute("SAVEPOINT idx_upgrade")
@@ -1073,8 +1135,9 @@ def init_db(db=None):
             if is_postgres:
                 db.execute("RELEASE SAVEPOINT idx_upgrade")
             db.commit()
+            _db_log("SUCCESS", "db.init", "Database indexes upgraded successfully")
         except Exception as idx_error:
-            print(f"[DB] index upgrade skipped: {repr(idx_error)}")
+            _db_log("WARNING", "db.init", f"Index upgrade skipped: {repr(idx_error)}")
             if is_postgres:
                 try:
                     db.execute("ROLLBACK TO SAVEPOINT idx_upgrade")
@@ -1085,22 +1148,33 @@ def init_db(db=None):
         try:
             db.execute("CREATE INDEX IF NOT EXISTS idx_students_import_order ON students(import_order, id)")
             db.commit()
-        except:
+            _db_log("SUCCESS", "db.init", "Index created: idx_students_import_order")
+        except Exception as idx_err:
+            _db_log("WARNING", "db.init", f"Failed to create idx_students_import_order: {repr(idx_err)}")
             if hasattr(db, 'rollback'): db.rollback()
 
         # Backfill import_order once for legacy rows (keeps existing relative order by id).
-        max_row = db.execute("SELECT COALESCE(MAX(import_order), 0) AS max_import_order FROM students").fetchone()
-        next_import_order = int(row_get(max_row, "max_import_order", 0) or 0) + 1
-        missing_order_rows = db.execute("SELECT id FROM students WHERE import_order IS NULL ORDER BY id").fetchall()
-        for row in missing_order_rows:
-            student_id = row_get(row, "id")
-            if student_id is None:
-                continue
-            db.execute(
-                f"UPDATE students SET import_order = {placeholder} WHERE id = {placeholder}",
-                (next_import_order, student_id),
-            )
-            next_import_order += 1
+        _db_log("INFO", "db.init", "Processing import order for legacy students...")
+        try:
+            max_row = db.execute("SELECT COALESCE(MAX(import_order), 0) AS max_import_order FROM students").fetchone()
+            next_import_order = int(row_get(max_row, "max_import_order", 0) or 0) + 1
+            missing_order_rows = db.execute("SELECT id FROM students WHERE import_order IS NULL ORDER BY id").fetchall()
+            if missing_order_rows:
+                for row in missing_order_rows:
+                    student_id = row_get(row, "id")
+                    if student_id is None:
+                        continue
+                    db.execute(
+                        f"UPDATE students SET import_order = {placeholder} WHERE id = {placeholder}",
+                        (next_import_order, student_id),
+                    )
+                    next_import_order += 1
+                _db_log("SUCCESS", "db.init", f"Updated import_order for {len(missing_order_rows)} students")
+            db.commit()
+        except Exception as import_err:
+            _db_log("WARNING", "db.init", f"Import order update skipped: {repr(import_err)}")
+            if hasattr(db, 'rollback'):
+                db.rollback()
 
         if str(app.config.get("DATABASE", "")).startswith("postgres"):
             db.execute("""
@@ -1127,7 +1201,7 @@ def init_db(db=None):
                 )
             """)
     except Exception as upgrade_error:
-        print(f"[DB] teacher schema upgrade skipped: {repr(upgrade_error)}")
+        _db_log("WARNING", "db.init", f"Teacher schema upgrade skipped: {repr(upgrade_error)}")
 
     # ✅ Create teacher_branches junction table for multi-branch support
     try:
@@ -1209,13 +1283,16 @@ def init_db(db=None):
             """)
 
         # One-time migration from legacy teachers.subject_id
+        _db_log("INFO", "db.init", "Checking for teacher-subject junction table migration...")
         try:
             existing_assignments = db.execute("SELECT COUNT(*) as count FROM teacher_subjects").fetchone()
             count = row_get(existing_assignments, "count", 0)
             if count == 0:
+                _db_log("INFO", "db.init", "Migrating legacy teacher-subject assignments...")
                 teachers_with_subjects = db.execute(
                     "SELECT DISTINCT id, subject_id FROM teachers WHERE subject_id IS NOT NULL"
                 ).fetchall()
+                migrated_count = 0
                 for teacher_row in teachers_with_subjects:
                     t_id = row_get(teacher_row, "id")
                     s_id = row_get(teacher_row, "subject_id")
@@ -1225,18 +1302,21 @@ def init_db(db=None):
                                 f"INSERT INTO teacher_subjects (teacher_id, subject_id) VALUES ({placeholder}, {placeholder})",
                                 (t_id, s_id),
                             )
+                            migrated_count += 1
                         except Exception:
                             pass
                 db.commit()
-                print("[DB] Migrated teacher-subject assignments to new junction table")
+                _db_log("SUCCESS", "db.init", f"Migrated {migrated_count} teacher-subject assignments to junction table")
+            else:
+                _db_log("INFO", "db.init", f"Teacher-subject migration already complete ({count} records)")
         except Exception as migration_error:
-            print(f"[DB] teacher_subjects migration skipped: {repr(migration_error)}")
+            _db_log("WARNING", "db.init", f"Teacher-subject migration skipped: {repr(migration_error)}")
             if hasattr(db, 'rollback'):
                 db.rollback()
 
         db.commit()
     except Exception as ts_error:
-        print(f"[DB] teacher_subjects table creation skipped: {repr(ts_error)}")
+        _db_log("WARNING", "db.init", f"Teacher-subjects table creation skipped: {repr(ts_error)}")
 
     try:
         if is_postgres:
@@ -1299,49 +1379,91 @@ def init_db(db=None):
                         except Exception:
                             pass
             db.commit()
+        else:
+            _db_log("INFO", "db.init", f"Teacher-assignments already complete ({row_get(existing_assignments, 'count', 0)} records)")
     except Exception as ta_error:
-        print(f"[DB] teacher_assignments migration skipped: {repr(ta_error)}")
+        _db_log("WARNING", "db.init", f"Teacher-assignments creation skipped: {repr(ta_error)}")
 
     # ✅ Admin check
+    _db_log("INFO", "db.init", "Verifying admin user...")
     admin = db.execute(
         f"SELECT id FROM users WHERE username = {placeholder}", ("admin",)
     ).fetchone()
 
     if not admin:
-        db.execute(
-            f"INSERT INTO users (username, password, role) VALUES ({placeholder}, {placeholder}, {placeholder})",
-            ("admin", generate_password_hash("admin123"), "admin"),
-        )
+        _db_log("WARNING", "db.init", "Admin user not found, creating default admin account...")
+        try:
+            db.execute(
+                f"INSERT INTO users (username, password, role) VALUES ({placeholder}, {placeholder}, {placeholder})",
+                ("admin", generate_password_hash("admin123"), "admin"),
+            )
+            db.commit()
+            _db_log("SUCCESS", "db.init", "Default admin account created (username: admin)")
+        except Exception as admin_err:
+            _db_log("ERROR", "db.init", f"Failed to create admin account: {repr(admin_err)}")
+    else:
+        _db_log("SUCCESS", "db.init", "Admin user verified")
 
     # No default teacher accounts are seeded.
     # Teachers must be created manually by an admin via /admin/teachers.
 
     # ✅ Ensure at least one branch exists
+    _db_log("INFO", "db.init", "Verifying default branch...")
     default_branch = db.execute(f"SELECT id FROM branches ORDER BY id LIMIT 1").fetchone()
     if not default_branch:
-        db.execute(f"INSERT INTO branches (name, location) VALUES ({placeholder}, {placeholder})", ("General Branch", "Main Campus"))
-        default_branch = db.execute(f"SELECT id FROM branches ORDER BY id LIMIT 1").fetchone()
+        _db_log("WARNING", "db.init", "No branch found, creating default branch...")
+        try:
+            db.execute(f"INSERT INTO branches (name, location) VALUES ({placeholder}, {placeholder})", ("General Branch", "Main Campus"))
+            db.commit()
+            default_branch = db.execute(f"SELECT id FROM branches ORDER BY id LIMIT 1").fetchone()
+            _db_log("SUCCESS", "db.init", "Default branch created")
+        except Exception as branch_err:
+            _db_log("ERROR", "db.init", f"Failed to create default branch: {repr(branch_err)}")
+    else:
+        _db_log("SUCCESS", "db.init", "Default branch verified")
     
     default_branch_id = row_get(default_branch, "id")
 
     # ✅ Ensure sample subjects exist
+    _db_log("INFO", "db.init", "Verifying sample subjects...")
     sample_subjects = ["Mathematics", "Physics", "Chemistry", "English", "Programming", "Data Structures"]
+    subjects_created = 0
     for sub_name in sample_subjects:
-        existing_sub = db.execute(f"SELECT id FROM subjects WHERE name = {placeholder}", (sub_name,)).fetchone()
-        if not existing_sub:
-            db.execute(f"INSERT INTO subjects (name, branch_id) VALUES ({placeholder}, {placeholder})", (sub_name, default_branch_id))
-
+        try:
+            existing_sub = db.execute(f"SELECT id FROM subjects WHERE name = {placeholder}", (sub_name,)).fetchone()
+            if not existing_sub:
+                db.execute(f"INSERT INTO subjects (name, branch_id) VALUES ({placeholder}, {placeholder})", (sub_name, default_branch_id))
+                subjects_created += 1
+        except Exception as subject_err:
+            _db_log("WARNING", "db.init", f"Failed to create subject '{sub_name}': {repr(subject_err)}")
+    
+    if subjects_created > 0:
+        db.commit()
+        _db_log("SUCCESS", "db.init", f"Created {subjects_created} sample subjects")
+    else:
+        _db_log("SUCCESS", "db.init", "Sample subjects already exist")
     # No demo teacher accounts are seeded automatically.
     # All teacher accounts must be created by an admin via the Manage Teachers page.
 
     # ✅ Default low attendance threshold setting
-    if not db.execute(f"SELECT id FROM settings WHERE key = {placeholder}", ("low_attendance_threshold",)).fetchone():
-        db.execute(
-            f"INSERT INTO settings (key, value) VALUES ({placeholder}, {placeholder})",
-            ("low_attendance_threshold", str(app.config["LOW_ATTENDANCE_THRESHOLD"])),
-        )
+    _db_log("INFO", "db.init", "Verifying low attendance threshold setting...")
+    try:
+        if not db.execute(f"SELECT id FROM settings WHERE key = {placeholder}", ("low_attendance_threshold",)).fetchone():
+            _db_log("WARNING", "db.init", "Threshold setting not found, creating default...")
+            db.execute(
+                f"INSERT INTO settings (key, value) VALUES ({placeholder}, {placeholder})",
+                ("low_attendance_threshold", str(app.config["LOW_ATTENDANCE_THRESHOLD"])),
+            )
+            db.commit()
+            _db_log("SUCCESS", "db.init", f"Threshold setting created (threshold: {app.config['LOW_ATTENDANCE_THRESHOLD']}%)")
+        else:
+            _db_log("SUCCESS", "db.init", "Threshold setting verified")
+    except Exception as settings_err:
+        _db_log("ERROR", "db.init", f"Failed to verify threshold setting: {repr(settings_err)}")
 
     db.commit()
+    _db_log("SUCCESS", "db.init", "Database initialization completed successfully")
+    
     if created_here:
         try:
             db.close()
