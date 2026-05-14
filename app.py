@@ -581,18 +581,120 @@ def send_email(subject, recipient, body, attachments=None, html_body=None):
                 server.send_message(msg)
 
     attempts = max(1, int(os.environ.get("MAIL_SEND_RETRIES", 1)))
+    last_error = None
     for attempt in range(1, attempts + 1):
         try:
             _try_send(smtp_host)
             print(f"Email sent to {recipient}")
             return True
         except Exception as e:
+            last_error = str(e)
             print(f"Attempt {attempt} - Failed to send email to {recipient}: {repr(e)}")
             if attempt == attempts:
                 return False
             time.sleep(0.5)
             continue
     return False
+
+
+def send_email_with_error(subject, recipient, body, attachments=None, html_body=None):
+    """Send email and return (success: bool, error_message: str)"""
+    # If credentials are not configured, allow a local dev fallback when explicitly enabled
+    dev_fallback_enabled = os.environ.get("MAIL_DEV_FALLBACK", "False").lower() in ("1", "true", "yes")
+    if not is_mail_configured():
+        if not (dev_fallback_enabled or app.config.get("MAIL_SERVER") in ("localhost", "127.0.0.1")):
+            error_msg = "Mail credentials not configured. Set MAIL_USERNAME and MAIL_PASSWORD."
+            print(f"Email not sent: {error_msg}")
+            return False, error_msg
+        print("Mail credentials not configured — attempting development fallback (unauthenticated SMTP).")
+    
+    # Build message defensively so this helper never crashes a request handler.
+    try:
+        if not recipient or not str(recipient).strip():
+            error_msg = "Recipient email is empty."
+            print(f"Email not sent: {error_msg}")
+            return False, error_msg
+        from_addr = (app.config.get("MAIL_FROM") or app.config.get("MAIL_USERNAME") or "").strip()
+        if not from_addr:
+            error_msg = "MAIL_FROM or MAIL_USERNAME is not configured."
+            print(f"Email not sent: {error_msg}")
+            return False, error_msg
+
+        msg = EmailMessage()
+        msg["Subject"] = subject
+        msg["From"] = from_addr
+        msg["To"] = recipient
+        msg.set_content(body)
+        if html_body:
+            msg.add_alternative(html_body, subtype="html")
+
+        if attachments:
+            for attachment in attachments:
+                filename = (attachment.get("filename") or "attachment").strip()
+                content = attachment.get("content", b"")
+                if isinstance(content, str):
+                    content = content.encode("utf-8")
+                mimetype = attachment.get("mimetype") or "application/octet-stream"
+                if "/" in mimetype:
+                    maintype, subtype = mimetype.split("/", 1)
+                else:
+                    maintype, subtype = "application", "octet-stream"
+                msg.add_attachment(content, maintype=maintype, subtype=subtype, filename=filename)
+    except Exception as e:
+        error_msg = f"Failed to build message: {str(e)}"
+        print(f"Email not sent: {error_msg}")
+        return False, error_msg
+    
+    smtp_host = app.config.get("MAIL_SERVER")
+    smtp_port = int(app.config.get("MAIL_PORT", 587))
+    use_tls = bool(app.config.get("MAIL_USE_TLS"))
+    debug = os.environ.get("MAIL_DEBUG", "False").lower() in ("1", "true", "yes")
+    smtp_timeout = float(os.environ.get("MAIL_TIMEOUT_SECONDS", 6))
+
+    def _try_send(host_to_use: str) -> None:
+        context = ssl.create_default_context()
+        if is_mail_configured():
+            username = app.config.get("MAIL_USERNAME")
+            password = app.config.get("MAIL_PASSWORD")
+            if use_tls:
+                with smtplib.SMTP(host_to_use, smtp_port, timeout=smtp_timeout) as server:
+                    if debug:
+                        server.set_debuglevel(1)
+                    server.ehlo()
+                    server.starttls(context=context)
+                    server.ehlo()
+                    server.login(username, password)
+                    server.send_message(msg)
+            else:
+                with smtplib.SMTP_SSL(host_to_use, smtp_port, context=context, timeout=smtp_timeout) as server:
+                    if debug:
+                        server.set_debuglevel(1)
+                    server.ehlo()
+                    server.login(username, password)
+                    server.send_message(msg)
+        else:
+            # Development fallback: unauthenticated SMTP (MailHog/smtp4dev)
+            with smtplib.SMTP(host_to_use, smtp_port, timeout=smtp_timeout) as server:
+                if debug:
+                    server.set_debuglevel(1)
+                server.ehlo()
+                server.send_message(msg)
+
+    attempts = max(1, int(os.environ.get("MAIL_SEND_RETRIES", 1)))
+    last_error = "Unknown error"
+    for attempt in range(1, attempts + 1):
+        try:
+            _try_send(smtp_host)
+            print(f"Email sent to {recipient}")
+            return True, None
+        except Exception as e:
+            last_error = str(e)
+            print(f"Attempt {attempt}/{attempts} - Failed to send email to {recipient}: {repr(e)}")
+            if attempt == attempts:
+                return False, last_error
+            time.sleep(0.5)
+            continue
+    return False, last_error
 
 
 def safe_send_email(subject: str, recipient: str, body: str, attachments=None, html_body=None) -> bool:
@@ -2270,20 +2372,7 @@ def test_email():
         f"Time: {date.today().isoformat()}\n"
     )
     try:
-        # Use a localized error capture
-        last_error = "Unknown error"
-        def _capture_send(subject, recipient, body):
-            nonlocal last_error
-            try:
-                res = send_email(subject, recipient, body)
-                if not res:
-                    last_error = "Check logs for detailed connection errors."
-                return res
-            except Exception as e:
-                last_error = str(e)
-                return False
-
-        email_sent = _capture_send(
+        email_sent, error_msg = send_email_with_error(
             subject="Test Email: Attendance System",
             recipient=recipient,
             body=body,
@@ -2291,7 +2380,7 @@ def test_email():
         if email_sent:
             flash(f"Test email sent to {recipient}.", "success")
         else:
-            flash(f"Failed to send test email: {last_error}", "error")
+            flash(f"Failed to send test email: {error_msg}", "error")
     except Exception as e:
         flash(f"SMTP Error: {str(e)}", "error")
 
