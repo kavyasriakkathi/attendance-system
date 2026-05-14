@@ -201,6 +201,23 @@ app.config.setdefault("PERMANENT_SESSION_LIFETIME", timedelta(hours=int(os.envir
 if is_prod and app.config.get("SECRET_KEY") in (None, "", "dev-key-change-in-production"):
     print("[SECURITY] WARNING: Running in production without a real SECRET_KEY.\nSet the SECRET_KEY environment variable to a stable secret for all instances.")
 
+# Centralized mail configuration and diagnostics (use mail_config module)
+try:
+    import mail_config
+    # setup_mail_config will populate app.config with MAIL_* keys and print masked diagnostics
+    mail_config.setup_mail_config(app)
+except Exception as e:
+    print(f"[mail.config] Failed to initialize mail_config module: {type(e).__name__}: {str(e)}")
+
+def is_mail_configured():
+    try:
+        return mail_config.is_mail_configured(app)
+    except Exception:
+        # Fallback to previous heuristic
+        api_key = app.config.get("RESEND_API_KEY")
+        from_email = app.config.get("MAIL_FROM")
+        return bool(api_key and str(api_key).strip() and from_email and str(from_email).strip())
+
 # Middleware: gracefully handle invalid/unsigned session cookies (itsdangerous.BadSignature)
 class _SessionFixMiddleware:
     def __init__(self, app_):
@@ -2568,6 +2585,31 @@ def test_email():
         flash(f"Resend API error: {str(e)}", "error")
 
     return redirect(url_for("settings"))
+
+
+@app.route('/debug-env')
+@login_required
+def debug_env():
+    """Development-only route to inspect masked mail-related env detection.
+
+    Visible only when not in production. Returns masked values and sources
+    (env vs .env) without exposing secrets.
+    """
+    if is_prod:
+        abort(404)
+    if session.get("role") != "admin":
+        return redirect(url_for("dashboard"))
+
+    try:
+        report = getattr(app, 'mail_config_report', None)
+        if not report:
+            # Ensure module is loaded and report is generated
+            import mail_config
+            report = mail_config.setup_mail_config(app)
+        return jsonify({"ok": True, "report": report})
+    except Exception as e:
+        print(f"[debug-env] error: {repr(e)}")
+        return jsonify({"ok": False, "error": "failed to generate debug report"}), 500
 
 
 @app.route('/admin/email-diagnostics', methods=['POST'])
