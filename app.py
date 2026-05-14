@@ -10,6 +10,7 @@ import time
 import socket
 import threading
 import traceback
+from typing import Tuple
 from urllib.parse import urlparse
 from email.message import EmailMessage
 from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
