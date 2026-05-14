@@ -1,18 +1,16 @@
 import os
 import logging
 import re
+import base64
 from datetime import date, timedelta
 from io import BytesIO
 import sqlite3
-import smtplib
-import ssl
 import time
-import socket
 import threading
 import traceback
 from typing import Tuple
 from urllib.parse import urlparse
-from email.message import EmailMessage
+import requests
 from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 from dotenv import load_dotenv
 
@@ -79,23 +77,23 @@ else:
 # Load .env variables if present (does not overwrite existing environment)
 load_dotenv(override=False)
 
-# Normalize SMTP credentials from environment to avoid accidental spaces/quotes
-raw_mail_username = os.environ.get("MAIL_USERNAME") or ""
-raw_mail_password = os.environ.get("MAIL_PASSWORD") or ""
-# Trim surrounding whitespace
-mail_username = raw_mail_username.strip() if raw_mail_username else None
-# Remove spaces commonly introduced when copying app-passwords (e.g. "abcd efgh ijkl mnop")
-mail_password = raw_mail_password.strip().replace(" ", "") if raw_mail_password else None
+# Normalize Resend credentials from environment
+raw_resend_api_key = os.environ.get("RESEND_API_KEY") or ""
+raw_mail_from = os.environ.get("MAIL_FROM") or ""
+resend_api_key = raw_resend_api_key.strip() if raw_resend_api_key else None
+mail_from = raw_mail_from.strip() if raw_mail_from else None
 
 app.config.from_mapping(
     SECRET_KEY=os.environ.get("SECRET_KEY", "dev-key-change-in-production"),
     DATABASE=database_path,
-    MAIL_SERVER=os.environ.get("MAIL_SERVER", "smtp.gmail.com"),
-    MAIL_PORT=int(os.environ.get("MAIL_PORT", 587)),
-    MAIL_USERNAME=mail_username,
-    MAIL_PASSWORD=mail_password,
-    MAIL_USE_TLS=os.environ.get("MAIL_USE_TLS", "True").lower() in ("true", "1", "yes"),
-    MAIL_FROM=os.environ.get("MAIL_FROM", mail_username),
+    RESEND_API_KEY=resend_api_key,
+    MAIL_FROM=mail_from,
+    MAIL_PROVIDER="resend",
+    # Keep these for compatibility with existing templates/debug cards.
+    MAIL_SERVER="api.resend.com",
+    MAIL_PORT=443,
+    MAIL_USERNAME=mail_from,
+    MAIL_USE_TLS=True,
     REPORT_ADMIN_EMAIL=os.environ.get("REPORT_ADMIN_EMAIL", "instituteattendanceapp@gmail.com"),
     LOW_ATTENDANCE_THRESHOLD=int(os.environ.get("LOW_ATTENDANCE_THRESHOLD", 75)),
 )
@@ -254,9 +252,9 @@ def is_valid_email(email: str) -> bool:
 
 
 def is_mail_configured():
-    username = app.config.get("MAIL_USERNAME")
-    password = app.config.get("MAIL_PASSWORD")
-    return bool(username and username.strip() and password and password.strip())
+    api_key = app.config.get("RESEND_API_KEY")
+    from_email = app.config.get("MAIL_FROM")
+    return bool(api_key and str(api_key).strip() and from_email and str(from_email).strip())
 
 
 def get_setting(db, key, default=None):
@@ -546,104 +544,88 @@ def get_teacher_context(db=None):
                 pass
 
 
-def send_email_gmail(subject: str, recipient: str, body: str, attachments=None, html_body=None,
-                     smtp_host: str = None, smtp_port: int = None, timeout: float = None,
-                     debug: bool = False) -> Tuple[bool, str]:
-    """Send email via Gmail SMTP (starttls).
+def send_email_resend(subject: str, recipient: str, body: str, attachments=None, html_body=None) -> Tuple[bool, str]:
+    """Send email using Resend Email API.
 
     Returns (success: bool, error_message: str|None).
     """
     logger = logging.getLogger("app.email")
+    resend_key = (app.config.get("RESEND_API_KEY") or "").strip()
+    from_email = (app.config.get("MAIL_FROM") or "").strip()
+    timeout = float(os.environ.get("RESEND_TIMEOUT_SECONDS", 15))
 
-    smtp_host = smtp_host or app.config.get("MAIL_SERVER", "smtp.gmail.com")
-    smtp_port = smtp_port or int(app.config.get("MAIL_PORT", 587))
-    timeout = timeout or float(os.environ.get("MAIL_TIMEOUT_SECONDS", 10))
-
-    # Print masked env info for debugging
-    logger.debug("MAIL_FROM=%s", (app.config.get("MAIL_FROM") or "(NOT SET)"))
-    logger.debug("Using SMTP host=%s port=%s", smtp_host, smtp_port)
-
-    # Basic internet check
-    try:
-        sock = socket.create_connection(("8.8.8.8", 53), timeout=3)
-        sock.close()
-    except Exception as e:
-        err = f"No internet connectivity: {e}"
-        logger.error(err)
+    if not resend_key or not from_email:
+        err = "Email is not configured. Set RESEND_API_KEY and MAIL_FROM."
+        logger.error("[email.resend] %s", err)
         return False, err
 
-    # Build message
+    if not is_valid_email(recipient):
+        err = f"Invalid recipient email: {recipient}"
+        logger.error("[email.resend] %s", err)
+        return False, err
+
+    payload = {
+        "from": from_email,
+        "to": [recipient],
+        "subject": subject,
+        "text": body,
+    }
+    if html_body:
+        payload["html"] = html_body
+
+    if attachments:
+        encoded_attachments = []
+        for attachment in attachments:
+            filename = (attachment.get("filename") or "attachment").strip()
+            content = attachment.get("content", b"")
+            if isinstance(content, str):
+                content = content.encode("utf-8")
+            mimetype = attachment.get("mimetype") or "application/octet-stream"
+            encoded_attachments.append({
+                "filename": filename,
+                "content": base64.b64encode(content).decode("ascii"),
+                "type": mimetype,
+            })
+        payload["attachments"] = encoded_attachments
+
+    headers = {
+        "Authorization": f"Bearer {resend_key}",
+        "Content-Type": "application/json",
+    }
+
     try:
-        msg = EmailMessage()
-        msg["Subject"] = subject
-        msg["From"] = (app.config.get("MAIL_FROM") or app.config.get("MAIL_USERNAME") or "").strip()
-        msg["To"] = recipient
-        msg.set_content(body)
-        if html_body:
-            msg.add_alternative(html_body, subtype="html")
+        response = requests.post(
+            "https://api.resend.com/emails",
+            json=payload,
+            headers=headers,
+            timeout=timeout,
+        )
+    except requests.RequestException as req_err:
+        logger.exception("[email.resend] API request failed for recipient=%s", recipient)
+        return False, f"Resend API request failed: {req_err}"
 
-        if attachments:
-            for attachment in attachments:
-                filename = (attachment.get("filename") or "attachment").strip()
-                content = attachment.get("content", b"")
-                if isinstance(content, str):
-                    content = content.encode("utf-8")
-                mimetype = attachment.get("mimetype") or "application/octet-stream"
-                if "/" in mimetype:
-                    maintype, subtype = mimetype.split("/", 1)
-                else:
-                    maintype, subtype = "application", "octet-stream"
-                msg.add_attachment(content, maintype=maintype, subtype=subtype, filename=filename)
-    except Exception as e:
-        logger.exception("Failed to build email message")
-        return False, f"Failed to build message: {e}"
-
-    # Retrieve credentials (prefer runtime environment variables)
-    mail_user = os.environ.get("MAIL_USERNAME") or app.config.get("MAIL_USERNAME") or app.config.get("MAIL_FROM")
-    mail_pass = os.environ.get("MAIL_PASSWORD") or app.config.get("MAIL_PASSWORD")
-    if mail_pass:
-        mail_pass = mail_pass.strip().replace(" ", "")
-
-    # Validate
-    if not mail_user or not mail_pass:
-        msg_err = "Mail credentials not configured. Set MAIL_USERNAME and MAIL_PASSWORD in environment or .env"
-        logger.error(msg_err)
-        return False, msg_err
-
-    # Attempt SMTP connection with starttls
-    try:
-        context = ssl.create_default_context()
-        with smtplib.SMTP(smtp_host, smtp_port, timeout=timeout) as server:
-            if debug or os.environ.get("MAIL_DEBUG", "False").lower() in ("1", "true", "yes"):
-                server.set_debuglevel(1)
-            server.ehlo()
-            server.starttls(context=context)
-            server.ehlo()
-            try:
-                server.login(mail_user, mail_pass)
-            except smtplib.SMTPAuthenticationError as ae:
-                logger.error("SMTP auth failed: %s", ae)
-                return False, f"SMTP authentication failed: {ae}"
-            server.send_message(msg)
-        logger.info("Email sent to %s", recipient)
+    if 200 <= response.status_code < 300:
+        try:
+            response_json = response.json()
+        except Exception:
+            response_json = {}
+        message_id = response_json.get("id")
+        logger.info("[email.resend] Email sent to %s (id=%s)", recipient, message_id or "n/a")
         return True, None
-    except socket.gaierror as e:
-        logger.exception("DNS resolution failed for %s", smtp_host)
-        return False, f"DNS resolution failed for {smtp_host}: {e}"
-    except OSError as e:
-        logger.exception("Network error while connecting to SMTP host=%s port=%s", smtp_host, smtp_port)
-        return False, f"Network error while connecting to {smtp_host}:{smtp_port}: {e}"
-    except smtplib.SMTPException as e:
-        logger.exception("SMTP error")
-        return False, f"SMTP error: {e}"
-    except Exception as e:
-        logger.exception("Unexpected error sending email")
-        return False, f"Unexpected error: {e}"
+
+    response_body = (response.text or "")[:800]
+    logger.error(
+        "[email.resend] API error status=%s recipient=%s body=%s",
+        response.status_code,
+        recipient,
+        response_body,
+    )
+    return False, f"Resend API error {response.status_code}: {response_body}"
 
 
 def send_email(subject, recipient, body, attachments=None, html_body=None):
     """Compatibility wrapper for legacy `send_email` that returns bool."""
-    ok, err = send_email_gmail(subject, recipient, body, attachments=attachments, html_body=html_body)
+    ok, err = send_email_resend(subject, recipient, body, attachments=attachments, html_body=html_body)
     if ok:
         return True
     print(f"Email not sent: {err}")
@@ -652,7 +634,7 @@ def send_email(subject, recipient, body, attachments=None, html_body=None):
 
 def send_email_with_error(subject, recipient, body, attachments=None, html_body=None):
     """Compatibility wrapper that returns (success, error_message)."""
-    return send_email_gmail(subject, recipient, body, attachments=attachments, html_body=html_body)
+    return send_email_resend(subject, recipient, body, attachments=attachments, html_body=html_body)
 
 
 def safe_send_email(subject: str, recipient: str, body: str, attachments=None, html_body=None) -> bool:
@@ -757,7 +739,7 @@ def notify_low_attendance(db, student_ids):
 
 
 def _send_low_attendance_background(student_ids):
-    """Background task so attendance save response is never blocked by SMTP."""
+    """Background task so attendance save response is never blocked by email API calls."""
     db = None
     try:
         db = get_db()
@@ -2107,10 +2089,10 @@ def dashboard():
         }
         mail_info = {
             "configured": is_mail_configured(),
-            "server": app.config["MAIL_SERVER"],
-            "port": app.config["MAIL_PORT"],
-            "username": app.config["MAIL_USERNAME"],
-            "tls": app.config["MAIL_USE_TLS"],
+            "server": app.config.get("MAIL_SERVER", "api.resend.com"),
+            "port": app.config.get("MAIL_PORT", 443),
+            "username": app.config.get("MAIL_FROM"),
+            "tls": True,
             "render_env": bool(os.environ.get("RENDER") or os.environ.get("RENDER_INTERNAL_HOSTNAME")),
         }
 
@@ -2445,10 +2427,10 @@ def settings():
 
     mail_info = {
         "configured": is_mail_configured(),
-        "server": app.config["MAIL_SERVER"],
-        "port": app.config["MAIL_PORT"],
-        "username": app.config["MAIL_USERNAME"],
-        "tls": app.config["MAIL_USE_TLS"],
+        "server": app.config.get("MAIL_SERVER", "api.resend.com"),
+        "port": app.config.get("MAIL_PORT", 443),
+        "username": app.config.get("MAIL_FROM"),
+        "tls": True,
         "render_env": bool(os.environ.get("RENDER") or os.environ.get("RENDER_INTERNAL_HOSTNAME")),
     }
 
@@ -2468,7 +2450,7 @@ def test_email():
         return redirect(url_for("dashboard"))
 
     if not is_mail_configured():
-        flash("Email is not configured. Please set MAIL_USERNAME and MAIL_PASSWORD.", "error")
+        flash("Email is not configured. Please set RESEND_API_KEY and MAIL_FROM.", "error")
         return redirect(url_for("settings"))
 
     recipient = (app.config.get("REPORT_ADMIN_EMAIL") or "").strip()
@@ -2492,7 +2474,7 @@ def test_email():
         else:
             flash(f"Failed to send test email: {error_msg}", "error")
     except Exception as e:
-        flash(f"SMTP Error: {str(e)}", "error")
+        flash(f"Resend API error: {str(e)}", "error")
 
     return redirect(url_for("settings"))
 
@@ -5461,7 +5443,7 @@ def report_email():
     redirect_params = {k: v for k, v in filters.items() if v}
 
     if not is_mail_configured():
-        flash("Email is not configured. Please set MAIL_USERNAME and MAIL_PASSWORD.", "error")
+        flash("Email is not configured. Please set RESEND_API_KEY and MAIL_FROM.", "error")
         return redirect(url_for("attendance_report", **redirect_params))
 
     recipient = (app.config.get("REPORT_ADMIN_EMAIL") or "").strip()
@@ -5830,15 +5812,30 @@ def admin_check_smtp():
     if session.get('role') != 'admin':
         abort(403)
 
-    host = app.config.get('MAIL_SERVER')
-    port = int(app.config.get('MAIL_PORT', 587))
-    timeout = 8
+    timeout = float(os.environ.get("RESEND_TIMEOUT_SECONDS", 8))
+    api_key = (app.config.get("RESEND_API_KEY") or "").strip()
+    host = app.config.get('MAIL_SERVER', 'api.resend.com')
+
+    if not api_key:
+        return jsonify({'ok': False, 'provider': 'resend', 'server': host, 'error': 'RESEND_API_KEY not configured'})
+
     try:
-        s = socket.create_connection((host, port), timeout=timeout)
-        s.close()
-        return jsonify({'ok': True, 'server': host, 'port': port, 'message': 'Connection successful'})
-    except Exception as e:
-        return jsonify({'ok': False, 'server': host, 'port': port, 'error': str(e)})
+        response = requests.get(
+            'https://api.resend.com/domains',
+            headers={'Authorization': f'Bearer {api_key}'},
+            timeout=timeout,
+        )
+        if 200 <= response.status_code < 300:
+            return jsonify({'ok': True, 'provider': 'resend', 'server': host, 'message': 'Resend API connection successful'})
+        return jsonify({
+            'ok': False,
+            'provider': 'resend',
+            'server': host,
+            'status': response.status_code,
+            'error': (response.text or '')[:500],
+        })
+    except requests.RequestException as e:
+        return jsonify({'ok': False, 'provider': 'resend', 'server': host, 'error': str(e)})
 
 
 @app.route('/admin/check-db')
