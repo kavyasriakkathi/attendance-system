@@ -106,9 +106,12 @@ def _mask_env_value(key: str, value: str) -> str:
     masked summary. For non-sensitive values (emails/usernames), show a
     truncated value for convenience.
     """
-    if value is None:
-        return "<not set>"
-    s = str(value)
+    try:
+        if value is None:
+            return "<not set>"
+        s = str(value)
+    except Exception:
+        return "<unavailable>"
     lower = key.lower()
     # Treat anything with 'key' or 'secret' or 'password' as sensitive
     if any(tok in lower for tok in ("password", "secret", "api_key", "apikey", "token")):
@@ -169,9 +172,22 @@ def _log_mail_env_summary():
 # Run mail env summary immediately so it's visible in startup logs
 try:
     _log_mail_env_summary()
-except Exception:
-    # Never fail startup due to logging
-    print("[mail.env] Failed to run mail env diagnostics")
+except Exception as e:
+    # Print a sanitized startup traceback so operators can debug why the
+    # diagnostics failed while avoiding full secret exposure. Dump only the
+    # exception type + first few lines of the traceback.
+    try:
+        import traceback as _tb
+        tb_text = _tb.format_exc()
+        # Keep only the first 6 lines to avoid huge logs
+        tb_lines = tb_text.splitlines()
+        snippet = "\n".join(tb_lines[:6])
+        print(f"[mail.env] Failed to run mail env diagnostics: {type(e).__name__}: {str(e)}")
+        print("[mail.env] Traceback (sanitized):")
+        for ln in snippet.splitlines():
+            print(f"[mail.env] {ln}")
+    except Exception:
+        print("[mail.env] Failed to run mail env diagnostics (unable to format traceback).")
 app.config.setdefault("MAX_CONTENT_LENGTH", int(os.environ.get("MAX_CONTENT_LENGTH", 25 * 1024 * 1024)))
 # Session cookie and lifetime configuration
 # In production (Render) ensure cookies are secure and SECRET_KEY is set.
