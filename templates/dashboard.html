@@ -219,14 +219,22 @@ document.addEventListener('DOMContentLoaded', function() {
         <h3>Teachers</h3>
         <p class="count">{{ total_teachers }}</p>
     </div>
-    <div class="stat-box" title="Total semester records configured in the system" style="border-bottom: 4px solid var(--secondary-color); cursor: help; position: relative;">
+    <div class="stat-box semesters-card" style="border-bottom: 4px solid var(--secondary-color); position: relative;">
         <i class="fa-solid fa-layer-group" style="font-size: 1.5rem; color: var(--text-secondary); margin-bottom: 15px;"></i>
-        <h3>
+        <h3 class="semesters-title">
             Semesters
-            <span class="tooltip-icon" style="display: inline-block; width: 16px; height: 16px; background: var(--text-secondary); color: white; border-radius: 50%; text-align: center; font-size: 0.7rem; line-height: 1.6; margin-left: 5px; cursor: help;">?</span>
+            <button
+                type="button"
+                class="semesters-help-btn"
+                aria-label="Semester info"
+                aria-expanded="false"
+                aria-describedby="semestersTooltip"
+            >
+                ?
+            </button>
         </h3>
         <p class="count">{{ total_semesters }}</p>
-        <div style="position: absolute; bottom: -45px; left: 10px; background: #333; color: white; padding: 8px 12px; border-radius: 6px; font-size: 0.75rem; white-space: nowrap; opacity: 0; pointer-events: none; transition: opacity 0.2s; z-index: 10;">
+        <div id="semestersTooltip" class="semesters-tooltip" role="tooltip">
             Total semester records configured in the system
         </div>
     </div>
@@ -619,6 +627,77 @@ document.head.appendChild(style);
         from { transform: rotate(0deg); }
         to { transform: rotate(360deg); }
     }
+    .semesters-title {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+    }
+    .semesters-help-btn {
+        width: 18px;
+        height: 18px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        border: none;
+        border-radius: 50%;
+        background: var(--text-secondary);
+        color: #fff;
+        font-size: 0.72rem;
+        font-weight: 700;
+        line-height: 1;
+        cursor: pointer;
+        transition: transform 0.25s ease, background-color 0.25s ease, box-shadow 0.25s ease;
+    }
+    .semesters-help-btn:hover,
+    .semesters-help-btn:focus-visible,
+    .semesters-card.tooltip-open .semesters-help-btn {
+        background: var(--primary-color);
+        transform: translateY(-1px) scale(1.06);
+        box-shadow: 0 6px 14px rgba(67, 97, 238, 0.22);
+        outline: none;
+    }
+    .semesters-tooltip {
+        position: absolute;
+        left: 14px;
+        top: calc(100% + 10px);
+        max-width: 260px;
+        background: var(--text-primary);
+        color: #fff;
+        padding: 8px 12px;
+        border-radius: 8px;
+        font-size: 0.75rem;
+        line-height: 1.35;
+        box-shadow: var(--shadow-md);
+        opacity: 0;
+        transform: translateY(8px);
+        pointer-events: none;
+        transition: opacity 0.25s ease, transform 0.25s ease;
+        z-index: 50;
+    }
+    .semesters-tooltip::before {
+        content: '';
+        position: absolute;
+        left: 14px;
+        top: -6px;
+        width: 12px;
+        height: 12px;
+        background: var(--text-primary);
+        transform: rotate(45deg);
+    }
+    .semesters-card:hover .semesters-tooltip,
+    .semesters-card:focus-within .semesters-tooltip,
+    .semesters-card.tooltip-open .semesters-tooltip {
+        opacity: 1;
+        transform: translateY(0);
+    }
+    @media (max-width: 768px) {
+        .semesters-tooltip {
+            left: 10px;
+            right: 10px;
+            max-width: none;
+            white-space: normal;
+        }
+    }
     #lowAttendanceModal table tbody tr:hover {
         background: #f9fafb;
     }
@@ -637,11 +716,36 @@ document.addEventListener('DOMContentLoaded', function() {
     const lowAttendanceCard = document.getElementById('lowAttendanceCard');
     const lowAttendanceModal = document.getElementById('lowAttendanceModal');
     const lowAttendanceCount = {{ low_attendance_alerts }};
+    const semestersCard = document.querySelector('.semesters-card');
+    const semestersHelpBtn = document.querySelector('.semesters-help-btn');
     
     if (lowAttendanceCard && lowAttendanceCount > 0) {
         lowAttendanceCard.addEventListener('click', function() {
             loadLowAttendanceDetails();
             lowAttendanceModal.style.display = 'block';
+        });
+    }
+
+    if (semestersCard && semestersHelpBtn) {
+        semestersHelpBtn.addEventListener('click', function(e) {
+            e.stopPropagation();
+            const isOpen = semestersCard.classList.toggle('tooltip-open');
+            semestersHelpBtn.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
+        });
+
+        document.addEventListener('click', function(e) {
+            if (!semestersCard.contains(e.target)) {
+                semestersCard.classList.remove('tooltip-open');
+                semestersHelpBtn.setAttribute('aria-expanded', 'false');
+            }
+        });
+
+        semestersHelpBtn.addEventListener('keydown', function(e) {
+            if (e.key === 'Escape') {
+                semestersCard.classList.remove('tooltip-open');
+                semestersHelpBtn.setAttribute('aria-expanded', 'false');
+                semestersHelpBtn.blur();
+            }
         });
     }
     
@@ -656,6 +760,10 @@ document.addEventListener('DOMContentLoaded', function() {
     document.addEventListener('keydown', function(e) {
         if (e.key === 'Escape') {
             lowAttendanceModal.style.display = 'none';
+            if (semestersCard && semestersHelpBtn) {
+                semestersCard.classList.remove('tooltip-open');
+                semestersHelpBtn.setAttribute('aria-expanded', 'false');
+            }
         }
     });
 });
