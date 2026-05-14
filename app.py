@@ -2217,6 +2217,81 @@ def department_dashboard():
             try: db.close()
             except: pass
 
+
+@app.route("/api/low-attendance-details")
+@admin_required
+def api_low_attendance_details():
+    """Return detailed low attendance information for dashboard modal."""
+    db = None
+    try:
+        db = get_db()
+        placeholder = get_placeholder()
+        threshold = get_setting(db, "low_attendance_threshold", app.config["LOW_ATTENDANCE_THRESHOLD"])
+        
+        # Query all students with their attendance details, including subject and semester
+        query = f"""
+            SELECT 
+                s.id AS student_id,
+                s.name AS student_name,
+                s.roll_no AS roll_number,
+                s.section AS section,
+                s.current_semester AS semester,
+                b.name AS branch_name,
+                subj.name AS subject_name,
+                COUNT(a.id) AS total_classes,
+                SUM(CASE WHEN a.status = 'Present' THEN 1 ELSE 0 END) AS classes_attended,
+                ROUND(
+                    100.0 * SUM(CASE WHEN a.status = 'Present' THEN 1 ELSE 0 END) / NULLIF(COUNT(a.id), 0),
+                    1
+                ) AS attendance_percentage
+            FROM students s
+            LEFT JOIN attendance a ON s.id = a.student_id
+            LEFT JOIN branches b ON s.branch_id = b.id
+            LEFT JOIN subjects subj ON a.subject_id = subj.id
+            GROUP BY s.id, s.name, s.roll_no, s.section, s.current_semester, b.name, subj.name
+            HAVING COUNT(a.id) > 0 AND (100.0 * SUM(CASE WHEN a.status = 'Present' THEN 1 ELSE 0 END) / NULLIF(COUNT(a.id), 0)) < {placeholder}
+            ORDER BY attendance_percentage ASC, s.name ASC
+        """
+        
+        rows = db.execute(query, (threshold,)).fetchall()
+        
+        low_attendance_students = []
+        for row in rows:
+            attendance_pct = row_get(row, "attendance_percentage") or 0
+            low_attendance_students.append({
+                "student_id": row_get(row, "student_id"),
+                "student_name": row_get(row, "student_name"),
+                "roll_number": row_get(row, "roll_number") or "N/A",
+                "branch_name": row_get(row, "branch_name") or "N/A",
+                "section": row_get(row, "section") or "N/A",
+                "semester": row_get(row, "semester") or 0,
+                "subject_name": row_get(row, "subject_name") or "N/A",
+                "attendance_percentage": float(attendance_pct),
+                "total_classes": int(row_get(row, "total_classes") or 0),
+                "classes_attended": int(row_get(row, "classes_attended") or 0),
+                "is_critical": float(attendance_pct) < 65,  # Critical if below 65%
+            })
+        
+        return jsonify({
+            "success": True,
+            "threshold": threshold,
+            "count": len(low_attendance_students),
+            "students": low_attendance_students
+        })
+    
+    except Exception as e:
+        print(f"[api_low_attendance_details] ERROR: {repr(e)}")
+        print(traceback.format_exc())
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+    finally:
+        if db:
+            try: db.close()
+            except: pass
+
+
 @app.route("/settings", methods=["GET", "POST"])
 @login_required
 @admin_required

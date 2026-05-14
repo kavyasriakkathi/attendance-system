@@ -204,20 +204,31 @@ document.addEventListener('DOMContentLoaded', function() {
         <h3>Active Classes Today</h3>
         <p class="count">{{ active_classes_today }}</p>
     </div>
-    <div class="stat-box" style="border-bottom: 4px solid var(--danger-color); background: linear-gradient(135deg,#fff5f5 0%,#fff0f0 100%);">
+    <div class="stat-box" id="lowAttendanceCard" style="border-bottom: 4px solid var(--danger-color); background: linear-gradient(135deg,#fff5f5 0%,#fff0f0 100%); cursor: pointer; transition: all 0.3s ease;" onmouseover="this.style.boxShadow='0 8px 16px rgba(239, 71, 111, 0.15)'" onmouseout="this.style.boxShadow='var(--shadow-sm)'">
         <i class="fa-solid fa-triangle-exclamation" style="font-size: 1.5rem; color: var(--text-secondary); margin-bottom: 15px;"></i>
         <h3>Low Attendance Alerts</h3>
         <p class="count">{{ low_attendance_alerts }}</p>
+        {% if low_attendance_alerts > 0 %}
+        <p style="font-size: 0.75rem; color: var(--text-secondary); margin-top: 10px; display: flex; align-items: center; gap: 5px;">
+            <i class="fa-solid fa-click"></i> Click to view details
+        </p>
+        {% endif %}
     </div>
     <div class="stat-box" style="border-bottom: 4px solid var(--muted-color);">
         <i class="fa-solid fa-chalkboard-teacher" style="font-size: 1.5rem; color: var(--text-secondary); margin-bottom: 15px;"></i>
         <h3>Teachers</h3>
         <p class="count">{{ total_teachers }}</p>
     </div>
-    <div class="stat-box" style="border-bottom: 4px solid var(--secondary-color);">
+    <div class="stat-box" title="Total semester records configured in the system" style="border-bottom: 4px solid var(--secondary-color); cursor: help; position: relative;">
         <i class="fa-solid fa-layer-group" style="font-size: 1.5rem; color: var(--text-secondary); margin-bottom: 15px;"></i>
-        <h3>Semesters</h3>
+        <h3>
+            Semesters
+            <span class="tooltip-icon" style="display: inline-block; width: 16px; height: 16px; background: var(--text-secondary); color: white; border-radius: 50%; text-align: center; font-size: 0.7rem; line-height: 1.6; margin-left: 5px; cursor: help;">?</span>
+        </h3>
         <p class="count">{{ total_semesters }}</p>
+        <div style="position: absolute; bottom: -45px; left: 10px; background: #333; color: white; padding: 8px 12px; border-radius: 6px; font-size: 0.75rem; white-space: nowrap; opacity: 0; pointer-events: none; transition: opacity 0.2s; z-index: 10;">
+            Total semester records configured in the system
+        </div>
     </div>
     <div class="stat-box" style="border-bottom: 4px solid var(--warning-color); background: linear-gradient(135deg, #ffffff 0%, #fff9e6 100%);">
         <i class="fa-solid fa-chart-pie" style="font-size: 1.5rem; color: var(--text-secondary); margin-bottom: 15px;"></i>
@@ -526,4 +537,227 @@ style.textContent = `
 `;
 document.head.appendChild(style);
 </script>
+
+<!-- Low Attendance Details Modal -->
+<div id="lowAttendanceModal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0, 0, 0, 0.5); z-index: 1000; overflow-y: auto;">
+    <div style="background: white; margin: 30px auto; max-width: 1000px; border-radius: 12px; box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3); max-height: 80vh; overflow: auto;">
+        <!-- Modal Header -->
+        <div style="padding: 30px 30px 20px; border-bottom: 1px solid #e5e7eb; display: flex; justify-content: space-between; align-items: center; sticky; top: 0; background: white;">
+            <div>
+                <h2 style="margin: 0 0 5px 0; color: #1f2937;">
+                    <i class="fa-solid fa-triangle-exclamation" style="color: #ef476f; margin-right: 10px;"></i>
+                    Low Attendance Alerts
+                </h2>
+                <p style="margin: 0; color: #6b7280; font-size: 0.9rem;">Students with attendance below <span id="thresholdDisplay">75</span>%</p>
+            </div>
+            <button onclick="document.getElementById('lowAttendanceModal').style.display='none'" style="background: none; border: none; font-size: 1.5rem; cursor: pointer; color: #6b7280; padding: 0; width: 30px; height: 30px; display: flex; align-items: center; justify-content: center;">
+                <i class="fa-solid fa-times"></i>
+            </button>
+        </div>
+        
+        <!-- Modal Body -->
+        <div style="padding: 30px;">
+            <div id="lowAttendanceLoading" style="text-align: center; padding: 40px;">
+                <i class="fa-solid fa-spinner" style="font-size: 2rem; color: #4361ee; animation: spin 1s linear infinite;"></i>
+                <p style="margin-top: 15px; color: #6b7280;">Loading attendance details...</p>
+            </div>
+            
+            <div id="lowAttendanceContent" style="display: none;">
+                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; margin-bottom: 30px;">
+                    <div style="background: #f3f4f6; padding: 20px; border-radius: 8px; border-left: 4px solid #ef476f;">
+                        <p style="margin: 0 0 5px 0; color: #6b7280; font-size: 0.85rem; font-weight: 500;">Total Students</p>
+                        <p style="margin: 0; font-size: 1.8rem; font-weight: bold; color: #ef476f;" id="totalStudentCount">0</p>
+                    </div>
+                    <div style="background: #f3f4f6; padding: 20px; border-radius: 8px; border-left: 4px solid #f59e0b;">
+                        <p style="margin: 0 0 5px 0; color: #6b7280; font-size: 0.85rem; font-weight: 500;">Critical (&lt; 65%)</p>
+                        <p style="margin: 0; font-size: 1.8rem; font-weight: bold; color: #f59e0b;" id="criticalCount">0</p>
+                    </div>
+                    <div style="background: #f3f4f6; padding: 20px; border-radius: 8px; border-left: 4px solid #4361ee;">
+                        <p style="margin: 0 0 5px 0; color: #6b7280; font-size: 0.85rem; font-weight: 500;">Average Attendance</p>
+                        <p style="margin: 0; font-size: 1.8rem; font-weight: bold; color: #4361ee;" id="averageAttendance">0%</p>
+                    </div>
+                </div>
+                
+                <div style="overflow-x: auto;">
+                    <table style="width: 100%; border-collapse: collapse; font-size: 0.9rem;">
+                        <thead>
+                            <tr style="background: #f9fafb; border-bottom: 2px solid #e5e7eb;">
+                                <th style="padding: 12px; text-align: left; color: #374151; font-weight: 600;">Name</th>
+                                <th style="padding: 12px; text-align: left; color: #374151; font-weight: 600;">Roll No.</th>
+                                <th style="padding: 12px; text-align: left; color: #374151; font-weight: 600;">Branch</th>
+                                <th style="padding: 12px; text-align: left; color: #374151; font-weight: 600;">Section</th>
+                                <th style="padding: 12px; text-align: center; color: #374151; font-weight: 600;">Sem.</th>
+                                <th style="padding: 12px; text-align: left; color: #374151; font-weight: 600;">Subject</th>
+                                <th style="padding: 12px; text-align: center; color: #374151; font-weight: 600;">Attendance %</th>
+                                <th style="padding: 12px; text-align: center; color: #374151; font-weight: 600;">Classes</th>
+                            </tr>
+                        </thead>
+                        <tbody id="lowAttendanceTableBody">
+                            <!-- Populated by JavaScript -->
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            
+            <div id="lowAttendanceEmpty" style="display: none; text-align: center; padding: 60px 30px;">
+                <i class="fa-solid fa-circle-check" style="font-size: 3rem; color: #10b981; margin-bottom: 15px;"></i>
+                <h3 style="color: #10b981; margin: 0 0 10px 0;">All Students Have Good Attendance</h3>
+                <p style="color: #6b7280; margin: 0;">No students are below the attendance threshold.</p>
+            </div>
+            
+            <div id="lowAttendanceError" style="display: none; background: #fee; padding: 20px; border-radius: 8px; border-left: 4px solid #ef476f;">
+                <p style="margin: 0; color: #7f1d1d;">
+                    <i class="fa-solid fa-circle-exclamation"></i> Failed to load attendance details.
+                </p>
+            </div>
+        </div>
+    </div>
+</div>
+
+<style>
+    @keyframes spin {
+        from { transform: rotate(0deg); }
+        to { transform: rotate(360deg); }
+    }
+    #lowAttendanceModal table tbody tr:hover {
+        background: #f9fafb;
+    }
+    #lowAttendanceModal .critical-row {
+        background: #fef2f2 !important;
+        border-left: 4px solid #ef476f;
+    }
+    #lowAttendanceModal .critical-row:hover {
+        background: #fee !important;
+    }
+</style>
+
+<script>
+// Handle Low Attendance Card Click
+document.addEventListener('DOMContentLoaded', function() {
+    const lowAttendanceCard = document.getElementById('lowAttendanceCard');
+    const lowAttendanceModal = document.getElementById('lowAttendanceModal');
+    const lowAttendanceCount = {{ low_attendance_alerts }};
+    
+    if (lowAttendanceCard && lowAttendanceCount > 0) {
+        lowAttendanceCard.addEventListener('click', function() {
+            loadLowAttendanceDetails();
+            lowAttendanceModal.style.display = 'block';
+        });
+    }
+    
+    // Close modal when clicking outside of it
+    lowAttendanceModal.addEventListener('click', function(e) {
+        if (e.target === this) {
+            this.style.display = 'none';
+        }
+    });
+    
+    // Close modal on Escape key
+    document.addEventListener('keydown', function(e) {
+        if (e.key === 'Escape') {
+            lowAttendanceModal.style.display = 'none';
+        }
+    });
+});
+
+function loadLowAttendanceDetails() {
+    const loading = document.getElementById('lowAttendanceLoading');
+    const content = document.getElementById('lowAttendanceContent');
+    const empty = document.getElementById('lowAttendanceEmpty');
+    const error = document.getElementById('lowAttendanceError');
+    
+    loading.style.display = 'block';
+    content.style.display = 'none';
+    empty.style.display = 'none';
+    error.style.display = 'none';
+    
+    fetch('/api/low-attendance-details')
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                if (data.count === 0) {
+                    empty.style.display = 'block';
+                } else {
+                    populateLowAttendanceTable(data);
+                    content.style.display = 'block';
+                }
+            } else {
+                error.style.display = 'block';
+            }
+            loading.style.display = 'none';
+        })
+        .catch(err => {
+            console.error('Error loading low attendance details:', err);
+            error.style.display = 'block';
+            loading.style.display = 'none';
+        });
+}
+
+function populateLowAttendanceTable(data) {
+    const threshold = data.threshold;
+    document.getElementById('thresholdDisplay').textContent = threshold;
+    
+    const students = data.students;
+    const tbody = document.getElementById('lowAttendanceTableBody');
+    tbody.innerHTML = '';
+    
+    let totalAttendance = 0;
+    let criticalCount = 0;
+    
+    students.forEach(student => {
+        const attendance = student.attendance_percentage;
+        const isCritical = student.is_critical;
+        
+        if (isCritical) criticalCount++;
+        totalAttendance += attendance;
+        
+        const row = document.createElement('tr');
+        row.className = isCritical ? 'critical-row' : '';
+        row.style.borderBottom = '1px solid #e5e7eb';
+        
+        // Attendance color based on percentage
+        let attendanceColor = '#10b981'; // green
+        let attendanceBg = '#f0fdf4';
+        if (attendance < 65) {
+            attendanceColor = '#dc2626'; // red for critical
+            attendanceBg = '#fef2f2';
+        } else if (attendance < 75) {
+            attendanceColor = '#f59e0b'; // orange for warning
+            attendanceBg = '#fffbeb';
+        }
+        
+        row.innerHTML = `
+            <td style="padding: 12px; color: #1f2937;">${escapeHtml(student.student_name)}</td>
+            <td style="padding: 12px; color: #6b7280; font-family: monospace; font-size: 0.85rem;">${escapeHtml(student.roll_number)}</td>
+            <td style="padding: 12px; color: #6b7280;">${escapeHtml(student.branch_name)}</td>
+            <td style="padding: 12px; color: #6b7280;">${escapeHtml(student.section)}</td>
+            <td style="padding: 12px; color: #6b7280; text-align: center;">${student.semester || '-'}</td>
+            <td style="padding: 12px; color: #6b7280; font-size: 0.85rem;">${escapeHtml(student.subject_name)}</td>
+            <td style="padding: 12px; text-align: center;">
+                <span style="background: ${attendanceBg}; color: ${attendanceColor}; padding: 6px 12px; border-radius: 6px; font-weight: 600; display: inline-block;">
+                    ${attendance}%
+                </span>
+            </td>
+            <td style="padding: 12px; text-align: center; color: #6b7280;">
+                <span title="${student.classes_attended} present out of ${student.total_classes} classes">${student.classes_attended}/${student.total_classes}</span>
+            </td>
+        `;
+        tbody.appendChild(row);
+    });
+    
+    document.getElementById('totalStudentCount').textContent = students.length;
+    document.getElementById('criticalCount').textContent = criticalCount;
+    const avgAttendance = students.length > 0 
+        ? Math.round(totalAttendance / students.length) 
+        : 0;
+    document.getElementById('averageAttendance').textContent = avgAttendance + '%';
+}
+
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+</script>
+
 {% endblock %}
