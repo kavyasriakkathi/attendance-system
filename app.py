@@ -97,6 +97,81 @@ app.config.from_mapping(
     REPORT_ADMIN_EMAIL=os.environ.get("REPORT_ADMIN_EMAIL", "instituteattendanceapp@gmail.com"),
     LOW_ATTENDANCE_THRESHOLD=int(os.environ.get("LOW_ATTENDANCE_THRESHOLD", 75)),
 )
+
+
+def _mask_env_value(key: str, value: str) -> str:
+    """Return a masked representation for sensitive env values.
+
+    We avoid printing full secrets. For API keys and passwords, show a short
+    masked summary. For non-sensitive values (emails/usernames), show a
+    truncated value for convenience.
+    """
+    if value is None:
+        return "<not set>"
+    s = str(value)
+    lower = key.lower()
+    # Treat anything with 'key' or 'secret' or 'password' as sensitive
+    if any(tok in lower for tok in ("password", "secret", "api_key", "apikey", "token")):
+        if len(s) <= 6:
+            return "<set>"
+        return s[:3] + "..." + s[-3:]
+    # For emails and usernames, mask username part leaving domain
+    if "@" in s:
+        parts = s.split("@")
+        user = parts[0]
+        if len(user) <= 2:
+            masked_user = "*"
+        else:
+            masked_user = user[0] + "..." + user[-1]
+        return masked_user + "@" + parts[1]
+    # Fallback: show first/last char
+    if len(s) <= 4:
+        return s[0] + "..."
+    return s[:2] + "..." + s[-2:]
+
+
+def _log_mail_env_summary():
+    """Log which mail-related environment variables are present (masked).
+
+    This runs at module import time so operators see the state in startup
+    logs. It respects the fact that `load_dotenv(override=False)` was called,
+    meaning Render/production env vars take precedence over .env.
+    """
+    logger = logging.getLogger("app.mailenv")
+    mail_keys = ["MAIL_USERNAME", "MAIL_PASSWORD", "MAIL_FROM", "RESEND_API_KEY", "REPORT_ADMIN_EMAIL"]
+    present = []
+    missing = []
+    lines = []
+    for k in mail_keys:
+        # Prefer actual environment variables (Render/production). fall back to app.config
+        raw = os.environ.get(k)
+        if raw is None:
+            raw = app.config.get(k)
+        if raw and str(raw).strip():
+            present.append(k)
+            lines.append(f"{k}= { _mask_env_value(k, raw) }")
+        else:
+            missing.append(k)
+            lines.append(f"{k}= <not set>")
+
+    mode = "production" if is_prod else "development/local"
+    print(f"[mail.env] Starting mail environment diagnostics ({mode}). .env was loaded with override=False so existing environment vars were preserved.")
+    for ln in lines:
+        # Use print to ensure visible in stdout logs
+        print(f"[mail.env] {ln}")
+
+    if missing:
+        print(f"[mail.env] Missing mail vars: {', '.join(missing)}")
+    else:
+        print("[mail.env] All mail vars detected (masked above).")
+
+
+# Run mail env summary immediately so it's visible in startup logs
+try:
+    _log_mail_env_summary()
+except Exception:
+    # Never fail startup due to logging
+    print("[mail.env] Failed to run mail env diagnostics")
 app.config.setdefault("MAX_CONTENT_LENGTH", int(os.environ.get("MAX_CONTENT_LENGTH", 25 * 1024 * 1024)))
 # Session cookie and lifetime configuration
 # In production (Render) ensure cookies are secure and SECRET_KEY is set.
