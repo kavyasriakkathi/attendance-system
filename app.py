@@ -2479,6 +2479,165 @@ def test_email():
     return redirect(url_for("settings"))
 
 
+@app.route('/admin/email-diagnostics', methods=['POST'])
+@login_required
+def email_diagnostics():
+    """Run email diagnostics and optionally send a test email.
+
+    Returns structured JSON with checks for environment variables, internet
+    connectivity (Resend API), optional SMTP connectivity/auth (if legacy
+    MAIL_USERNAME/MAIL_PASSWORD are present), and a test send result.
+    """
+    if session.get("role") != "admin":
+        return jsonify({"error": "unauthorized"}), 403
+
+    import socket
+    import smtplib
+
+    logger = logging.getLogger("app.email.diagnostics")
+    logger.info("Starting email diagnostics")
+
+    results = {
+        "env": {},
+        "connectivity": {},
+        "smtp": {},
+        "test_send": {},
+    }
+
+    # Environment variables
+    for var in ("MAIL_USERNAME", "MAIL_PASSWORD", "MAIL_FROM", "RESEND_API_KEY"):
+        val = os.environ.get(var)
+        results["env"][var] = bool(val and str(val).strip())
+
+    # Internet connectivity check to Resend API
+    try:
+        r = requests.get("https://api.resend.com/", timeout=5)
+        results["connectivity"]["resend_api"] = {"ok": True, "status_code": r.status_code}
+    except Exception as e:
+        results["connectivity"]["resend_api"] = {"ok": False, "error": str(e)}
+        logger.warning("Resend connectivity check failed: %s", repr(e))
+
+    # SMTP connectivity/auth checks only if legacy credentials present
+    mail_username = os.environ.get("MAIL_USERNAME")
+    mail_password = os.environ.get("MAIL_PASSWORD")
+    mail_server = os.environ.get("MAIL_SERVER") or app.config.get("MAIL_SERVER") or "smtp.gmail.com"
+    try:
+        mail_port = int(os.environ.get("MAIL_PORT") or app.config.get("MAIL_PORT") or 587)
+    except Exception:
+        mail_port = 587
+
+    smtp_report = {}
+    if mail_username and mail_password:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(6)
+        try:
+            sock.connect((mail_server, mail_port))
+            smtp_report["connection"] = {"ok": True, "message": f"Connected to {mail_server}:{mail_port}"}
+            try:
+                if mail_port == 465:
+                    server = smtplib.SMTP_SSL(mail_server, mail_port, timeout=6)
+                else:
+                    server = smtplib.SMTP(mail_server, mail_port, timeout=6)
+                    server.ehlo()
+                    if app.config.get("MAIL_USE_TLS"):
+                        server.starttls()
+                        server.ehlo()
+                try:
+                    server.login(mail_username, mail_password)
+                    smtp_report["auth"] = {"ok": True}
+                except smtplib.SMTPAuthenticationError as aerr:
+                    smtp_report["auth"] = {"ok": False, "error": str(aerr)}
+                except Exception as e:
+                    smtp_report["auth"] = {"ok": False, "error": str(e)}
+                try:
+                    server.quit()
+                except Exception:
+                    pass
+            except Exception as e:
+                smtp_report["auth"] = {"ok": False, "error": str(e)}
+        except socket.timeout:
+            smtp_report["connection"] = {"ok": False, "error": "Connection timed out (possible hosting provider blocking SMTP ports)"}
+        except Exception as e:
+            smtp_report["connection"] = {"ok": False, "error": str(e)}
+        finally:
+            try:
+                sock.close()
+            except Exception:
+                pass
+    else:
+        smtp_report["skipped"] = "MAIL_USERNAME or MAIL_PASSWORD not set; SMTP checks skipped"
+
+    results["smtp"] = smtp_report
+
+    # Send a test email using the app's configured method (Resend wrapper)
+    recipient = (app.config.get("REPORT_ADMIN_EMAIL") or os.environ.get("REPORT_ADMIN_EMAIL") or "").strip()
+    if recipient and is_valid_email(recipient):
+        try:
+            ok, err = send_email_with_error(
+                subject="Test Email: Attendance System",
+                recipient=recipient,
+                body=("This is a test email sent by the Email Diagnostics tool.\n\n"
+                      f"Time: {date.today().isoformat()}\n"),
+            )
+            if ok:
+                results["test_send"] = {"ok": True, "message": f"Test email sent to {recipient}"}
+            else:
+                results["test_send"] = {"ok": False, "error": err}
+        except Exception as e:
+            results["test_send"] = {"ok": False, "error": str(e)}
+            logger.exception("Test send failed")
+    else:
+        results["test_send"] = {"ok": False, "error": "Admin recipient invalid or not set (REPORT_ADMIN_EMAIL)"}
+
+    # Terminal log for debugging (full structured output)
+    print("[email.diagnostics] ", results)
+    logger.info("Email diagnostics completed")
+
+    # Build friendly UI messages
+    messages = []
+    conn = results.get("connectivity", {}).get("resend_api")
+    if conn and conn.get("ok"):
+        messages.append("Internet connectivity to Resend API: OK")
+    else:
+        err = conn.get("error") if conn else "Unknown"
+        messages.append("Internet connectivity to Resend API: Failed")
+        if err:
+            messages.append(f"Detail: {err}")
+
+    smtp_conn = results.get("smtp", {}).get("connection")
+    if smtp_conn:
+        if smtp_conn.get("ok"):
+            messages.append("SMTP connection: Success")
+        else:
+            err = smtp_conn.get("error", "")
+            if "timed out" in str(err).lower():
+                messages.append("SMTP connection: Failed — SMTP connection blocked by hosting provider")
+            else:
+                messages.append(f"SMTP connection: Failed — {err}")
+    else:
+        if results.get("smtp", {}).get("skipped"):
+            messages.append("SMTP checks skipped: MAIL_USERNAME or MAIL_PASSWORD not set")
+
+    auth = results.get("smtp", {}).get("auth")
+    if auth:
+        if auth.get("ok"):
+            messages.append("SMTP authentication: Success")
+        else:
+            messages.append(f"SMTP authentication: Failed — {auth.get('error')}")
+
+    # Environment variables summary
+    for k, v in results.get("env", {}).items():
+        messages.append(f"{k}: {'Loaded' if v else 'Not set'}")
+
+    ts = results.get("test_send", {})
+    if ts.get("ok"):
+        messages.append("Test email sent successfully")
+    else:
+        messages.append(f"Test email failed: {ts.get('error')}")
+
+    return jsonify({"results": results, "messages": messages})
+
+
 @app.route("/admin/import_data", methods=["POST"])
 @login_required
 def admin_import_data():

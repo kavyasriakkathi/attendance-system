@@ -32,7 +32,7 @@
     <div class="button-row">
         <a class="button" href="{{ url_for('dashboard') }}">Back to dashboard</a>
         {% if mail_info.configured %}
-        <a class="button secondary" href="{{ url_for('test_email') }}" style="background: #6c757d; margin-left: 10px;">Test Email Connection</a>
+        <button type="button" id="diagnosticsBtn" class="button secondary" style="background: #6c757d; margin-left: 10px;" onclick="runEmailDiagnostics()">Test Email & Diagnostics</button>
         {% endif %}
     </div>
 
@@ -90,6 +90,76 @@
         } catch (e) {
             status.innerHTML = '<span style="color: #dc2626;">❌ Invalid JSON format. Please copy the entire data exactly.</span>';
         }
+    }
+    </script>
+
+    <!-- Email Diagnostics Modal -->
+    <div id="emailDiagModal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.45); align-items:center; justify-content:center; z-index:1200;">
+        <div style="background:#fff; max-width:760px; width:92%; margin:auto; border-radius:12px; padding:20px; box-shadow:0 6px 32px rgba(0,0,0,0.18);">
+            <h3>Email Diagnostics</h3>
+            <div id="diagStatus" style="margin-top:10px; max-height:300px; overflow:auto; font-family:monospace; font-size:0.95rem;"></div>
+            <div style="margin-top:18px; display:flex; justify-content:flex-end; gap:8px;">
+                <button type="button" class="button" onclick="closeEmailDiag()">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+    function closeEmailDiag(){
+        document.getElementById('emailDiagModal').style.display = 'none';
+        const btn = document.getElementById('diagnosticsBtn'); if(btn) btn.disabled = false;
+    }
+
+    function runEmailDiagnostics(){
+        const btn = document.getElementById('diagnosticsBtn');
+        if(btn) btn.disabled = true;
+        const modal = document.getElementById('emailDiagModal');
+        const status = document.getElementById('diagStatus');
+        modal.style.display = 'flex';
+        status.innerHTML = '<div style="color:#2563eb;">Running diagnostics... (this may take a few seconds)</div>';
+
+        fetch('/admin/email-diagnostics', { method: 'POST', credentials: 'same-origin' })
+        .then(r => r.json())
+        .then(data => {
+            status.innerHTML = '';
+            if(data.messages && data.messages.length){
+                data.messages.forEach(m => {
+                    const el = document.createElement('div');
+                    el.style.padding = '6px 0';
+                    if(m.toLowerCase().includes('failed') || m.toLowerCase().includes('error')){
+                        el.innerHTML = '❌ ' + escapeHtml(m);
+                        el.style.color = '#b91c1c';
+                    } else {
+                        el.innerHTML = '✅ ' + escapeHtml(m);
+                        el.style.color = '#065f46';
+                    }
+                    status.appendChild(el);
+                });
+            }
+
+            // Show detailed raw results for debugging
+            const pre = document.createElement('pre');
+            pre.style.marginTop = '12px';
+            pre.style.background = '#0f172a';
+            pre.style.color = '#e6eef8';
+            pre.style.padding = '12px';
+            pre.style.borderRadius = '8px';
+            pre.style.fontSize = '0.85rem';
+            pre.textContent = JSON.stringify(data.results || data, null, 2);
+            status.appendChild(pre);
+        })
+        .catch(err => {
+            status.innerHTML = '<div style="color:#b91c1c;">❌ Diagnostics failed: ' + escapeHtml(String(err)) + '</div>';
+        })
+        .finally(() => {
+            if(btn) btn.disabled = false;
+        });
+    }
+
+    function escapeHtml(s){
+        return String(s).replace(/[&<>"']/g, function(c){
+            return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":"&#39;"}[c];
+        });
     }
     </script>
 </div>
