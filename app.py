@@ -6533,4 +6533,10 @@ def reports_export_pdf():
             except: pass
 
 if __name__ == "__main__":
+    # Register timetable routes if module present
+    try:
+        import timetable
+        timetable.register_routes(app)
+    except Exception:
+        pass
     socketio.run(app, host="0.0.0.0", port=10000, debug=True)

@@ -274,6 +274,23 @@ def register_routes(app):
             "slot": dict(row)
         })
 
+    @app.route('/timetable/students')
+    def timetable_students():
+        # Return students for a given branch and section (or teacher session)
+        branch = request.args.get('branch') or session.get('teacher_branch_name') or ''
+        section = request.args.get('section') or session.get('teacher_section') or ''
+        db = get_db()
+        try:
+            rows = db.execute(
+                "SELECT s.id, s.name, s.roll_no FROM students s JOIN branches b ON s.branch_id = b.id WHERE b.name = ? AND s.section = ? ORDER BY s.name",
+                (branch, section),
+            ).fetchall()
+            students = [{"id": r["id"], "name": r["name"], "roll_no": r["roll_no"]} for r in rows]
+            return jsonify({"ok": True, "students": students})
+        except Exception as e:
+            logger.exception('failed to fetch students')
+            return jsonify({"ok": False, "error": str(e)}), 500
+
     @app.route("/attendance/mark_current", methods=("POST",))
     def attendance_mark_current():
         # Mark attendance for current slot (teacher must be logged in)
@@ -290,10 +307,34 @@ def register_routes(app):
         # Load students
         placeholder = get_placeholder()
         students = db.execute(f"SELECT id, name FROM students WHERE branch_id = (SELECT id FROM branches WHERE name = {placeholder}) AND section = {placeholder}", (branch, section)).fetchall()
+        # Resolve subject id by matching slot subject_name to subjects table
+        subject_name = row_get(slot, 'subject_name')
+        subject_id = None
+        try:
+            if subject_name:
+                sub_row = db.execute("SELECT id FROM subjects WHERE LOWER(name)=LOWER(?) LIMIT 1", (subject_name,)).fetchone()
+                if sub_row:
+                    subject_id = row_get(sub_row, 'id')
+        except Exception:
+            pass
+
+        # Prevent duplicate attendance for the same subject today
+        duplicate_check = False
+        try:
+            if subject_id:
+                dup_row = db.execute("SELECT COUNT(1) AS c FROM attendance WHERE subject_id = ? AND DATE(timestamp)=DATE('now')", (subject_id,)).fetchone()
+                if row_get(dup_row, 'c', 0) > 0:
+                    duplicate_check = True
+        except Exception:
+            pass
+
+        if duplicate_check:
+            return jsonify({"ok": False, "error": "attendance already recorded for this subject today"}), 400
+
         if action == "bulk_absent":
             # Mark all absent for this slot
             for s in students:
-                db.execute("INSERT INTO attendance (student_id, subject_id, status, timestamp) VALUES (?, ?, ?, datetime('now'))", (row_get(s, "id"), None, "Absent"))
+                db.execute("INSERT INTO attendance (student_id, subject_id, status, timestamp) VALUES (?, ?, ?, datetime('now'))", (row_get(s, "id"), subject_id, "Absent"))
             db.commit()
             return jsonify({"ok": True, "marked": len(students)})
         elif action in ("present", "absent"):
@@ -301,7 +342,7 @@ def register_routes(app):
             marked = 0
             for sid in student_ids:
                 st = "Present" if action == "present" else "Absent"
-                db.execute("INSERT INTO attendance (student_id, subject_id, status, timestamp) VALUES (?, ?, ?, datetime('now'))", (sid, None, st))
+                db.execute("INSERT INTO attendance (student_id, subject_id, status, timestamp) VALUES (?, ?, ?, datetime('now'))", (sid, subject_id, st))
                 marked += 1
             db.commit()
             return jsonify({"ok": True, "marked": marked})
