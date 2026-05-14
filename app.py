@@ -308,7 +308,7 @@ def _table_columns(db, table_name: str):
             """
             SELECT column_name
             FROM information_schema.columns
-            WHERE table_name = %s
+            WHERE table_name = %s AND table_schema = 'public'
             ORDER BY ordinal_position
             """,
             (table_name,),
@@ -335,10 +335,14 @@ def _ensure_column(db, table_name: str, column_name: str, column_definition: str
             db.execute("SAVEPOINT ensure_col")
             columns = _table_columns(db, table_name)
             if column_name not in columns:
+                print(f"[_ensure_column] Adding {table_name}.{column_name}")
                 db.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}")
+                print(f"[_ensure_column] Successfully added {table_name}.{column_name}")
+            else:
+                print(f"[_ensure_column] Column {table_name}.{column_name} already exists")
             db.execute("RELEASE SAVEPOINT ensure_col")
         except Exception as e:
-            print(f"[_ensure_column] {table_name}.{column_name} skipped: {repr(e)}")
+            print(f"[_ensure_column] {table_name}.{column_name} failed: {repr(e)}")
             try:
                 db.execute("ROLLBACK TO SAVEPOINT ensure_col")
                 db.execute("RELEASE SAVEPOINT ensure_col")
@@ -348,9 +352,11 @@ def _ensure_column(db, table_name: str, column_name: str, column_definition: str
         columns = _table_columns(db, table_name)
         if column_name not in columns:
             try:
+                print(f"[_ensure_column] Adding {table_name}.{column_name}")
                 db.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}")
+                print(f"[_ensure_column] Successfully added {table_name}.{column_name}")
             except Exception as e:
-                print(f"[_ensure_column] {table_name}.{column_name} skipped: {repr(e)}")
+                print(f"[_ensure_column] {table_name}.{column_name} failed: {repr(e)}")
 
 
 def get_teacher_context(db=None):
@@ -972,11 +978,12 @@ def init_db(db=None):
                 """
                 UPDATE students
                 SET roll_no = COALESCE(roll_no, enrollment),
-                    section = COALESCE(section, (SELECT CASE WHEN instr(name, '-') > 0 THEN substr(name, instr(name, '-') + 1) ELSE '' END FROM branches WHERE branches.id = students.branch_id))
+                    section = COALESCE(section, '')
                 WHERE roll_no IS NULL OR section IS NULL OR TRIM(section) = ''
                 """
             )
-        except Exception:
+        except Exception as e:
+            print(f"[DB] UPDATE students for roll_no/section failed: {repr(e)}")
             pass
 
         try:
@@ -1006,6 +1013,37 @@ def init_db(db=None):
                 except Exception: pass
         
         db.commit() # Commit column additions before index creation
+        
+        # Verify critical columns exist and add them if missing
+        print("[DB] Verifying critical columns...")
+        critical_columns = [
+            ("students", "roll_no", "TEXT"),
+            ("students", "section", "TEXT"),
+            ("students", "import_order", "INTEGER"),
+            ("attendance", "subject_id", "INTEGER"),
+            ("attendance", "period", "INTEGER DEFAULT 1"),
+        ]
+        
+        for table, col, col_type in critical_columns:
+            try:
+                columns = _table_columns(db, table)
+                if col not in columns:
+                    print(f"[DB] CRITICAL: Column {table}.{col} missing, adding...")
+                    if is_postgres:
+                        db.execute("SAVEPOINT verify_col")
+                    db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}")
+                    if is_postgres:
+                        db.execute("RELEASE SAVEPOINT verify_col")
+                    db.commit()
+                    print(f"[DB] Successfully added {table}.{col}")
+            except Exception as e:
+                print(f"[DB] Column verification for {table}.{col} failed: {repr(e)}")
+                if is_postgres:
+                    try:
+                        db.execute("ROLLBACK TO SAVEPOINT verify_col")
+                        db.execute("RELEASE SAVEPOINT verify_col")
+                    except Exception:
+                        pass
         
         # Upgrade index if it doesn't support period
         try:
