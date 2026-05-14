@@ -77,6 +77,15 @@ else:
 # Load .env variables if present (does not overwrite existing environment)
 load_dotenv(override=False)
 
+# Suppress itsdangerous warnings about invalid session cookies (expected for old/tampered cookies)
+import warnings
+warnings.filterwarnings("ignore", category=Warning, module="itsdangerous")
+logging.getLogger("itsdangerous").setLevel(logging.ERROR)
+
+# Session cookie and lifetime configuration
+# In production (Render) ensure cookies are secure and SECRET_KEY is set.
+is_prod = bool(os.environ.get("RENDER") or os.environ.get("RENDER_INTERNAL_HOSTNAME") or os.environ.get("FLASK_ENV", "").lower() == "production")
+
 # Normalize Resend credentials from environment
 raw_resend_api_key = os.environ.get("RESEND_API_KEY") or ""
 raw_mail_from = os.environ.get("MAIL_FROM") or ""
@@ -189,9 +198,7 @@ except Exception as e:
     except Exception:
         print("[mail.env] Failed to run mail env diagnostics (unable to format traceback).")
 app.config.setdefault("MAX_CONTENT_LENGTH", int(os.environ.get("MAX_CONTENT_LENGTH", 25 * 1024 * 1024)))
-# Session cookie and lifetime configuration
-# In production (Render) ensure cookies are secure and SECRET_KEY is set.
-is_prod = bool(os.environ.get("RENDER") or os.environ.get("RENDER_INTERNAL_HOSTNAME") or os.environ.get("FLASK_ENV", "").lower() == "production")
+# SESSION_COOKIE configuration
 app.config.setdefault("SESSION_COOKIE_SECURE", os.environ.get("SESSION_COOKIE_SECURE", "True" if is_prod else "False").lower() in ("true", "1", "yes"))
 app.config.setdefault("SESSION_COOKIE_HTTPONLY", True)
 app.config.setdefault("SESSION_COOKIE_SAMESITE", os.environ.get("SESSION_COOKIE_SAMESITE", "Lax"))
@@ -244,16 +251,16 @@ class _SessionFixMiddleware:
 app.wsgi_app = _SessionFixMiddleware(app.wsgi_app)
 
 def get_db():
+    db_url = str(app.config.get("DATABASE", ""))
+    db = None
+    if db_url.startswith("postgres"):
+        try:
+            import psycopg2
+            from psycopg2.extras import DictCursor
+        except Exception as e:
+            print("[DB] psycopg2 import failed.")
+            raise
 
-                def is_mail_configured():
-                    # Prefer centralized mail_config check if available
-                    try:
-                        return mc_is_mail_configured(app)
-                    except Exception:
-                        # Fallback to previous heuristic
-                        api_key = app.config.get("RESEND_API_KEY")
-                        from_email = app.config.get("MAIL_FROM")
-                        return bool(api_key and str(api_key).strip() and from_email and str(from_email).strip())
         def _ensure_sslmode(url: str) -> str:
             if "sslmode=" in url: return url
             is_render = bool(os.environ.get("RENDER") or os.environ.get("RENDER_INTERNAL_HOSTNAME"))
@@ -425,12 +432,12 @@ def _db_log(level: str, module: str, message: str):
         message: Log message
     """
     level_symbols = {
-        'INFO': '▶',
-        'SUCCESS': '✓',
-        'WARNING': '⚠',
-        'ERROR': '✗',
+        'INFO': '>>',
+        'SUCCESS': 'OK',
+        'WARNING': 'WN',
+        'ERROR': 'ER',
     }
-    symbol = level_symbols.get(level, '•')
+    symbol = level_symbols.get(level, '--')
     print(f"[{level}] [{module}] {symbol} {message}")
 
 
@@ -1204,12 +1211,12 @@ def init_db(db=None):
         
         # Summary of verification
         _db_log("INFO", "db.init", f"Critical columns verification summary:")
-        _db_log("INFO", "db.init", f"  ✓ Verified: {columns_verified}")
+        _db_log("INFO", "db.init", f"  [OK] Verified: {columns_verified}")
         _db_log("INFO", "db.init", f"  + Added: {columns_added}")
         if columns_failed > 0:
-            _db_log("WARNING", "db.init", f"  ✗ Failed: {columns_failed}")
+            _db_log("WARNING", "db.init", f"  [ER] Failed: {columns_failed}")
         else:
-            _db_log("SUCCESS", "db.init", f"  ✗ Failed: 0")
+            _db_log("SUCCESS", "db.init", f"  [ER] Failed: 0")
         
         # Upgrade index if it doesn't support period
         _db_log("INFO", "db.init", "Upgrading database indexes...")
@@ -6533,10 +6540,15 @@ def reports_export_pdf():
             except: pass
 
 if __name__ == "__main__":
-    # Register timetable routes if module present
+    # Initialize database
+    with app.app_context():
+        get_db()
+    
+    # Register timetable routes
     try:
-        import timetable
-        timetable.register_routes(app)
-    except Exception:
-        pass
+        from timetable import register_routes
+        register_routes(app)
+    except ImportError:
+        print("[INFO] timetable module not found; skipping timetable routes")
+    
     socketio.run(app, host="0.0.0.0", port=10000, debug=True)
