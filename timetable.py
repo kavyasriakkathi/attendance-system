@@ -1,6 +1,7 @@
 import os
 import logging
 import sqlite3
+import re
 from datetime import datetime, time, timezone
 from typing import List, Dict, Optional
 
@@ -38,18 +39,26 @@ def _is_postgres_db(db) -> bool:
 
 
 def _db_execute(db, query, params=()):
-    """Execute a query using the DB connection, converting sqlite-style
-    placeholders (?) to psycopg2-style (%s) when running against Postgres.
-    Keeps params unchanged.
+    """Execute a query using the DB connection.
+
+    - Prefer PostgreSQL-style `%s` placeholders in code.
+    - If running against SQLite, convert `%s` -> `?` so queries remain compatible.
+    - If the module uses `?` placeholders, convert them to `%s` for Postgres.
+    This lets callers write `%s` (Postgres-first) but still run on SQLite in dev.
     """
     try:
-        if _is_postgres_db(db):
-            # Replace positional placeholders; safe because queries in this
-            # module use ? only for parameters.
-            query = query.replace("?", "%s")
+        is_pg = _is_postgres_db(db)
+        if is_pg:
+            # Convert legacy sqlite placeholders to %s
+            if "?" in query:
+                query = query.replace("?", "%s")
+        else:
+            # SQLite: convert %s to ?
+            if "%s" in query:
+                # Replace all %s with ? (positional)
+                query = query.replace("%s", "?")
         return db.execute(query, params)
     except Exception:
-        # re-raise to let callers handle/log
         raise
 
 
@@ -164,28 +173,44 @@ def parse_docx_table(path: str) -> List[Dict]:
         raise RuntimeError("python-docx is not installed. Install with: pip install python-docx")
     doc = docx.Document(path)
     slots = []
-    for table in doc.tables:
-        # Very generic: iterate rows, assume header in first row describing columns
-        headers = [c.text.strip().lower() for c in table.rows[0].cells]
-        for row in table.rows[1:]:
-            values = [c.text.strip() for c in row.cells]
-            row_map = {}
-            for h, v in zip(headers, values):
-                row_map[h] = v
-            # Build best-effort mapping
-            slot = {
-                "branch": row_map.get("branch") or row_map.get("dept") or "",
-                "section": row_map.get("section") or row_map.get("class") or "",
-                "semester": _safe_int(row_map.get("semester")),
-                "day": row_map.get("day") or row_map.get("weekday") or "",
-                "start_time": _normalize_time(row_map.get("time") or row_map.get("start") or ""),
-                "end_time": _normalize_time(row_map.get("end") or ""),
-                "subject_name": row_map.get("subject") or row_map.get("course") or "",
-                "faculty_name": row_map.get("faculty") or row_map.get("teacher") or "",
-                "is_lab": 1 if ("lab" in (row_map.get("subject") or "").lower() or (row_map.get("type") or "").lower().strip() == "lab") else 0,
-                "room": row_map.get("room") or "",
-            }
-            slots.append(slot)
+    try:
+        for table in doc.tables:
+            # assume first row is header
+            headers = [c.text.strip().lower() for c in table.rows[0].cells]
+            for row in table.rows[1:]:
+                values = [c.text.strip() for c in row.cells]
+                row_map = {h: v for h, v in zip(headers, values)}
+
+                subj_raw = (row_map.get("subject") or row_map.get("course") or "").strip()
+                fac_raw = (row_map.get("faculty") or row_map.get("teacher") or "").strip()
+                time_raw = (row_map.get("time") or row_map.get("start") or "").strip()
+                end_raw = (row_map.get("end") or "").strip()
+                # Skip undesired tokens
+                skip_tokens = {"short break", "lunch break", "lib", "sports"}
+                if subj_raw.lower() in skip_tokens or fac_raw.lower() in skip_tokens:
+                    continue
+
+                # normalize possible merged subjects like 'PYTHON/AEP LAB'
+                subjects = _split_subjects(subj_raw)
+
+                for subject in subjects:
+                    is_lab = 1 if "lab" in subject.lower() or "lab" in subj_raw.lower() else 0
+                    slot = {
+                        "branch": (row_map.get("branch") or row_map.get("dept") or "").strip() or "",
+                        "section": (row_map.get("section") or row_map.get("class") or "").strip() or "",
+                        "semester": _safe_int(row_map.get("semester")),
+                        "day": (row_map.get("day") or row_map.get("weekday") or "").strip() or "",
+                        "start_time": _format_time_str(time_raw) or "",
+                        "end_time": _format_time_str(end_raw) or "",
+                        "subject_name": subject.strip() or "",
+                        "faculty_name": fac_raw or "",
+                        "is_lab": int(bool(is_lab)),
+                        "room": (row_map.get("room") or "").strip() or "",
+                    }
+                    slots.append(slot)
+    except Exception as e:
+        logger.exception("parse_docx_table failed")
+        raise
     return slots
 
 
@@ -205,27 +230,54 @@ def parse_pdf_to_slots(path: str) -> List[Dict]:
     lines = [l.strip() for l in text.splitlines() if l.strip()]
     slots = []
     for ln in lines:
-        # naive pattern: DAY TIME - SUBJECT - FACULTY
-        parts = [p.strip() for p in ln.split("-")]
-        if len(parts) >= 3:
-            day = parts[0]
-            time_part = parts[1]
-            subj = parts[2]
-            fac = parts[3] if len(parts) > 3 else ""
-            st, et = _split_time_range(time_part)
-            slots.append({
-                "branch": "",
-                "section": "",
-                "semester": None,
-                "day": day,
-                "start_time": st,
-                "end_time": et,
-                "subject_name": subj,
-                "faculty_name": fac,
-                "is_lab": 1 if "lab" in subj.lower() else 0,
-                "room": "",
-            })
+        try:
+            parts = [p.strip() for p in ln.split("-")]
+            if len(parts) >= 3:
+                day = parts[0]
+                time_part = parts[1]
+                subj_raw = parts[2]
+                fac = parts[3] if len(parts) > 3 else ""
+                # ignore breaks
+                if subj_raw.lower() in ("short break", "lunch break", "lib", "sports"):
+                    continue
+                st, et = _split_time_range(time_part)
+                for subject in _split_subjects(subj_raw):
+                    slots.append({
+                        "branch": "",
+                        "section": "",
+                        "semester": None,
+                        "day": day,
+                        "start_time": st or "",
+                        "end_time": et or "",
+                        "subject_name": subject,
+                        "faculty_name": fac,
+                        "is_lab": 1 if "lab" in subject.lower() else 0,
+                        "room": "",
+                    })
+        except Exception:
+            logger.exception("parse_pdf_to_slots line parse failed: %s", ln)
+            continue
     return slots
+
+
+def _split_subjects(subj_raw: str):
+    """Split merged subject strings into individual subject names.
+
+    Examples: 'PYTHON/AEP LAB' -> ['PYTHON LAB', 'AEP LAB']
+    """
+    if not subj_raw:
+        return [""]
+    s = subj_raw.strip()
+    # normalize separators
+    parts = [p.strip() for p in re.split(r"[/,&]", s) if p.strip()]
+    results = []
+    for p in parts:
+        # if original had LAB suffix, preserve it
+        if re.search(r"\blab\b", s, flags=re.IGNORECASE) and not re.search(r"\blab\b", p, flags=re.IGNORECASE):
+            results.append((p + " LAB").strip())
+        else:
+            results.append(p)
+    return results
 
 
 # --- Utilities --------------------------------------------------------------
@@ -391,33 +443,45 @@ def get_faculty_schedule(db, teacher_id, now: Optional[datetime] = None):
 # --- DB import --------------------------------------------------------------
 
 def import_slots(db, slots: List[Dict]):
-    placeholder = "?"
-    if str(db).startswith("<"):
-        # can't detect; assume sqlite3.Connection
-        placeholder = "?"
     inserted = 0
-    for s in slots:
-        start = s.get("start_time")
-        end = s.get("end_time")
-        if isinstance(start, tuple):
-            # from docx parser when returning tuple
-            st, et = start
-        else:
-            st = start if isinstance(start, str) else ""
-            et = end if isinstance(end, str) else ""
-        _db_execute(
-            db,
-            """
-            INSERT INTO timetable_slots (branch, section, semester, day, start_time, end_time, subject_name, faculty_name, is_lab, room)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (s.get("branch") or "", s.get("section") or "", s.get("semester"), s.get("day") or "", st or "", et or "", s.get("subject_name") or "", s.get("faculty_name") or "", int(bool(s.get("is_lab"))), s.get("room") or ""),
-        )
-        inserted += 1
     try:
-        db.commit()
+        # validation log
+        logger.info("import_slots: parsed_rows_count=%d", len(slots))
+        for s in slots:
+            # normalize values and prevent None
+            st = s.get("start_time") or ""
+            et = s.get("end_time") or ""
+            if isinstance(st, tuple):
+                st = st[0] or ""
+            if isinstance(et, tuple):
+                et = et[0] or ""
+
+            row = {
+                "branch": (s.get("branch") or "").strip(),
+                "section": (s.get("section") or "").strip(),
+                "semester": _safe_int(s.get("semester")),
+                "day": (s.get("day") or "").strip(),
+                "start_time": (st or "").strip(),
+                "end_time": (et or "").strip(),
+                "subject_name": (s.get("subject_name") or "").strip(),
+                "faculty_name": (s.get("faculty_name") or "").strip(),
+                "is_lab": int(bool(s.get("is_lab"))),
+                "room": (s.get("room") or "").strip(),
+            }
+            logger.info("import_slots inserting: %s", row)
+            # Use Postgres-style placeholders (%s) by default; _db_execute will adapt for sqlite
+            _db_execute(
+                db,
+                "INSERT INTO timetable_slots (branch, section, semester, day, start_time, end_time, subject_name, faculty_name, is_lab, room) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                (row['branch'], row['section'], row['semester'], row['day'], row['start_time'], row['end_time'], row['subject_name'], row['faculty_name'], row['is_lab'], row['room']),
+            )
+            inserted += 1
+        try:
+            db.commit()
+        except Exception:
+            pass
     except Exception:
-        pass
+        logger.exception("import_slots failed")
     return inserted
 
 
@@ -427,60 +491,74 @@ def import_slots_normalized(db, slots: List[Dict]):
     Falls back to leaving subject_id/teacher_id NULL if resolution fails.
     Returns number inserted.
     """
-    placeholder = "?"
     inserted = 0
-    for s in slots:
-        start = s.get("start_time")
-        end = s.get("end_time")
-        if isinstance(start, tuple):
-            st, et = start
-        else:
-            st = start if isinstance(start, str) else ""
-            et = end if isinstance(end, str) else ""
+    try:
+        for s in slots:
+            start = s.get("start_time") or ""
+            end = s.get("end_time") or ""
+            if isinstance(start, tuple):
+                start = start[0] or ""
+            if isinstance(end, tuple):
+                end = end[0] or ""
 
-        bname = (s.get("branch") or "").strip()
-        sec = (s.get("section") or "").strip()
-        sem = s.get("semester")
-        day = (s.get("day") or "").strip()
-        subj_name = (s.get("subject_name") or "").strip()
-        fac_name = (s.get("faculty_name") or "").strip()
-        is_lab = int(bool(s.get("is_lab")))
-        room = (s.get("room") or "").strip()
+            bname = (s.get("branch") or "").strip()
+            sec = (s.get("section") or "").strip()
+            sem = _safe_int(s.get("semester"))
+            day = (s.get("day") or "").strip()
+            subj_name = (s.get("subject_name") or "").strip()
+            fac_name = (s.get("faculty_name") or "").strip()
+            is_lab = int(bool(s.get("is_lab")))
+            room = (s.get("room") or "").strip()
 
-        branch_id = None
-        try:
-            row = _db_execute(db, "SELECT id FROM branches WHERE LOWER(name)=LOWER(?) LIMIT 1", (bname,)).fetchone()
-            branch_id = row[0] if row else None
-        except Exception:
             branch_id = None
+            try:
+                row = _db_execute(db, "SELECT id FROM branches WHERE LOWER(name)=LOWER(%s) LIMIT 1", (bname,)).fetchone()
+                branch_id = row[0] if row and not hasattr(row, 'keys') else (row['id'] if row else None)
+            except Exception:
+                branch_id = None
 
-        subject_id = None
-        try:
-            row = _db_execute(db, "SELECT id FROM subjects WHERE LOWER(name)=LOWER(?) LIMIT 1", (subj_name,)).fetchone()
-            subject_id = row[0] if row else None
-        except Exception:
             subject_id = None
+            try:
+                row = _db_execute(db, "SELECT id FROM subjects WHERE LOWER(name)=LOWER(%s) LIMIT 1", (subj_name,)).fetchone()
+                subject_id = row[0] if row and not hasattr(row, 'keys') else (row['id'] if row else None)
+            except Exception:
+                subject_id = None
 
-        teacher_id = None
-        try:
-            row = _db_execute(db, "SELECT id FROM teachers WHERE LOWER(name)=LOWER(?) LIMIT 1", (fac_name,)).fetchone()
-            teacher_id = row[0] if row else None
-        except Exception:
             teacher_id = None
+            try:
+                row = _db_execute(db, "SELECT id FROM teachers WHERE LOWER(name)=LOWER(%s) LIMIT 1", (fac_name,)).fetchone()
+                teacher_id = row[0] if row and not hasattr(row, 'keys') else (row['id'] if row else None)
+            except Exception:
+                teacher_id = None
 
+            row = {
+                'branch_id': branch_id,
+                'section': sec,
+                'semester': sem,
+                'day': day,
+                'start_time': start or "",
+                'end_time': end or "",
+                'subject_id': subject_id,
+                'teacher_id': teacher_id,
+                'is_lab': is_lab,
+                'room': room,
+            }
+            logger.info("import_slots_normalized inserting: %s", row)
+            try:
+                _db_execute(
+                    db,
+                    "INSERT INTO timetable_entries (branch_id, section, semester, day, start_time, end_time, subject_id, teacher_id, is_lab, room) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                    (row['branch_id'], row['section'], row['semester'], row['day'], row['start_time'], row['end_time'], row['subject_id'], row['teacher_id'], row['is_lab'], row['room']),
+                )
+                inserted += 1
+            except Exception:
+                logger.exception("failed to insert normalized row")
         try:
-            _db_execute(
-                db,
-                "INSERT INTO timetable_entries (branch_id, section, semester, day, start_time, end_time, subject_id, teacher_id, is_lab, room) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (branch_id, sec, sem, day, st or "", et or "", subject_id, teacher_id, is_lab, room),
-            )
-            inserted += 1
+            db.commit()
         except Exception:
             pass
-    try:
-        db.commit()
     except Exception:
-        pass
+        logger.exception("import_slots_normalized failed")
     return inserted
 
 
@@ -584,6 +662,22 @@ def register_routes(app, db_getter=None):
         db = get_db()
         ensure_timetable_tables(db)
         if request.method == "POST":
+            # Support delete action
+            if request.form.get("action") == "delete_timetable":
+                try:
+                    db = get_db()
+                    _db_execute(db, "DELETE FROM timetable_entries")
+                    _db_execute(db, "DELETE FROM timetable_slots")
+                    try:
+                        db.commit()
+                    except Exception:
+                        pass
+                    flash("Timetable deleted successfully.", "success")
+                except Exception:
+                    logger.exception("Failed to delete timetable data")
+                    flash("Failed to delete timetable.", "error")
+                return redirect(url_for("timetable_manage"))
+
             file = request.files.get("timetable_file")
             if not file:
                 flash("Please upload a file.", "error")

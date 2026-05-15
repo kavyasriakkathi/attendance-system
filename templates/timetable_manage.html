@@ -20,6 +20,10 @@
         </div>
         <button type="submit" class="button">Upload & Import</button>
     </form>
+    <form method="post" style="margin-top:8px;">
+        <input type="hidden" name="action" value="delete_timetable">
+        <button type="submit" class="button" style="background:#b91c1c;">Delete Timetable</button>
+    </form>
 
     <hr>
     <div class="grid" style="grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 20px;">
@@ -29,15 +33,14 @@
                 <table style="width:100%; border-collapse:collapse;">
                     <thead>
                         <tr style="text-align:left; border-bottom:1px solid #ddd;">
-                            <th>Day</th><th>Start</th><th>End</th><th>Branch</th><th>Section</th><th>Sem</th><th>Subject</th><th>Faculty</th><th>Room</th>
+                            <th>Day</th><th>Time</th><th>Branch</th><th>Section</th><th>Sem</th><th>Subject</th><th>Faculty</th><th>Room</th>
                         </tr>
                     </thead>
                     <tbody>
                         {% for r in rows %}
                         <tr>
                             <td>{{ r['day'] }}</td>
-                            <td>{{ r['start_time'] }}</td>
-                            <td>{{ r['end_time'] }}</td>
+                            <td>{{ (r['start_time'] or '') + (' - ' + r['end_time'] if r['end_time'] else '') }}</td>
                             <td>{{ r['branch'] }}</td>
                             <td>{{ r['section'] }}</td>
                             <td>{{ r['semester'] }}</td>
@@ -56,15 +59,14 @@
                 <table style="width:100%; border-collapse:collapse;">
                     <thead>
                         <tr style="text-align:left; border-bottom:1px solid #ddd;">
-                            <th>Day</th><th>Start</th><th>End</th><th>Branch</th><th>Section</th><th>Subject</th><th>Faculty</th><th>Lab</th>
+                            <th>Day</th><th>Time</th><th>Branch</th><th>Section</th><th>Subject</th><th>Faculty</th><th>Lab</th>
                         </tr>
                     </thead>
                     <tbody>
                         {% for e in entries %}
                         <tr>
                             <td>{{ e['day'] }}</td>
-                            <td>{{ e['start_time'] }}</td>
-                            <td>{{ e['end_time'] }}</td>
+                            <td>{{ (e['start_time'] or '') + (' - ' + e['end_time'] if e['end_time'] else '') }}</td>
                             <td>{{ e['branch_name'] or e['branch_id'] }}</td>
                             <td>{{ e['section'] }}</td>
                             <td>{{ e['subject_name'] or e['subject_id'] }}</td>
