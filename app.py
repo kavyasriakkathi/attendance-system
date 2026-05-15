@@ -6584,6 +6584,14 @@ def _register_timetable_routes_and_log():
     return True
 
 
+# Register timetable routes at import time so template `url_for` lookups
+# for `timetable_home` work under WSGI and other non-__main__ runtimes.
+try:
+    _register_timetable_routes_and_log()
+except Exception as _t_err:
+    print(f"[timetable] Auto-registration skipped: {type(_t_err).__name__}: {_t_err}")
+
+
 @app.route("/reports/export.xlsx")
 @login_required
 @admin_required
