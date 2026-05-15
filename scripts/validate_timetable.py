@@ -2,7 +2,7 @@ import os
 import json
 from datetime import datetime, timedelta
 
-from app import app, get_db
+from app import app, get_db, init_db
 
 
 TEST_DB = os.path.join(os.path.dirname(__file__), "validate_test.db")
@@ -23,6 +23,7 @@ def run_checks():
     # initialize DB and routes
     with app.app_context():
         db = get_db()
+        init_db(db)
         # basic health
     # Use test client to call endpoints and manage session
     client = app.test_client()
