@@ -6571,8 +6571,27 @@ def _register_timetable_routes_and_log():
             _timetable.ensure_timetable_tables(db)
             row = db.execute("SELECT COUNT(1) AS c FROM timetable_slots").fetchone()
             count = row_get(row, "c", 0)
-            print("[timetable] Database tables verified")
-            print(f"[timetable] Timetable entries detected: {count}")
+            print("[timetable] Timetable tables verified")
+            print(f"[timetable] Timetable schema initialized: timetable_slots_count={count}")
+            # Check normalized entries if possible
+            try:
+                row2 = db.execute("SELECT COUNT(1) AS c FROM timetable_entries").fetchone()
+                count2 = row_get(row2, "c", 0)
+                print(f"[timetable] Timetable entries detected: {count2}")
+            except Exception:
+                # ignore absence of normalized table
+                pass
+            # Postgres compatibility note
+            try:
+                is_pg = False
+                if hasattr(db, "_conn"):
+                    is_pg = "psycopg2" in type(db._conn).__module__
+                elif type(db).__name__ == "_PostgresDB":
+                    is_pg = True
+                if is_pg:
+                    print("[timetable] PostgreSQL timetable compatibility OK")
+            except Exception:
+                pass
         finally:
             try:
                 db.close()

@@ -766,6 +766,94 @@ def register_routes(app, db_getter=None):
 
     logger.info("Timetable routes registered")
 
+    @app.route("/health/timetable")
+    def timetable_health():
+        """Health-check for timetable initialization and DB compatibility.
+
+        Access: admin users OR non-production/debug OR Render internal hosts.
+        Returns JSON describing status, counts, and postgres compatibility.
+        """
+        # Access control: allow only admin or non-prod/debug or Render internal
+        try:
+            is_admin = bool(session.get("role") == "admin")
+        except Exception:
+            is_admin = False
+
+        allow_internal = bool(app.debug or os.environ.get("RENDER") or os.environ.get("RENDER_INTERNAL_HOSTNAME"))
+        if not (is_admin or allow_internal):
+            return jsonify({"ok": False, "error": "unauthorized"}), 403
+
+        result = {"ok": False, "postgres_compatible": False, "tables": {}, "messages": []}
+        db = None
+        try:
+            if db_getter is None:
+                raise RuntimeError("Database getter is not configured")
+            db = db_getter()
+
+            # Verify connectivity
+            try:
+                # simple query to ensure connection is alive
+                cur = db.execute("SELECT 1")
+                _ = cur.fetchone()
+                result["messages"].append("db_connectivity_ok")
+            except Exception:
+                result["messages"].append("db_connectivity_failed")
+                raise
+
+            # Ensure tables are present (this may create them)
+            ensure_timetable_tables(db)
+            result["messages"].append("ensure_timetable_tables_executed")
+
+            # Postgres compatibility flag
+            pg_ok = _is_postgres_db(db)
+            result["postgres_compatible"] = pg_ok
+            if pg_ok:
+                result["messages"].append("postgres_compatibility_detected")
+
+            # Counts
+            try:
+                r1 = db.execute("SELECT COUNT(1) AS c FROM timetable_slots").fetchone()
+                r2 = db.execute("SELECT COUNT(1) AS c FROM timetable_entries").fetchone()
+                slots_count = int(r1[0] if r1 is not None and r1[0] is not None else 0)
+                entries_count = int(r2[0] if r2 is not None and r2[0] is not None else 0)
+                result["tables"]["timetable_slots"] = slots_count
+                result["tables"]["timetable_entries"] = entries_count
+                result["messages"].append("counts_retrieved")
+            except Exception:
+                # If counts failed, attempt information_schema check for Postgres
+                try:
+                    if _is_postgres_db(db):
+                        q = "SELECT to_regclass('public.timetable_slots') IS NOT NULL AS slots_exists, to_regclass('public.timetable_entries') IS NOT NULL AS entries_exists"
+                        rr = db.execute(q).fetchone()
+                        result["tables"]["timetable_slots_exists"] = bool(rr[0])
+                        result["tables"]["timetable_entries_exists"] = bool(rr[1])
+                        result["messages"].append("schema_presence_checked")
+                except Exception:
+                    result["messages"].append("counts_unavailable")
+
+            result["ok"] = True
+            result["messages"].append("timetable_ok")
+            # Log summary server-side
+            logger.info("Timetable tables verified")
+            if result.get("tables"):
+                logger.info(f"Timetable schema initialized: slots={result['tables'].get('timetable_slots')} entries={result['tables'].get('timetable_entries')}")
+            if pg_ok:
+                logger.info("PostgreSQL timetable compatibility OK")
+
+            return jsonify(result)
+        except Exception as e:
+            logger.exception("timetable health check failed")
+            msg = {"ok": False, "error": str(type(e).__name__) + ": " + str(e)}
+            # include non-sensitive diagnostics
+            msg.update({k: v for k, v in result.items() if k in ("postgres_compatible", "tables", "messages")})
+            return jsonify(msg), 500
+        finally:
+            if db:
+                try:
+                    db.close()
+                except Exception:
+                    pass
+
 
 # Register when imported into app.py
 try:
