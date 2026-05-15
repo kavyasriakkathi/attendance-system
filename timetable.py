@@ -37,6 +37,22 @@ def _is_postgres_db(db) -> bool:
         return False
 
 
+def _db_execute(db, query, params=()):
+    """Execute a query using the DB connection, converting sqlite-style
+    placeholders (?) to psycopg2-style (%s) when running against Postgres.
+    Keeps params unchanged.
+    """
+    try:
+        if _is_postgres_db(db):
+            # Replace positional placeholders; safe because queries in this
+            # module use ? only for parameters.
+            query = query.replace("?", "%s")
+        return db.execute(query, params)
+    except Exception:
+        # re-raise to let callers handle/log
+        raise
+
+
 def _create_tables_sql(db):
     if _is_postgres_db(db):
         return [
@@ -277,7 +293,7 @@ def _lookup_branch_id(db, branch_name: str):
     if not branch_name:
         return None
     try:
-        row = db.execute("SELECT id FROM branches WHERE LOWER(name)=LOWER(?) LIMIT 1", (branch_name,)).fetchone()
+        row = _db_execute(db, "SELECT id FROM branches WHERE LOWER(name)=LOWER(?) LIMIT 1", (branch_name,)).fetchone()
         if row:
             return row[0] if not hasattr(row, "keys") else row["id"]
     except Exception:
@@ -295,7 +311,7 @@ def get_upcoming_classes(db, branch: str = "", section: str = "", limit: int = 3
     entries = []
     try:
         if branch_id is not None:
-            rows = db.execute(
+            rows = _db_execute(db,
                 "SELECT te.*, s.name AS subject_name, t.name AS teacher_name, b.name AS branch_name FROM timetable_entries te LEFT JOIN subjects s ON te.subject_id = s.id LEFT JOIN teachers t ON te.teacher_id = t.id LEFT JOIN branches b ON te.branch_id = b.id WHERE te.branch_id = ? AND COALESCE(te.section, '') = ? AND te.day = ? AND te.start_time >= ? ORDER BY te.start_time LIMIT ?",
                 (branch_id, section or "", weekday, cur_time, limit),
             ).fetchall()
@@ -305,7 +321,7 @@ def get_upcoming_classes(db, branch: str = "", section: str = "", limit: int = 3
 
     if not entries:
         try:
-            rows = db.execute(
+            rows = _db_execute(db,
                 "SELECT * FROM timetable_slots WHERE branch = ? AND section = ? AND day = ? AND start_time >= ? ORDER BY start_time LIMIT ?",
                 (branch or "", section or "", weekday, cur_time, limit),
             ).fetchall()
@@ -327,7 +343,7 @@ def get_global_active_class(db, now: Optional[datetime] = None):
     weekday = current.strftime("%A")
     cur_time = current.strftime("%H:%M")
     try:
-        rows = db.execute(
+        rows = _db_execute(db,
             "SELECT te.*, s.name AS subject_name, t.name AS teacher_name, b.name AS branch_name FROM timetable_entries te LEFT JOIN subjects s ON te.subject_id = s.id LEFT JOIN teachers t ON te.teacher_id = t.id LEFT JOIN branches b ON te.branch_id = b.id WHERE te.day = ? AND te.start_time <= ? AND te.end_time >= ? ORDER BY te.start_time LIMIT 1",
             (weekday, cur_time, cur_time),
         ).fetchall()
@@ -336,7 +352,7 @@ def get_global_active_class(db, now: Optional[datetime] = None):
     except Exception:
         pass
     try:
-        rows = db.execute(
+        rows = _db_execute(db,
             "SELECT * FROM timetable_slots WHERE day = ? AND start_time <= ? AND end_time >= ? ORDER BY start_time LIMIT 1",
             (weekday, cur_time, cur_time),
         ).fetchall()
@@ -352,7 +368,7 @@ def get_faculty_schedule(db, teacher_id, now: Optional[datetime] = None):
     weekday = current.strftime("%A")
     rows = []
     try:
-        rows = db.execute(
+        rows = _db_execute(db,
             "SELECT te.*, s.name AS subject_name, b.name AS branch_name, t.name AS teacher_name FROM timetable_entries te LEFT JOIN subjects s ON te.subject_id = s.id LEFT JOIN branches b ON te.branch_id = b.id LEFT JOIN teachers t ON te.teacher_id = t.id WHERE te.teacher_id = ? AND te.day = ? ORDER BY te.start_time",
             (teacher_id, weekday),
         ).fetchall()
@@ -363,7 +379,7 @@ def get_faculty_schedule(db, teacher_id, now: Optional[datetime] = None):
         return [_row_to_dict(r) for r in rows]
 
     try:
-        rows = db.execute(
+        rows = _db_execute(db,
             "SELECT * FROM timetable_slots WHERE faculty_name IS NOT NULL AND day = ? ORDER BY start_time",
             (weekday,),
         ).fetchall()
@@ -389,7 +405,8 @@ def import_slots(db, slots: List[Dict]):
         else:
             st = start if isinstance(start, str) else ""
             et = end if isinstance(end, str) else ""
-        db.execute(
+        _db_execute(
+            db,
             """
             INSERT INTO timetable_slots (branch, section, semester, day, start_time, end_time, subject_name, faculty_name, is_lab, room)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -432,27 +449,28 @@ def import_slots_normalized(db, slots: List[Dict]):
 
         branch_id = None
         try:
-            row = db.execute("SELECT id FROM branches WHERE LOWER(name)=LOWER(?) LIMIT 1", (bname,)).fetchone()
+            row = _db_execute(db, "SELECT id FROM branches WHERE LOWER(name)=LOWER(?) LIMIT 1", (bname,)).fetchone()
             branch_id = row[0] if row else None
         except Exception:
             branch_id = None
 
         subject_id = None
         try:
-            row = db.execute("SELECT id FROM subjects WHERE LOWER(name)=LOWER(?) LIMIT 1", (subj_name,)).fetchone()
+            row = _db_execute(db, "SELECT id FROM subjects WHERE LOWER(name)=LOWER(?) LIMIT 1", (subj_name,)).fetchone()
             subject_id = row[0] if row else None
         except Exception:
             subject_id = None
 
         teacher_id = None
         try:
-            row = db.execute("SELECT id FROM teachers WHERE LOWER(name)=LOWER(?) LIMIT 1", (fac_name,)).fetchone()
+            row = _db_execute(db, "SELECT id FROM teachers WHERE LOWER(name)=LOWER(?) LIMIT 1", (fac_name,)).fetchone()
             teacher_id = row[0] if row else None
         except Exception:
             teacher_id = None
 
         try:
-            db.execute(
+            _db_execute(
+                db,
                 "INSERT INTO timetable_entries (branch_id, section, semester, day, start_time, end_time, subject_id, teacher_id, is_lab, room) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (branch_id, sec, sem, day, st or "", et or "", subject_id, teacher_id, is_lab, room),
             )
@@ -476,13 +494,13 @@ def get_current_slot(db, branch: str, section: str, now: Optional[datetime] = No
     placeholder = "?"
     # Prefer normalized timetable_entries when available (uses branch_id)
     try:
-        branch_row = db.execute("SELECT id FROM branches WHERE LOWER(name)=LOWER(?) LIMIT 1", (branch,)).fetchone()
+        branch_row = _db_execute(db, "SELECT id FROM branches WHERE LOWER(name)=LOWER(?) LIMIT 1", (branch,)).fetchone()
         branch_id = branch_row[0] if branch_row else None
     except Exception:
         branch_id = None
 
     if branch_id is not None:
-        rows = db.execute(
+        rows = _db_execute(db,
             "SELECT te.*, s.name AS subject_name, t.name AS teacher_name FROM timetable_entries te LEFT JOIN subjects s ON te.subject_id = s.id LEFT JOIN teachers t ON te.teacher_id = t.id WHERE te.branch_id = ? AND COALESCE(te.section, '') = ? AND te.day = ? AND te.start_time <= ? AND te.end_time >= ? ORDER BY te.start_time LIMIT 1",
             (branch_id, section or "", weekday, cur_time, cur_time),
         ).fetchall()
@@ -490,7 +508,7 @@ def get_current_slot(db, branch: str, section: str, now: Optional[datetime] = No
             return rows[0]
 
     # Fallback to legacy timetable_slots text-based lookup
-    rows = db.execute(
+    rows = _db_execute(db,
         "SELECT * FROM timetable_slots WHERE branch = ? AND section = ? AND day = ? AND start_time <= ? AND end_time >= ? ORDER BY start_time LIMIT 1",
         (branch, section, weekday, cur_time, cur_time),
     ).fetchall()
@@ -516,7 +534,7 @@ def register_routes(app, db_getter=None):
                 raise RuntimeError("Database getter is not configured")
             db = db_getter()
             ensure_timetable_tables(db)
-            row = db.execute("SELECT COUNT(1) AS c FROM timetable_slots").fetchone()
+            row = _db_execute(db, "SELECT COUNT(1) AS c FROM timetable_slots").fetchone()
             rows_count = int(row["c"] if row and row["c"] is not None else 0)
             table_ready = True
             active_slot = get_current_active_class(db, session.get("teacher_branch_name") or session.get("teacher_branch") or "", session.get("teacher_section") or "")
@@ -598,10 +616,10 @@ def register_routes(app, db_getter=None):
             return redirect(url_for("timetable_manage"))
 
         # GET: show simple management UI
-        rows = db.execute("SELECT * FROM timetable_slots ORDER BY day, start_time").fetchall()
+        rows = _db_execute(db, "SELECT * FROM timetable_slots ORDER BY day, start_time").fetchall()
         # show normalized preview when available
         try:
-            entries = db.execute("SELECT te.*, s.name AS subject_name, t.name AS teacher_name, b.name AS branch_name FROM timetable_entries te LEFT JOIN subjects s ON te.subject_id = s.id LEFT JOIN teachers t ON te.teacher_id = t.id LEFT JOIN branches b ON te.branch_id = b.id ORDER BY te.day, te.start_time").fetchall()
+            entries = _db_execute(db, "SELECT te.*, s.name AS subject_name, t.name AS teacher_name, b.name AS branch_name FROM timetable_entries te LEFT JOIN subjects s ON te.subject_id = s.id LEFT JOIN teachers t ON te.teacher_id = t.id LEFT JOIN branches b ON te.branch_id = b.id ORDER BY te.day, te.start_time").fetchall()
         except Exception:
             entries = []
         return render_template("timetable_manage.html", rows=rows, entries=entries)
@@ -633,8 +651,9 @@ def register_routes(app, db_getter=None):
             schedules = get_faculty_schedule(db, teacher_id)
         else:
             try:
-                rows = db.execute(
-                    "SELECT te.*, s.name AS subject_name, t.name AS teacher_name, b.name AS branch_name FROM timetable_entries te LEFT JOIN subjects s ON te.subject_id = s.id LEFT JOIN teachers t ON te.teacher_id = t.id LEFT JOIN branches b ON te.branch_id = b.id ORDER BY te.day, te.start_time"
+                rows = _db_execute(
+                    db,
+                    "SELECT te.*, s.name AS subject_name, t.name AS teacher_name, b.name AS branch_name FROM timetable_entries te LEFT JOIN subjects s ON te.subject_id = s.id LEFT JOIN teachers t ON te.teacher_id = t.id LEFT JOIN branches b ON te.branch_id = b.id ORDER BY te.day, te.start_time",
                 ).fetchall()
                 schedules = [_row_to_dict(r) for r in rows]
             except Exception:
@@ -648,7 +667,8 @@ def register_routes(app, db_getter=None):
         section = request.args.get('section') or session.get('teacher_section') or ''
         db = get_db()
         try:
-            rows = db.execute(
+            rows = _db_execute(
+                db,
                 "SELECT s.id, s.name, s.roll_no FROM students s JOIN branches b ON s.branch_id = b.id WHERE b.name = ? AND s.section = ? ORDER BY s.name",
                 (branch, section),
             ).fetchall()
@@ -687,7 +707,7 @@ def register_routes(app, db_getter=None):
                 subject_name = None
             try:
                 if subject_name:
-                    sub_row = db.execute("SELECT id FROM subjects WHERE LOWER(name)=LOWER(?) LIMIT 1", (subject_name,)).fetchone()
+                    sub_row = _db_execute(db, "SELECT id FROM subjects WHERE LOWER(name)=LOWER(?) LIMIT 1", (subject_name,)).fetchone()
                     if sub_row:
                         subject_id = sub_row[0] if isinstance(sub_row, tuple) or isinstance(sub_row, list) else sub_row["id"]
             except Exception:
@@ -700,10 +720,10 @@ def register_routes(app, db_getter=None):
             branch_id = None
 
         if branch_id:
-            students = db.execute("SELECT id, name FROM students WHERE branch_id = ? AND (COALESCE(section, '') = COALESCE(?, '')) ORDER BY name", (branch_id, section or "")).fetchall()
+            students = _db_execute(db, "SELECT id, name FROM students WHERE branch_id = ? AND (COALESCE(section, '') = COALESCE(?, '')) ORDER BY name", (branch_id, section or "")).fetchall()
         else:
             # fallback to previous name-based lookup
-            students = db.execute("SELECT s.id, s.name FROM students s JOIN branches b ON s.branch_id = b.id WHERE b.name = ? AND s.section = ? ORDER BY s.name", (branch, section)).fetchall()
+            students = _db_execute(db, "SELECT s.id, s.name FROM students s JOIN branches b ON s.branch_id = b.id WHERE b.name = ? AND s.section = ? ORDER BY s.name", (branch, section)).fetchall()
 
         # Use today's date and default period=1 for current slot marking
         from datetime import date as _d
@@ -714,7 +734,7 @@ def register_routes(app, db_getter=None):
         duplicate_check = False
         try:
             if subject_id:
-                dup_row = db.execute("SELECT COUNT(1) AS c FROM attendance WHERE subject_id = ? AND date = ? AND period = ?", (subject_id, today_str, period)).fetchone()
+                dup_row = _db_execute(db, "SELECT COUNT(1) AS c FROM attendance WHERE subject_id = ? AND date = ? AND period = ?", (subject_id, today_str, period)).fetchone()
                 dup_count = dup_row[0] if dup_row is not None else 0
                 if int(dup_count) > 0:
                     duplicate_check = True
@@ -731,7 +751,8 @@ def register_routes(app, db_getter=None):
             for s in students:
                 sid = s[0] if not isinstance(s, dict) else s.get("id")
                 try:
-                    db.execute(
+                    _db_execute(
+                        db,
                         "INSERT INTO attendance (student_id, branch_id, branch_section, section, subject_id, teacher_id, subject_name, date, period, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         (sid, branch_id or None, None, section or None, subject_id or None, teacher_id or None, (slot.get("subject_name") if isinstance(slot, dict) else None), today_str, period, "Absent"),
                     )
@@ -749,7 +770,8 @@ def register_routes(app, db_getter=None):
             for sid in student_ids:
                 st = "Present" if action == "present" else "Absent"
                 try:
-                    db.execute(
+                    _db_execute(
+                        db,
                         "INSERT INTO attendance (student_id, branch_id, branch_section, section, subject_id, teacher_id, subject_name, date, period, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         (sid, branch_id or None, None, section or None, subject_id or None, teacher_id or None, (slot.get("subject_name") if isinstance(slot, dict) else None), today_str, period, st),
                     )
@@ -793,7 +815,7 @@ def register_routes(app, db_getter=None):
             # Verify connectivity
             try:
                 # simple query to ensure connection is alive
-                cur = db.execute("SELECT 1")
+                cur = _db_execute(db, "SELECT 1")
                 _ = cur.fetchone()
                 result["messages"].append("db_connectivity_ok")
             except Exception:
@@ -812,8 +834,8 @@ def register_routes(app, db_getter=None):
 
             # Counts
             try:
-                r1 = db.execute("SELECT COUNT(1) AS c FROM timetable_slots").fetchone()
-                r2 = db.execute("SELECT COUNT(1) AS c FROM timetable_entries").fetchone()
+                r1 = _db_execute(db, "SELECT COUNT(1) AS c FROM timetable_slots").fetchone()
+                r2 = _db_execute(db, "SELECT COUNT(1) AS c FROM timetable_entries").fetchone()
                 slots_count = int(r1[0] if r1 is not None and r1[0] is not None else 0)
                 entries_count = int(r2[0] if r2 is not None and r2[0] is not None else 0)
                 result["tables"]["timetable_slots"] = slots_count
@@ -824,7 +846,7 @@ def register_routes(app, db_getter=None):
                 try:
                     if _is_postgres_db(db):
                         q = "SELECT to_regclass('public.timetable_slots') IS NOT NULL AS slots_exists, to_regclass('public.timetable_entries') IS NOT NULL AS entries_exists"
-                        rr = db.execute(q).fetchone()
+                        rr = _db_execute(db, q).fetchone()
                         result["tables"]["timetable_slots_exists"] = bool(rr[0])
                         result["tables"]["timetable_entries_exists"] = bool(rr[1])
                         result["messages"].append("schema_presence_checked")
