@@ -25,7 +25,8 @@ app = Flask(__name__)
 
 # Initialize SocketIO after app creation
 # Use threading mode for compatibility with the workspace Python version and tests.
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
+# Disable engineio logger noise so stale polling sessions do not spam logs.
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading", logger=False, engineio_logger=False)
 # Email sending is handled by the `send_email` helper defined later in the file.
 
 
@@ -4758,6 +4759,7 @@ def teacher_dashboard():
         current_section = teacher.get("current_section") or ""
         subject_row = teacher["subject_row"]
         subject_id = row_get(subject_row, "id") if subject_row else None
+        teacher_id = session.get("teacher_id") or row_get(teacher, "id")
 
         if not current_branch_id:
             flash("No branch selected. Please select a branch.", "error")
@@ -4791,6 +4793,13 @@ def teacher_dashboard():
         active_slot = None
         try:
             import timetable as _timetable
+            app.logger.info(
+                "teacher_dashboard active-slot lookup branch=%s section=%s subject_id=%s teacher_id=%s",
+                current_branch_name or "",
+                current_section or "",
+                subject_id,
+                teacher_id,
+            )
             try:
                 active_slot = _timetable.get_current_slot(db, current_branch_name or "", current_section or "")
             except Exception:
@@ -4803,6 +4812,14 @@ def teacher_dashboard():
                 upcoming_classes = _timetable.get_upcoming_classes(db, "", "", limit=4)
             except Exception:
                 upcoming_classes = []
+            app.logger.info(
+                "teacher_dashboard active-slot result branch=%s section=%s matched=%s subject=%s teacher=%s",
+                current_branch_name or "",
+                current_section or "",
+                bool(active_slot),
+                (active_slot.get("subject_name") if isinstance(active_slot, dict) else active_slot["subject_name"] if active_slot and hasattr(active_slot, "keys") and "subject_name" in active_slot.keys() else None),
+                (active_slot.get("teacher_name") if isinstance(active_slot, dict) else active_slot["teacher_name"] if active_slot and hasattr(active_slot, "keys") and "teacher_name" in active_slot.keys() else None),
+            )
         except Exception:
             active_slot = None
             global_active_slot = None
@@ -5989,19 +6006,19 @@ def report_email():
 # SocketIO Event Handlers for Real-time Updates
 @socketio.on('connect')
 def handle_connect():
-    print("Client connected")
+    app.logger.debug("SocketIO client connected")
     emit('status', {'message': 'Connected to real-time system'})
 
 @socketio.on('disconnect')
 def handle_disconnect():
-    print("Client disconnected")
+    app.logger.debug("SocketIO client disconnected")
 
 @socketio.on('join_room')
 def handle_join_room(data):
     room = data.get('room')
     if room:
         join_room(room)
-        print(f"Client joined room: {room}")
+        app.logger.debug("SocketIO client joined room: %s", room)
 
 @socketio.on('request_stats')
 def handle_request_stats():
@@ -6042,7 +6059,7 @@ def handle_request_stats():
         
         emit('stats_update', stats)
     except Exception as e:
-        print(f"SocketIO Stats Error: {e}")
+        app.logger.exception("SocketIO Stats Error")
     finally:
         if db: db.close()
 

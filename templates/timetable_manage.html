@@ -39,14 +39,14 @@
                     <tbody>
                         {% for r in rows %}
                         <tr>
-                            <td>{{ r['day'] }}</td>
+                            <td>{{ r['day'] or '' }}</td>
                             <td>{{ (r['start_time'] or '') + (' - ' + r['end_time'] if r['end_time'] else '') }}</td>
-                            <td>{{ r['branch'] }}</td>
-                            <td>{{ r['section'] }}</td>
-                            <td>{{ r['semester'] }}</td>
-                            <td>{{ r['subject_name'] }}</td>
-                            <td>{{ r['faculty_name'] }}</td>
-                            <td>{{ r['room'] }}</td>
+                            <td>{{ r['branch'] or '' }}</td>
+                            <td>{{ r['section'] or '' }}</td>
+                            <td>{{ r['semester'] or '' }}</td>
+                            <td>{{ r['subject_name'] or '' }}</td>
+                            <td>{{ r['faculty_name'] or '' }}</td>
+                            <td>{{ r['room'] or '' }}</td>
                         </tr>
                         {% endfor %}
                     </tbody>
@@ -65,12 +65,12 @@
                     <tbody>
                         {% for e in entries %}
                         <tr>
-                            <td>{{ e['day'] }}</td>
+                            <td>{{ e['day'] or '' }}</td>
                             <td>{{ (e['start_time'] or '') + (' - ' + e['end_time'] if e['end_time'] else '') }}</td>
-                            <td>{{ e['branch_name'] or e['branch_id'] }}</td>
-                            <td>{{ e['section'] }}</td>
-                            <td>{{ e['subject_name'] or e['subject_id'] }}</td>
-                            <td>{{ e['teacher_name'] or e['teacher_id'] }}</td>
+                            <td>{{ e['branch_name'] or e['branch_id'] or '' }}</td>
+                            <td>{{ e['section'] or '' }}</td>
+                            <td>{{ e['subject_name'] or e['subject_id'] or '' }}</td>
+                            <td>{{ e['teacher_name'] or e['teacher_id'] or '' }}</td>
                             <td>{{ 'Yes' if e['is_lab'] else 'No' }}</td>
                         </tr>
                         {% endfor %}

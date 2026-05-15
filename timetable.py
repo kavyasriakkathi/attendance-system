@@ -162,6 +162,106 @@ def ensure_timetable_tables(db):
         pass
 
 
+def _clean_text(value) -> str:
+    return (str(value).strip() if value is not None else "")
+
+
+def _table_diagnostics(db):
+    """Return duplicate/null diagnostics for timetable tables."""
+    result = {}
+    try:
+        def _safe_fetch(sql):
+            try:
+                return _db_execute(db, sql).fetchone()
+            except Exception:
+                return None
+
+        slots_dup = _safe_fetch(
+            """
+            SELECT COUNT(1) AS c
+            FROM (
+                SELECT branch, section, day, start_time, end_time, subject_name, faculty_name, room
+                FROM timetable_slots
+                GROUP BY branch, section, day, start_time, end_time, subject_name, faculty_name, room
+                HAVING COUNT(1) > 1
+            ) dup
+            """
+        )
+        slots_dup_rows = _safe_fetch(
+            """
+            SELECT COALESCE(SUM(c), 0) AS c FROM (
+                SELECT COUNT(1) AS c
+                FROM timetable_slots
+                GROUP BY branch, section, day, start_time, end_time, subject_name, faculty_name, room
+                HAVING COUNT(1) > 1
+            ) dup
+            """
+        )
+        entries_dup = _safe_fetch(
+            """
+            SELECT COUNT(1) AS c
+            FROM (
+                SELECT branch_id, section, semester, day, start_time, end_time, subject_id, teacher_id, room
+                FROM timetable_entries
+                GROUP BY branch_id, section, semester, day, start_time, end_time, subject_id, teacher_id, room
+                HAVING COUNT(1) > 1
+            ) dup
+            """
+        )
+        entries_dup_rows = _safe_fetch(
+            """
+            SELECT COALESCE(SUM(c), 0) AS c FROM (
+                SELECT COUNT(1) AS c
+                FROM timetable_entries
+                GROUP BY branch_id, section, semester, day, start_time, end_time, subject_id, teacher_id, room
+                HAVING COUNT(1) > 1
+            ) dup
+            """
+        )
+
+        slots_nulls = _safe_fetch(
+            """
+            SELECT
+              COALESCE(SUM(CASE WHEN branch IS NULL OR TRIM(branch) = '' THEN 1 ELSE 0 END), 0) AS branch_null,
+              COALESCE(SUM(CASE WHEN section IS NULL OR TRIM(section) = '' THEN 1 ELSE 0 END), 0) AS section_null,
+              COALESCE(SUM(CASE WHEN day IS NULL OR TRIM(day) = '' THEN 1 ELSE 0 END), 0) AS day_null,
+              COALESCE(SUM(CASE WHEN start_time IS NULL OR TRIM(start_time) = '' THEN 1 ELSE 0 END), 0) AS start_null,
+              COALESCE(SUM(CASE WHEN end_time IS NULL OR TRIM(end_time) = '' THEN 1 ELSE 0 END), 0) AS end_null,
+              COALESCE(SUM(CASE WHEN subject_name IS NULL OR TRIM(subject_name) = '' THEN 1 ELSE 0 END), 0) AS subject_null,
+              COALESCE(SUM(CASE WHEN faculty_name IS NULL OR TRIM(faculty_name) = '' THEN 1 ELSE 0 END), 0) AS faculty_null,
+              COALESCE(SUM(CASE WHEN room IS NULL OR TRIM(room) = '' THEN 1 ELSE 0 END), 0) AS room_null
+            FROM timetable_slots
+            """
+        )
+        entries_nulls = _safe_fetch(
+            """
+            SELECT
+              COALESCE(SUM(CASE WHEN branch_id IS NULL THEN 1 ELSE 0 END), 0) AS branch_id_null,
+              COALESCE(SUM(CASE WHEN section IS NULL OR TRIM(section) = '' THEN 1 ELSE 0 END), 0) AS section_null,
+              COALESCE(SUM(CASE WHEN semester IS NULL THEN 1 ELSE 0 END), 0) AS semester_null,
+              COALESCE(SUM(CASE WHEN day IS NULL OR TRIM(day) = '' THEN 1 ELSE 0 END), 0) AS day_null,
+              COALESCE(SUM(CASE WHEN start_time IS NULL OR TRIM(start_time) = '' THEN 1 ELSE 0 END), 0) AS start_null,
+              COALESCE(SUM(CASE WHEN end_time IS NULL OR TRIM(end_time) = '' THEN 1 ELSE 0 END), 0) AS end_null,
+              COALESCE(SUM(CASE WHEN subject_id IS NULL THEN 1 ELSE 0 END), 0) AS subject_null,
+              COALESCE(SUM(CASE WHEN teacher_id IS NULL THEN 1 ELSE 0 END), 0) AS teacher_null,
+              COALESCE(SUM(CASE WHEN room IS NULL OR TRIM(room) = '' THEN 1 ELSE 0 END), 0) AS room_null
+            FROM timetable_entries
+            """
+        )
+
+        result = {
+            "slots_duplicate_groups": int(slots_dup[0] if slots_dup else 0),
+            "slots_duplicate_rows": int(slots_dup_rows[0] if slots_dup_rows else 0),
+            "entries_duplicate_groups": int(entries_dup[0] if entries_dup else 0),
+            "entries_duplicate_rows": int(entries_dup_rows[0] if entries_dup_rows else 0),
+            "slots_nulls": dict(slots_nulls) if slots_nulls else {},
+            "entries_nulls": dict(entries_nulls) if entries_nulls else {},
+        }
+    except Exception:
+        logger.exception("timetable diagnostics failed")
+    return result
+
+
 # --- Simple parsing helpers -------------------------------------------------
 
 def parse_docx_table(path: str) -> List[Dict]:
@@ -258,6 +358,14 @@ def parse_pdf_to_slots(path: str) -> List[Dict]:
             logger.exception("parse_pdf_to_slots line parse failed: %s", ln)
             continue
     return slots
+
+
+def _row_exists(db, table: str, where_clause: str, params: tuple) -> bool:
+    try:
+        row = _db_execute(db, f"SELECT 1 FROM {table} WHERE {where_clause} LIMIT 1", params).fetchone()
+        return row is not None
+    except Exception:
+        return False
 
 
 def _split_subjects(subj_raw: str):
@@ -444,8 +552,9 @@ def get_faculty_schedule(db, teacher_id, now: Optional[datetime] = None):
 
 def import_slots(db, slots: List[Dict]):
     inserted = 0
+    skipped = 0
+    failures = 0
     try:
-        # validation log
         logger.info("import_slots: parsed_rows_count=%d", len(slots))
         for s in slots:
             # normalize values and prevent None
@@ -468,20 +577,36 @@ def import_slots(db, slots: List[Dict]):
                 "is_lab": int(bool(s.get("is_lab"))),
                 "room": (s.get("room") or "").strip(),
             }
+            duplicate_where = "COALESCE(branch, '') = COALESCE(%s, '') AND COALESCE(section, '') = COALESCE(%s, '') AND COALESCE(CAST(semester AS TEXT), '') = COALESCE(CAST(%s AS TEXT), '') AND COALESCE(day, '') = COALESCE(%s, '') AND COALESCE(start_time, '') = COALESCE(%s, '') AND COALESCE(end_time, '') = COALESCE(%s, '') AND COALESCE(subject_name, '') = COALESCE(%s, '') AND COALESCE(faculty_name, '') = COALESCE(%s, '') AND COALESCE(room, '') = COALESCE(%s, '')"
+            # SQLite gets the same query through _db_execute, which rewrites placeholders.
+            if _row_exists(
+                db,
+                "timetable_slots",
+                duplicate_where,
+                (row['branch'], row['section'], row['semester'], row['day'], row['start_time'], row['end_time'], row['subject_name'], row['faculty_name'], row['room']),
+            ):
+                skipped += 1
+                logger.info("import_slots skipped duplicate: %s", row)
+                continue
             logger.info("import_slots inserting: %s", row)
             # Use Postgres-style placeholders (%s) by default; _db_execute will adapt for sqlite
-            _db_execute(
-                db,
-                "INSERT INTO timetable_slots (branch, section, semester, day, start_time, end_time, subject_name, faculty_name, is_lab, room) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
-                (row['branch'], row['section'], row['semester'], row['day'], row['start_time'], row['end_time'], row['subject_name'], row['faculty_name'], row['is_lab'], row['room']),
-            )
-            inserted += 1
+            try:
+                _db_execute(
+                    db,
+                    "INSERT INTO timetable_slots (branch, section, semester, day, start_time, end_time, subject_name, faculty_name, is_lab, room) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                    (row['branch'], row['section'], row['semester'], row['day'], row['start_time'], row['end_time'], row['subject_name'], row['faculty_name'], row['is_lab'], row['room']),
+                )
+                inserted += 1
+            except Exception:
+                failures += 1
+                logger.exception("failed to insert slot row")
         try:
             db.commit()
         except Exception:
             pass
     except Exception:
         logger.exception("import_slots failed")
+    logger.info("import_slots summary: parsed_rows=%d inserted_rows=%d skipped_rows=%d failures=%d", len(slots), inserted, skipped, failures)
     return inserted
 
 
@@ -492,6 +617,8 @@ def import_slots_normalized(db, slots: List[Dict]):
     Returns number inserted.
     """
     inserted = 0
+    skipped = 0
+    failures = 0
     try:
         for s in slots:
             start = s.get("start_time") or ""
@@ -544,6 +671,16 @@ def import_slots_normalized(db, slots: List[Dict]):
                 'room': room,
             }
             logger.info("import_slots_normalized inserting: %s", row)
+            duplicate_where = "COALESCE(CAST(branch_id AS TEXT), '') = COALESCE(CAST(%s AS TEXT), '') AND COALESCE(section, '') = COALESCE(%s, '') AND COALESCE(CAST(semester AS TEXT), '') = COALESCE(CAST(%s AS TEXT), '') AND COALESCE(day, '') = COALESCE(%s, '') AND COALESCE(start_time, '') = COALESCE(%s, '') AND COALESCE(end_time, '') = COALESCE(%s, '') AND COALESCE(CAST(subject_id AS TEXT), '') = COALESCE(CAST(%s AS TEXT), '') AND COALESCE(CAST(teacher_id AS TEXT), '') = COALESCE(CAST(%s AS TEXT), '') AND COALESCE(room, '') = COALESCE(%s, '')"
+            if _row_exists(
+                db,
+                "timetable_entries",
+                duplicate_where,
+                (row['branch_id'], row['section'], row['semester'], row['day'], row['start_time'], row['end_time'], row['subject_id'], row['teacher_id'], row['room']),
+            ):
+                skipped += 1
+                logger.info("import_slots_normalized skipped duplicate: %s", row)
+                continue
             try:
                 _db_execute(
                     db,
@@ -552,6 +689,7 @@ def import_slots_normalized(db, slots: List[Dict]):
                 )
                 inserted += 1
             except Exception:
+                failures += 1
                 logger.exception("failed to insert normalized row")
         try:
             db.commit()
@@ -559,6 +697,7 @@ def import_slots_normalized(db, slots: List[Dict]):
             pass
     except Exception:
         logger.exception("import_slots_normalized failed")
+    logger.info("import_slots_normalized summary: parsed_rows=%d inserted_rows=%d skipped_rows=%d failures=%d", len(slots), inserted, skipped, failures)
     return inserted
 
 
@@ -567,31 +706,37 @@ def import_slots_normalized(db, slots: List[Dict]):
 def get_current_slot(db, branch: str, section: str, now: Optional[datetime] = None):
     if now is None:
         now = datetime.now()
-    weekday = now.strftime("%A")
-    cur_time = now.strftime("%H:%M")
-    placeholder = "?"
+    weekday = _clean_text(now.strftime("%A"))
+    cur_time = _clean_text(now.strftime("%H:%M"))
+    branch = _clean_text(branch)
+    section = _clean_text(section)
+    logger.info("get_current_slot start branch=%s section=%s day=%s time=%s", branch, section, weekday, cur_time)
     # Prefer normalized timetable_entries when available (uses branch_id)
     try:
-        branch_row = _db_execute(db, "SELECT id FROM branches WHERE LOWER(name)=LOWER(?) LIMIT 1", (branch,)).fetchone()
+        branch_row = _db_execute(db, "SELECT id FROM branches WHERE LOWER(TRIM(name))=LOWER(TRIM(%s)) LIMIT 1", (branch,)).fetchone()
         branch_id = branch_row[0] if branch_row else None
     except Exception:
         branch_id = None
+    logger.info("get_current_slot resolved branch_id=%s", branch_id)
 
     if branch_id is not None:
         rows = _db_execute(db,
-            "SELECT te.*, s.name AS subject_name, t.name AS teacher_name FROM timetable_entries te LEFT JOIN subjects s ON te.subject_id = s.id LEFT JOIN teachers t ON te.teacher_id = t.id WHERE te.branch_id = ? AND COALESCE(te.section, '') = ? AND te.day = ? AND te.start_time <= ? AND te.end_time >= ? ORDER BY te.start_time LIMIT 1",
+            "SELECT te.*, s.name AS subject_name, t.name AS teacher_name FROM timetable_entries te LEFT JOIN subjects s ON te.subject_id = s.id LEFT JOIN teachers t ON te.teacher_id = t.id WHERE te.branch_id = %s AND LOWER(TRIM(COALESCE(te.section, ''))) = LOWER(TRIM(%s)) AND LOWER(TRIM(COALESCE(te.day, ''))) = LOWER(TRIM(%s)) AND te.start_time <= %s AND te.end_time >= %s ORDER BY te.start_time LIMIT 1",
             (branch_id, section or "", weekday, cur_time, cur_time),
         ).fetchall()
         if rows:
+            logger.info("get_current_slot matched normalized timetable_entries row_id=%s subject=%s teacher=%s", rows[0]["id"] if hasattr(rows[0], "keys") and "id" in rows[0].keys() else None, rows[0]["subject_name"] if hasattr(rows[0], "keys") and "subject_name" in rows[0].keys() else None, rows[0]["teacher_name"] if hasattr(rows[0], "keys") and "teacher_name" in rows[0].keys() else None)
             return rows[0]
 
     # Fallback to legacy timetable_slots text-based lookup
     rows = _db_execute(db,
-        "SELECT * FROM timetable_slots WHERE branch = ? AND section = ? AND day = ? AND start_time <= ? AND end_time >= ? ORDER BY start_time LIMIT 1",
+        "SELECT * FROM timetable_slots WHERE LOWER(TRIM(branch)) = LOWER(TRIM(%s)) AND LOWER(TRIM(COALESCE(section, ''))) = LOWER(TRIM(%s)) AND LOWER(TRIM(day)) = LOWER(TRIM(%s)) AND start_time <= %s AND end_time >= %s ORDER BY start_time LIMIT 1",
         (branch, section, weekday, cur_time, cur_time),
     ).fetchall()
     if rows:
+        logger.info("get_current_slot matched legacy timetable_slots row subject=%s faculty=%s", rows[0]["subject_name"] if hasattr(rows[0], "keys") and "subject_name" in rows[0].keys() else None, rows[0]["faculty_name"] if hasattr(rows[0], "keys") and "faculty_name" in rows[0].keys() else None)
         return rows[0]
+    logger.info("get_current_slot no active slot found for branch=%s section=%s day=%s time=%s", branch, section, weekday, cur_time)
     return None
 
 
@@ -935,6 +1080,9 @@ def register_routes(app, db_getter=None):
                 result["tables"]["timetable_slots"] = slots_count
                 result["tables"]["timetable_entries"] = entries_count
                 result["messages"].append("counts_retrieved")
+                diagnostics = _table_diagnostics(db)
+                result["diagnostics"] = diagnostics
+                result["messages"].append("diagnostics_retrieved")
             except Exception:
                 # If counts failed, attempt information_schema check for Postgres
                 try:
@@ -953,6 +1101,15 @@ def register_routes(app, db_getter=None):
             logger.info("Timetable tables verified")
             if result.get("tables"):
                 logger.info(f"Timetable schema initialized: slots={result['tables'].get('timetable_slots')} entries={result['tables'].get('timetable_entries')}")
+            if result.get("diagnostics"):
+                logger.info(
+                    "Timetable diagnostics: slots_dup_groups=%s slots_dup_rows=%s entries_dup_groups=%s entries_dup_rows=%s",
+                    result["diagnostics"].get("slots_duplicate_groups"),
+                    result["diagnostics"].get("slots_duplicate_rows"),
+                    result["diagnostics"].get("entries_duplicate_groups"),
+                    result["diagnostics"].get("entries_duplicate_rows"),
+                )
+                logger.info("Timetable null diagnostics: slots=%s entries=%s", result["diagnostics"].get("slots_nulls"), result["diagnostics"].get("entries_nulls"))
             if pg_ok:
                 logger.info("PostgreSQL timetable compatibility OK")
 
