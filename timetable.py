@@ -273,44 +273,58 @@ def parse_docx_table(path: str) -> List[Dict]:
         raise RuntimeError("python-docx is not installed. Install with: pip install python-docx")
     doc = docx.Document(path)
     slots = []
+    parsed_rows = 0
+    skipped_rows = 0
+    failed_rows = 0
     try:
-        for table in doc.tables:
-            # assume first row is header
-            headers = [c.text.strip().lower() for c in table.rows[0].cells]
-            for row in table.rows[1:]:
-                values = [c.text.strip() for c in row.cells]
-                row_map = {h: v for h, v in zip(headers, values)}
+        for table_index, table in enumerate(doc.tables):
+            if not table.rows:
+                logger.info("parse_docx_table table=%s empty", table_index)
+                continue
+            headers = [_normalize_key(c.text) for c in table.rows[0].cells]
+            logger.info("parse_docx_table table=%s rows=%s headers=%s", table_index, len(table.rows), headers)
+            for row_index, row in enumerate(table.rows[1:], start=1):
+                values = [_clean_text(c.text) for c in row.cells]
+                row_text = " | ".join(values)
+                row_map = {headers[i]: values[i] for i in range(min(len(headers), len(values))) if headers[i]}
+                try:
+                    normalized = _normalize_slot_row(row_map, row_text=row_text)
+                    subject_raw = normalized["subject_name"]
+                    faculty_raw = normalized["faculty_name"]
+                    skip_tokens = ("short break", "lunch break", "lib", "sports", "break")
+                    if _row_has_token(subject_raw, *skip_tokens) or _row_has_token(faculty_raw, *skip_tokens) or _row_has_token(row_text, *skip_tokens):
+                        skipped_rows += 1
+                        logger.info("parse_docx_table skipped break row table=%s row=%s text=%s", table_index, row_index, row_text)
+                        continue
+                    if not _valid_slot_row(normalized):
+                        skipped_rows += 1
+                        logger.info("parse_docx_table skipped invalid row table=%s row=%s normalized=%s text=%s", table_index, row_index, normalized, row_text)
+                        continue
 
-                subj_raw = (row_map.get("subject") or row_map.get("course") or "").strip()
-                fac_raw = (row_map.get("faculty") or row_map.get("teacher") or "").strip()
-                time_raw = (row_map.get("time") or row_map.get("start") or "").strip()
-                end_raw = (row_map.get("end") or "").strip()
-                # Skip undesired tokens
-                skip_tokens = {"short break", "lunch break", "lib", "sports"}
-                if subj_raw.lower() in skip_tokens or fac_raw.lower() in skip_tokens:
-                    continue
+                    subjects = _split_subjects(subject_raw)
+                    if not subjects:
+                        skipped_rows += 1
+                        logger.info("parse_docx_table skipped row with no subject split table=%s row=%s text=%s", table_index, row_index, row_text)
+                        continue
 
-                # normalize possible merged subjects like 'PYTHON/AEP LAB'
-                subjects = _split_subjects(subj_raw)
-
-                for subject in subjects:
-                    is_lab = 1 if "lab" in subject.lower() or "lab" in subj_raw.lower() else 0
-                    slot = {
-                        "branch": (row_map.get("branch") or row_map.get("dept") or "").strip() or "",
-                        "section": (row_map.get("section") or row_map.get("class") or "").strip() or "",
-                        "semester": _safe_int(row_map.get("semester")),
-                        "day": (row_map.get("day") or row_map.get("weekday") or "").strip() or "",
-                        "start_time": _format_time_str(time_raw) or "",
-                        "end_time": _format_time_str(end_raw) or "",
-                        "subject_name": subject.strip() or "",
-                        "faculty_name": fac_raw or "",
-                        "is_lab": int(bool(is_lab)),
-                        "room": (row_map.get("room") or "").strip() or "",
-                    }
-                    slots.append(slot)
+                    for subject in subjects:
+                        slot = dict(normalized)
+                        slot["subject_name"] = _clean_text(subject)
+                        slot["is_lab"] = int(bool(_row_has_token(subject, "lab", "practical") or normalized["is_lab"]))
+                        if not _valid_slot_row(slot):
+                            skipped_rows += 1
+                            logger.info("parse_docx_table skipped normalized subject row table=%s row=%s slot=%s text=%s", table_index, row_index, slot, row_text)
+                            continue
+                        slots.append(slot)
+                        parsed_rows += 1
+                        logger.info("parse_docx_table parsed row table=%s row=%s slot=%s", table_index, row_index, slot)
+                except Exception:
+                    failed_rows += 1
+                    logger.exception("parse_docx_table failed table=%s row=%s raw=%s", table_index, row_index, row_text)
     except Exception as e:
         logger.exception("parse_docx_table failed")
         raise
+    logger.info("parse_docx_table summary: tables=%d parsed_rows=%d skipped_rows=%d failed_rows=%d", len(doc.tables), parsed_rows, skipped_rows, failed_rows)
     return slots
 
 
@@ -329,34 +343,90 @@ def parse_pdf_to_slots(path: str) -> List[Dict]:
     # Heuristic parsing: look for lines that contain day/time/subject
     lines = [l.strip() for l in text.splitlines() if l.strip()]
     slots = []
+    parsed_rows = 0
+    skipped_rows = 0
+    failed_rows = 0
+
+    def _emit_row(row_map: Dict[str, str], raw_text: str, context_label: str):
+        nonlocal parsed_rows, skipped_rows, failed_rows
+        try:
+            normalized = _normalize_slot_row(row_map, row_text=raw_text)
+            subject_raw = normalized["subject_name"]
+            faculty_raw = normalized["faculty_name"]
+            skip_tokens = ("short break", "lunch break", "lib", "sports", "break")
+            if _row_has_token(subject_raw, *skip_tokens) or _row_has_token(faculty_raw, *skip_tokens) or _row_has_token(raw_text, *skip_tokens):
+                skipped_rows += 1
+                logger.info("parse_pdf_to_slots skipped break %s text=%s", context_label, raw_text)
+                return
+            if not _valid_slot_row(normalized):
+                skipped_rows += 1
+                logger.info("parse_pdf_to_slots skipped invalid %s normalized=%s text=%s", context_label, normalized, raw_text)
+                return
+            subjects = _split_subjects(subject_raw)
+            if not subjects:
+                skipped_rows += 1
+                logger.info("parse_pdf_to_slots skipped subjectless %s text=%s", context_label, raw_text)
+                return
+            for subject in subjects:
+                slot = dict(normalized)
+                slot["subject_name"] = _clean_text(subject)
+                slot["is_lab"] = int(bool(_row_has_token(subject, "lab", "practical") or normalized["is_lab"]))
+                if not _valid_slot_row(slot):
+                    skipped_rows += 1
+                    logger.info("parse_pdf_to_slots skipped normalized subject row %s slot=%s text=%s", context_label, slot, raw_text)
+                    continue
+                slots.append(slot)
+                parsed_rows += 1
+                logger.info("parse_pdf_to_slots parsed %s slot=%s", context_label, slot)
+        except Exception:
+            failed_rows += 1
+            logger.exception("parse_pdf_to_slots failed %s raw=%s", context_label, raw_text)
+
+    # Prefer structured extraction from tables embedded in PDFs
+    try:
+        if pdfplumber is not None:
+            with pdfplumber.open(path) as pdf:
+                for page_index, page in enumerate(pdf.pages):
+                    try:
+                        tables = page.extract_tables() or []
+                    except Exception:
+                        tables = []
+                    for table_index, table in enumerate(tables):
+                        if not table:
+                            continue
+                        headers = [_normalize_key(cell) for cell in table[0]]
+                        logger.info("parse_pdf_to_slots page=%s table=%s rows=%s headers=%s", page_index, table_index, len(table), headers)
+                        for row_index, values in enumerate(table[1:], start=1):
+                            raw_values = [_clean_text(v) for v in values]
+                            row_text = " | ".join(raw_values)
+                            row_map = {headers[i]: raw_values[i] for i in range(min(len(headers), len(raw_values))) if headers[i]}
+                            _emit_row(row_map, row_text, f"page={page_index} table={table_index} row={row_index}")
+    except Exception:
+        logger.exception("parse_pdf_to_slots table extraction failed")
+
     for ln in lines:
         try:
-            parts = [p.strip() for p in ln.split("-")]
+            parts = [p.strip() for p in re.split(r"\s*[-|]\s*", ln) if p.strip()]
             if len(parts) >= 3:
                 day = parts[0]
                 time_part = parts[1]
                 subj_raw = parts[2]
                 fac = parts[3] if len(parts) > 3 else ""
-                # ignore breaks
-                if subj_raw.lower() in ("short break", "lunch break", "lib", "sports"):
-                    continue
-                st, et = _split_time_range(time_part)
-                for subject in _split_subjects(subj_raw):
-                    slots.append({
-                        "branch": "",
-                        "section": "",
-                        "semester": None,
-                        "day": day,
-                        "start_time": st or "",
-                        "end_time": et or "",
-                        "subject_name": subject,
-                        "faculty_name": fac,
-                        "is_lab": 1 if "lab" in subject.lower() else 0,
-                        "room": "",
-                    })
+                row_map = {
+                    "day": day,
+                    "time": time_part,
+                    "subject": subj_raw,
+                    "faculty": fac,
+                }
+                _emit_row(row_map, ln, f"line={ln[:80]}")
+            else:
+                skipped_rows += 1
+                logger.info("parse_pdf_to_slots skipped unstructured line=%s", ln)
         except Exception:
+            failed_rows += 1
             logger.exception("parse_pdf_to_slots line parse failed: %s", ln)
             continue
+    logger.info("parse_pdf_to_slots summary: parsed_rows=%d skipped_rows=%d failed_rows=%d", parsed_rows, skipped_rows, failed_rows)
     return slots
 
 
@@ -366,6 +436,70 @@ def _row_exists(db, table: str, where_clause: str, params: tuple) -> bool:
         return row is not None
     except Exception:
         return False
+
+
+def _normalize_key(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", _clean_text(value).lower()).strip()
+
+
+def _first_non_empty(row_map: Dict[str, str], *aliases: str) -> str:
+    for alias in aliases:
+        value = _clean_text(row_map.get(_normalize_key(alias), ""))
+        if value:
+            return value
+    return ""
+
+
+def _row_has_token(text: str, *tokens: str) -> bool:
+    haystack = _clean_text(text).lower()
+    return any(token.lower() in haystack for token in tokens)
+
+
+def _split_time_value(time_value: str, end_value: str = ""):
+    start_time = _clean_text(time_value)
+    end_time = _clean_text(end_value)
+    if start_time and not end_time:
+        if "-" in start_time:
+            return _split_time_range(start_time)
+        if "to" in start_time.lower():
+            parts = re.split(r"\bto\b", start_time, flags=re.IGNORECASE)
+            if len(parts) >= 2:
+                return _format_time_str(parts[0].strip()) or "", _format_time_str(parts[1].strip()) or ""
+    if not start_time and end_time:
+        return "", _format_time_str(end_time) or ""
+    if start_time and end_time:
+        return _format_time_str(start_time) or "", _format_time_str(end_time) or ""
+    if start_time:
+        return _split_time_range(start_time)
+    return "", ""
+
+
+def _normalize_slot_row(row: Dict[str, str], row_text: str = "") -> Dict[str, str]:
+    normalized = {key: _clean_text(value) for key, value in row.items()}
+    normalized["branch"] = _first_non_empty(normalized, "branch", "dept", "department", "program", "course", "branch name")
+    normalized["section"] = _first_non_empty(normalized, "section", "class", "division", "batch", "group")
+    semester_value = _first_non_empty(normalized, "semester", "sem", "term", "year")
+    normalized["semester"] = _safe_int(semester_value)
+    normalized["day"] = _first_non_empty(normalized, "day", "weekday", "date")
+    time_value = _first_non_empty(normalized, "time", "slot", "period", "session")
+    start_value = _first_non_empty(normalized, "start", "start time", "from", "begin")
+    end_value = _first_non_empty(normalized, "end", "end time", "to", "until", "finish")
+    if not start_value and not end_value and time_value:
+        start_value, end_value = _split_time_range(time_value)
+    else:
+        start_value, end_value = _split_time_value(start_value or time_value, end_value)
+    normalized["start_time"] = start_value
+    normalized["end_time"] = end_value
+    normalized["subject_name"] = _first_non_empty(normalized, "subject", "course", "paper", "topic", "title")
+    normalized["faculty_name"] = _first_non_empty(normalized, "faculty", "teacher", "instructor", "lecturer", "staff")
+    normalized["room"] = _first_non_empty(normalized, "room", "classroom", "hall", "venue", "lab room")
+    normalized["is_lab"] = int(bool(_row_has_token(normalized["subject_name"], "lab", "practical") or _row_has_token(row_text, "lab", "practical")))
+    return normalized
+
+
+def _valid_slot_row(row: Dict[str, str]) -> bool:
+    required = ("branch", "section", "day", "start_time", "end_time", "subject_name")
+    return all(_clean_text(row.get(field)) for field in required)
 
 
 def _split_subjects(subj_raw: str):
@@ -557,26 +691,22 @@ def import_slots(db, slots: List[Dict]):
     try:
         logger.info("import_slots: parsed_rows_count=%d", len(slots))
         for s in slots:
-            # normalize values and prevent None
-            st = s.get("start_time") or ""
-            et = s.get("end_time") or ""
-            if isinstance(st, tuple):
-                st = st[0] or ""
-            if isinstance(et, tuple):
-                et = et[0] or ""
-
             row = {
-                "branch": (s.get("branch") or "").strip(),
-                "section": (s.get("section") or "").strip(),
+                "branch": _clean_text(s.get("branch")),
+                "section": _clean_text(s.get("section")),
                 "semester": _safe_int(s.get("semester")),
-                "day": (s.get("day") or "").strip(),
-                "start_time": (st or "").strip(),
-                "end_time": (et or "").strip(),
-                "subject_name": (s.get("subject_name") or "").strip(),
-                "faculty_name": (s.get("faculty_name") or "").strip(),
+                "day": _clean_text(s.get("day")),
+                "start_time": _clean_text(s.get("start_time")),
+                "end_time": _clean_text(s.get("end_time")),
+                "subject_name": _clean_text(s.get("subject_name")),
+                "faculty_name": _clean_text(s.get("faculty_name")),
                 "is_lab": int(bool(s.get("is_lab"))),
-                "room": (s.get("room") or "").strip(),
+                "room": _clean_text(s.get("room")),
             }
+            if not _valid_slot_row(row):
+                skipped += 1
+                logger.info("import_slots skipped invalid row: %s", row)
+                continue
             duplicate_where = "COALESCE(branch, '') = COALESCE(%s, '') AND COALESCE(section, '') = COALESCE(%s, '') AND COALESCE(CAST(semester AS TEXT), '') = COALESCE(CAST(%s AS TEXT), '') AND COALESCE(day, '') = COALESCE(%s, '') AND COALESCE(start_time, '') = COALESCE(%s, '') AND COALESCE(end_time, '') = COALESCE(%s, '') AND COALESCE(subject_name, '') = COALESCE(%s, '') AND COALESCE(faculty_name, '') = COALESCE(%s, '') AND COALESCE(room, '') = COALESCE(%s, '')"
             # SQLite gets the same query through _db_execute, which rewrites placeholders.
             if _row_exists(
@@ -621,25 +751,25 @@ def import_slots_normalized(db, slots: List[Dict]):
     failures = 0
     try:
         for s in slots:
-            start = s.get("start_time") or ""
-            end = s.get("end_time") or ""
-            if isinstance(start, tuple):
-                start = start[0] or ""
-            if isinstance(end, tuple):
-                end = end[0] or ""
-
-            bname = (s.get("branch") or "").strip()
-            sec = (s.get("section") or "").strip()
+            bname = _clean_text(s.get("branch"))
+            sec = _clean_text(s.get("section"))
             sem = _safe_int(s.get("semester"))
-            day = (s.get("day") or "").strip()
-            subj_name = (s.get("subject_name") or "").strip()
-            fac_name = (s.get("faculty_name") or "").strip()
+            day = _clean_text(s.get("day"))
+            start = _clean_text(s.get("start_time"))
+            end = _clean_text(s.get("end_time"))
+            subj_name = _clean_text(s.get("subject_name"))
+            fac_name = _clean_text(s.get("faculty_name"))
             is_lab = int(bool(s.get("is_lab")))
-            room = (s.get("room") or "").strip()
+            room = _clean_text(s.get("room"))
+
+            if not _valid_slot_row({"branch": bname, "section": sec, "day": day, "start_time": start, "end_time": end, "subject_name": subj_name}):
+                skipped += 1
+                logger.info("import_slots_normalized skipped invalid row: %s", s)
+                continue
 
             branch_id = None
             try:
-                row = _db_execute(db, "SELECT id FROM branches WHERE LOWER(name)=LOWER(%s) LIMIT 1", (bname,)).fetchone()
+                row = _db_execute(db, "SELECT id FROM branches WHERE LOWER(TRIM(name))=LOWER(TRIM(%s)) LIMIT 1", (bname,)).fetchone()
                 branch_id = row[0] if row and not hasattr(row, 'keys') else (row['id'] if row else None)
             except Exception:
                 branch_id = None
@@ -657,6 +787,17 @@ def import_slots_normalized(db, slots: List[Dict]):
                 teacher_id = row[0] if row and not hasattr(row, 'keys') else (row['id'] if row else None)
             except Exception:
                 teacher_id = None
+
+            if branch_id is None or subject_id is None or teacher_id is None:
+                skipped += 1
+                logger.info(
+                    "import_slots_normalized skipped unresolved mapping branch=%s subject=%s faculty=%s row=%s",
+                    branch_id,
+                    subject_id,
+                    teacher_id,
+                    s,
+                )
+                continue
 
             row = {
                 'branch_id': branch_id,
