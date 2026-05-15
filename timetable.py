@@ -21,54 +21,116 @@ logger = logging.getLogger("app.timetable")
 
 # Database helper functions - use existing app.get_db() pattern where called from app.py
 
-CREATE_TABLES_SQL = [
-    """
-    CREATE TABLE IF NOT EXISTS timetable_slots (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        branch TEXT NOT NULL,
-        section TEXT NOT NULL,
-        semester INTEGER,
-        day TEXT NOT NULL,
-        start_time TEXT NOT NULL,
-        end_time TEXT NOT NULL,
-        subject_name TEXT NOT NULL,
-        faculty_name TEXT,
-        is_lab INTEGER DEFAULT 0,
-        room TEXT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    );
-    """,
-]
+def _is_postgres_db(db) -> bool:
+    try:
+        # The app wraps psycopg2 connections in a helper class named _PostgresDB.
+        # Fallback: check for a psycopg2 connection module on an underlying conn.
+        name = type(db).__name__
+        if name == "_PostgresDB":
+            return True
+        # Some call sites may pass a raw psycopg2 connection or cursor-like object
+        if hasattr(db, "_conn"):
+            mod = type(db._conn).__module__
+            return "psycopg2" in mod
+        return False
+    except Exception:
+        return False
 
 
-CREATE_NORMALIZED_SQL = [
-    """
-    CREATE TABLE IF NOT EXISTS timetable_entries (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        branch_id INTEGER,
-        section TEXT,
-        semester INTEGER,
-        day TEXT,
-        start_time TEXT,
-        end_time TEXT,
-        subject_id INTEGER,
-        teacher_id INTEGER,
-        is_lab INTEGER DEFAULT 0,
-        room TEXT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    );
-    """,
-]
+def _create_tables_sql(db):
+    if _is_postgres_db(db):
+        return [
+            """
+            CREATE TABLE IF NOT EXISTS timetable_slots (
+                id SERIAL PRIMARY KEY,
+                branch TEXT NOT NULL,
+                section TEXT NOT NULL,
+                semester INTEGER,
+                day TEXT NOT NULL,
+                start_time TEXT NOT NULL,
+                end_time TEXT NOT NULL,
+                subject_name TEXT NOT NULL,
+                faculty_name TEXT,
+                is_lab INTEGER DEFAULT 0,
+                room TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """,
+        ]
+    else:
+        return [
+            """
+            CREATE TABLE IF NOT EXISTS timetable_slots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                branch TEXT NOT NULL,
+                section TEXT NOT NULL,
+                semester INTEGER,
+                day TEXT NOT NULL,
+                start_time TEXT NOT NULL,
+                end_time TEXT NOT NULL,
+                subject_name TEXT NOT NULL,
+                faculty_name TEXT,
+                is_lab INTEGER DEFAULT 0,
+                room TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """,
+        ]
+
+
+def _create_normalized_sql(db):
+    if _is_postgres_db(db):
+        return [
+            """
+            CREATE TABLE IF NOT EXISTS timetable_entries (
+                id SERIAL PRIMARY KEY,
+                branch_id INTEGER,
+                section TEXT,
+                semester INTEGER,
+                day TEXT,
+                start_time TEXT,
+                end_time TEXT,
+                subject_id INTEGER,
+                teacher_id INTEGER,
+                is_lab INTEGER DEFAULT 0,
+                room TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """,
+        ]
+    else:
+        return [
+            """
+            CREATE TABLE IF NOT EXISTS timetable_entries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                branch_id INTEGER,
+                section TEXT,
+                semester INTEGER,
+                day TEXT,
+                start_time TEXT,
+                end_time TEXT,
+                subject_id INTEGER,
+                teacher_id INTEGER,
+                is_lab INTEGER DEFAULT 0,
+                room TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """,
+        ]
 
 
 def ensure_timetable_tables(db):
-    for sql in CREATE_TABLES_SQL:
-        db.execute(sql)
-    for sql in CREATE_NORMALIZED_SQL:
+    for sql in _create_tables_sql(db):
         try:
             db.execute(sql)
         except Exception:
-            pass
+            # ignore individual table creation errors; caller will handle
+            logger.exception("create table failed")
+    for sql in _create_normalized_sql(db):
+        try:
+            db.execute(sql)
+        except Exception:
+            logger.exception("create normalized table failed")
     try:
         db.commit()
     except Exception:
