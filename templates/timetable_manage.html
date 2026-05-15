@@ -1,8 +1,17 @@
 {% extends "layout.html" %}
 {% block content %}
 <div class="card">
-    <h1>Timetable Management</h1>
-    <p>Upload a DOCX or PDF timetable to import slots (best-effort parser).</p>
+    <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:16px; flex-wrap:wrap;">
+        <div>
+            <p style="margin:0 0 6px 0; text-transform:uppercase; letter-spacing:0.7px; color:var(--text-secondary); font-weight:700; font-size:0.8rem;">Timetable</p>
+            <h1 style="margin:0 0 8px 0;">Timetable Management</h1>
+            <p style="margin:0; color:var(--text-secondary);">Upload a DOCX or PDF timetable to import slots and normalized timetable entries.</p>
+        </div>
+        <div style="display:flex; gap:10px; flex-wrap:wrap;">
+            <a class="button" href="{{ url_for('timetable_home') }}"><i class="fa-solid fa-gauge-high"></i> Timetable Dashboard</a>
+            <a class="button" href="{{ url_for('timetable_faculty_schedules') }}" style="background: var(--text-secondary);"><i class="fa-solid fa-user-clock"></i> Faculty Schedules</a>
+        </div>
+    </div>
 
     <form method="post" enctype="multipart/form-data">
         <div class="form-group">
@@ -13,28 +22,60 @@
     </form>
 
     <hr>
-    <h2>Imported slots</h2>
-    <table style="width:100%; border-collapse:collapse;">
-        <thead>
-            <tr style="text-align:left; border-bottom:1px solid #ddd;">
-                <th>Day</th><th>Start</th><th>End</th><th>Branch</th><th>Section</th><th>Sem</th><th>Subject</th><th>Faculty</th><th>Room</th>
-            </tr>
-        </thead>
-        <tbody>
-            {% for r in rows %}
-            <tr>
-                <td>{{ r['day'] }}</td>
-                <td>{{ r['start_time'] }}</td>
-                <td>{{ r['end_time'] }}</td>
-                <td>{{ r['branch'] }}</td>
-                <td>{{ r['section'] }}</td>
-                <td>{{ r['semester'] }}</td>
-                <td>{{ r['subject_name'] }}</td>
-                <td>{{ r['faculty_name'] }}</td>
-                <td>{{ r['room'] }}</td>
-            </tr>
-            {% endfor %}
-        </tbody>
-    </table>
+    <div class="grid" style="grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 20px;">
+        <div>
+            <h2 style="margin-top:0;">Imported slots</h2>
+            <div class="table-responsive">
+                <table style="width:100%; border-collapse:collapse;">
+                    <thead>
+                        <tr style="text-align:left; border-bottom:1px solid #ddd;">
+                            <th>Day</th><th>Start</th><th>End</th><th>Branch</th><th>Section</th><th>Sem</th><th>Subject</th><th>Faculty</th><th>Room</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for r in rows %}
+                        <tr>
+                            <td>{{ r['day'] }}</td>
+                            <td>{{ r['start_time'] }}</td>
+                            <td>{{ r['end_time'] }}</td>
+                            <td>{{ r['branch'] }}</td>
+                            <td>{{ r['section'] }}</td>
+                            <td>{{ r['semester'] }}</td>
+                            <td>{{ r['subject_name'] }}</td>
+                            <td>{{ r['faculty_name'] }}</td>
+                            <td>{{ r['room'] }}</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+        <div>
+            <h2 style="margin-top:0;">Normalized preview</h2>
+            <div class="table-responsive">
+                <table style="width:100%; border-collapse:collapse;">
+                    <thead>
+                        <tr style="text-align:left; border-bottom:1px solid #ddd;">
+                            <th>Day</th><th>Start</th><th>End</th><th>Branch</th><th>Section</th><th>Subject</th><th>Faculty</th><th>Lab</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for e in entries %}
+                        <tr>
+                            <td>{{ e['day'] }}</td>
+                            <td>{{ e['start_time'] }}</td>
+                            <td>{{ e['end_time'] }}</td>
+                            <td>{{ e['branch_name'] or e['branch_id'] }}</td>
+                            <td>{{ e['section'] }}</td>
+                            <td>{{ e['subject_name'] or e['subject_id'] }}</td>
+                            <td>{{ e['teacher_name'] or e['teacher_id'] }}</td>
+                            <td>{{ 'Yes' if e['is_lab'] else 'No' }}</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
 </div>
 {% endblock %}

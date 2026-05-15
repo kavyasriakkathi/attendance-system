@@ -1,7 +1,7 @@
 import os
 import logging
 import sqlite3
-from datetime import datetime, time
+from datetime import datetime, time, timezone
 from typing import List, Dict, Optional
 
 from flask import request, redirect, url_for, render_template, flash, jsonify, session, render_template_string
@@ -195,6 +195,121 @@ def _split_time_range(s: str):
     return (_format_time_str(s) or "", "")
 
 
+def _current_local_datetime(now: Optional[datetime] = None) -> datetime:
+    """Return a timezone-aware local datetime for timetable comparisons."""
+    if now is None:
+        return datetime.now().astimezone()
+    if getattr(now, "tzinfo", None) is None:
+        return now.astimezone()
+    return now.astimezone()
+
+
+def _row_to_dict(row):
+    try:
+        return dict(row)
+    except Exception:
+        return row
+
+
+def _lookup_branch_id(db, branch_name: str):
+    if not branch_name:
+        return None
+    try:
+        row = db.execute("SELECT id FROM branches WHERE LOWER(name)=LOWER(?) LIMIT 1", (branch_name,)).fetchone()
+        if row:
+            return row[0] if not hasattr(row, "keys") else row["id"]
+    except Exception:
+        return None
+    return None
+
+
+def get_upcoming_classes(db, branch: str = "", section: str = "", limit: int = 3, now: Optional[datetime] = None):
+    """Return upcoming classes for the current day using normalized data first."""
+    current = _current_local_datetime(now)
+    weekday = current.strftime("%A")
+    cur_time = current.strftime("%H:%M")
+    branch_id = _lookup_branch_id(db, branch)
+
+    entries = []
+    try:
+        if branch_id is not None:
+            rows = db.execute(
+                "SELECT te.*, s.name AS subject_name, t.name AS teacher_name, b.name AS branch_name FROM timetable_entries te LEFT JOIN subjects s ON te.subject_id = s.id LEFT JOIN teachers t ON te.teacher_id = t.id LEFT JOIN branches b ON te.branch_id = b.id WHERE te.branch_id = ? AND COALESCE(te.section, '') = ? AND te.day = ? AND te.start_time >= ? ORDER BY te.start_time LIMIT ?",
+                (branch_id, section or "", weekday, cur_time, limit),
+            ).fetchall()
+            entries = [_row_to_dict(r) for r in rows]
+    except Exception:
+        entries = []
+
+    if not entries:
+        try:
+            rows = db.execute(
+                "SELECT * FROM timetable_slots WHERE branch = ? AND section = ? AND day = ? AND start_time >= ? ORDER BY start_time LIMIT ?",
+                (branch or "", section or "", weekday, cur_time, limit),
+            ).fetchall()
+            entries = [_row_to_dict(r) for r in rows]
+        except Exception:
+            entries = []
+
+    return entries
+
+
+def get_current_active_class(db, branch: str = "", section: str = "", now: Optional[datetime] = None):
+    """Return the currently running class, preferring normalized timetable_entries."""
+    return get_current_slot(db, branch, section, now=now)
+
+
+def get_global_active_class(db, now: Optional[datetime] = None):
+    """Return the first active class across the institute for the current time."""
+    current = _current_local_datetime(now)
+    weekday = current.strftime("%A")
+    cur_time = current.strftime("%H:%M")
+    try:
+        rows = db.execute(
+            "SELECT te.*, s.name AS subject_name, t.name AS teacher_name, b.name AS branch_name FROM timetable_entries te LEFT JOIN subjects s ON te.subject_id = s.id LEFT JOIN teachers t ON te.teacher_id = t.id LEFT JOIN branches b ON te.branch_id = b.id WHERE te.day = ? AND te.start_time <= ? AND te.end_time >= ? ORDER BY te.start_time LIMIT 1",
+            (weekday, cur_time, cur_time),
+        ).fetchall()
+        if rows:
+            return _row_to_dict(rows[0])
+    except Exception:
+        pass
+    try:
+        rows = db.execute(
+            "SELECT * FROM timetable_slots WHERE day = ? AND start_time <= ? AND end_time >= ? ORDER BY start_time LIMIT 1",
+            (weekday, cur_time, cur_time),
+        ).fetchall()
+        if rows:
+            return _row_to_dict(rows[0])
+    except Exception:
+        pass
+    return None
+
+
+def get_faculty_schedule(db, teacher_id, now: Optional[datetime] = None):
+    current = _current_local_datetime(now)
+    weekday = current.strftime("%A")
+    rows = []
+    try:
+        rows = db.execute(
+            "SELECT te.*, s.name AS subject_name, b.name AS branch_name, t.name AS teacher_name FROM timetable_entries te LEFT JOIN subjects s ON te.subject_id = s.id LEFT JOIN branches b ON te.branch_id = b.id LEFT JOIN teachers t ON te.teacher_id = t.id WHERE te.teacher_id = ? AND te.day = ? ORDER BY te.start_time",
+            (teacher_id, weekday),
+        ).fetchall()
+    except Exception:
+        rows = []
+
+    if rows:
+        return [_row_to_dict(r) for r in rows]
+
+    try:
+        rows = db.execute(
+            "SELECT * FROM timetable_slots WHERE faculty_name IS NOT NULL AND day = ? ORDER BY start_time",
+            (weekday,),
+        ).fetchall()
+    except Exception:
+        rows = []
+    return [_row_to_dict(r) for r in rows]
+
+
 # --- DB import --------------------------------------------------------------
 
 def import_slots(db, slots: List[Dict]):
@@ -332,6 +447,8 @@ def register_routes(app, db_getter=None):
         db = None
         rows_count = 0
         table_ready = False
+        active_slot = None
+        upcoming_classes = []
         try:
             if db_getter is None:
                 raise RuntimeError("Database getter is not configured")
@@ -340,6 +457,8 @@ def register_routes(app, db_getter=None):
             row = db.execute("SELECT COUNT(1) AS c FROM timetable_slots").fetchone()
             rows_count = int(row["c"] if row and row["c"] is not None else 0)
             table_ready = True
+            active_slot = get_current_active_class(db, session.get("teacher_branch_name") or session.get("teacher_branch") or "", session.get("teacher_section") or "")
+            upcoming_classes = get_upcoming_classes(db, session.get("teacher_branch_name") or session.get("teacher_branch") or "", session.get("teacher_section") or "", limit=4)
         except Exception as e:
             logger.exception("Failed to render timetable status page")
             return render_template_string(
@@ -363,22 +482,21 @@ def register_routes(app, db_getter=None):
                 except Exception:
                     pass
 
-        return render_template_string(
-            """
-            {% extends "layout.html" %}
-            {% block content %}
-            <div class="card">
-                <h1>Timetable Status</h1>
-                <p>Timetable routes are loaded.</p>
-                <p>Database tables: {{ 'ready' if table_ready else 'missing' }}</p>
-                <p>Timetable entries detected: {{ rows_count }}</p>
-                <p><a class="button" href="{{ url_for('timetable_manage') }}">Open timetable management</a></p>
-            </div>
-            {% endblock %}
-            """,
+        return render_template(
+            "timetable_dashboard.html",
             table_ready=table_ready,
             rows_count=rows_count,
+            active_slot=active_slot,
+            upcoming_classes=upcoming_classes,
         )
+
+    @app.route("/timetable/dashboard")
+    def timetable_dashboard_alias():
+        return timetable_home()
+
+    @app.route("/timetable/upload")
+    def timetable_upload():
+        return redirect(url_for("timetable_manage"))
     @app.route("/timetable/manage", methods=("GET", "POST"))
     def timetable_manage():
         if session.get("role") != "admin":
@@ -438,8 +556,28 @@ def register_routes(app, db_getter=None):
             return jsonify({"active": False})
         return jsonify({
             "active": True,
-            "slot": dict(row)
+            "slot": _row_to_dict(row)
         })
+
+    @app.route("/timetable/faculty-schedules")
+    def timetable_faculty_schedules():
+        if session.get("role") not in ("admin", "teacher"):
+            return redirect(url_for("login"))
+        db = get_db()
+        ensure_timetable_tables(db)
+        teacher_id = session.get("teacher_id") if session.get("role") == "teacher" else None
+        schedules = []
+        if teacher_id:
+            schedules = get_faculty_schedule(db, teacher_id)
+        else:
+            try:
+                rows = db.execute(
+                    "SELECT te.*, s.name AS subject_name, t.name AS teacher_name, b.name AS branch_name FROM timetable_entries te LEFT JOIN subjects s ON te.subject_id = s.id LEFT JOIN teachers t ON te.teacher_id = t.id LEFT JOIN branches b ON te.branch_id = b.id ORDER BY te.day, te.start_time"
+                ).fetchall()
+                schedules = [_row_to_dict(r) for r in rows]
+            except Exception:
+                schedules = []
+        return render_template("faculty_schedules.html", schedules=schedules, teacher_id=teacher_id)
 
     @app.route('/timetable/students')
     def timetable_students():

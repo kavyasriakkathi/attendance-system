@@ -25,6 +25,7 @@
             <a class="logout" href="{{ url_for('logout') }}"><i class="fa-solid fa-right-from-bracket"></i></a>
             {% elif session.role == 'admin' %}
             <a class="nav-link" href="{{ url_for('dashboard') }}"><i class="fa-solid fa-chart-line"></i> Dashboard</a>
+            <a class="nav-link" href="{{ url_for('timetable_home') }}"><i class="fa-solid fa-calendar-days"></i> Timetable</a>
             <a class="nav-link" href="{{ url_for('students') }}"><i class="fa-solid fa-users"></i> Students</a>
             <a class="nav-link" href="{{ url_for('branches') }}"><i class="fa-solid fa-building"></i> Depts</a>
             <a class="nav-link" href="{{ url_for('subjects') }}"><i class="fa-solid fa-book-open"></i> Subjects</a>
@@ -38,6 +39,7 @@
             <a class="logout" href="{{ url_for('logout') }}"><i class="fa-solid fa-right-from-bracket"></i></a>
             {% elif session.role == 'teacher' %}
             <a class="nav-link" href="{{ url_for('teacher_dashboard') }}"><i class="fa-solid fa-gauge"></i> Dashboard</a>
+            <a class="nav-link" href="{{ url_for('timetable_home') }}"><i class="fa-solid fa-calendar-days"></i> Timetable</a>
             <a class="nav-link" href="{{ url_for('teacher_mark_attendance') }}"><i class="fa-solid fa-calendar-check"></i> Attendance</a>
             <a class="nav-link" href="{{ url_for('teacher_attendance_records') }}"><i class="fa-solid fa-clipboard-list"></i> Records</a>
             <a class="nav-link" href="{{ url_for('teacher_select_branch') }}"><i class="fa-solid fa-building"></i> Branch</a>
@@ -49,6 +51,27 @@
         </nav>
         {% endif %}
     </header>
+    {% if session.username and not hide_nav %}
+    <nav class="mobile-bottom-nav" aria-label="Mobile navigation">
+        {% if session.role == 'student' %}
+        <a class="nav-link" href="{{ url_for('student_dashboard') }}"><i class="fa-solid fa-house"></i><span>Home</span></a>
+        <a class="nav-link" href="{{ url_for('student_dashboard') }}"><i class="fa-solid fa-calendar-days"></i><span>Classes</span></a>
+        <a class="nav-link" href="{{ url_for('logout') }}"><i class="fa-solid fa-right-from-bracket"></i><span>Logout</span></a>
+        {% elif session.role == 'admin' %}
+        <a class="nav-link" href="{{ url_for('dashboard') }}"><i class="fa-solid fa-house"></i><span>Home</span></a>
+        <a class="nav-link" href="{{ url_for('timetable_home') }}"><i class="fa-solid fa-calendar-days"></i><span>Timetable</span></a>
+        <a class="nav-link" href="{{ url_for('mark_attendance') }}"><i class="fa-solid fa-calendar-check"></i><span>Attend</span></a>
+        <a class="nav-link" href="{{ url_for('department_dashboard') }}"><i class="fa-solid fa-chart-pie"></i><span>Summary</span></a>
+        <a class="nav-link" href="{{ url_for('logout') }}"><i class="fa-solid fa-right-from-bracket"></i><span>Logout</span></a>
+        {% elif session.role == 'teacher' %}
+        <a class="nav-link" href="{{ url_for('teacher_dashboard') }}"><i class="fa-solid fa-house"></i><span>Home</span></a>
+        <a class="nav-link" href="{{ url_for('timetable_home') }}"><i class="fa-solid fa-calendar-days"></i><span>Timetable</span></a>
+        <a class="nav-link" href="{{ url_for('teacher_mark_attendance') }}"><i class="fa-solid fa-calendar-check"></i><span>Attend</span></a>
+        <a class="nav-link" href="{{ url_for('teacher_attendance_records') }}"><i class="fa-solid fa-clipboard-list"></i><span>Records</span></a>
+        <a class="nav-link" href="{{ url_for('logout') }}"><i class="fa-solid fa-right-from-bracket"></i><span>Logout</span></a>
+        {% endif %}
+    </nav>
+    {% endif %}
     <main>
         {% with messages = get_flashed_messages(with_categories=true) %}
             {% if messages %}
@@ -64,10 +87,11 @@
 
     <script>
         (function () {
-            const nav = document.querySelector('header nav');
+            const navs = Array.from(document.querySelectorAll('header nav, .mobile-bottom-nav'));
+            const nav = navs[0];
             if (!nav) return;
 
-            const links = Array.from(nav.querySelectorAll('a.nav-link'));
+            const links = navs.flatMap((node) => Array.from(node.querySelectorAll('a.nav-link')));
             if (!links.length) return;
 
             const currentPath = window.location.pathname || '/';

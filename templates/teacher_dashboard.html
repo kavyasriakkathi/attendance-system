@@ -51,6 +51,45 @@
     </div>
 </div>
 
+<div class="grid" style="grid-template-columns: minmax(280px, 1fr) minmax(280px, 1fr); gap: 20px; margin-top: 24px; margin-bottom: 24px;">
+    <div class="card" style="margin-bottom: 0;">
+        <p style="margin:0 0 6px 0; text-transform:uppercase; letter-spacing:0.7px; color:var(--text-secondary); font-weight:700; font-size:0.8rem;">Current Active Period</p>
+        <h2 style="margin:0 0 8px 0;">{{ active_slot.subject_name if active_slot else 'Waiting for active class' }}</h2>
+        <p style="margin:0; color:var(--text-secondary);">
+            {% if active_slot %}
+                {{ active_slot.branch_name or active_slot.branch or teacher.current_branch_name or 'Assigned branch' }}{% if active_slot.section %} · Section {{ active_slot.section }}{% endif %}
+                {% if active_slot.teacher_name or active_slot.faculty_name %} · {{ active_slot.teacher_name or active_slot.faculty_name }}{% endif %}
+            {% else %}
+                The dashboard will update as soon as a timetable slot becomes active.
+            {% endif %}
+        </p>
+        <div style="display:flex; flex-wrap:wrap; gap:10px; margin-top:16px;">
+            <a class="button" href="{{ url_for('timetable_home') }}"><i class="fa-solid fa-calendar-days"></i> Timetable</a>
+            <a class="button" href="{{ url_for('teacher_mark_attendance') }}" style="background: var(--text-secondary);"><i class="fa-solid fa-clipboard-check"></i> Attendance</a>
+        </div>
+    </div>
+
+    <div class="card" style="margin-bottom: 0;">
+        <p style="margin:0 0 6px 0; text-transform:uppercase; letter-spacing:0.7px; color:var(--text-secondary); font-weight:700; font-size:0.8rem;">Today's Upcoming Classes</p>
+        <h2 style="margin:0 0 12px 0;">Next timetable slots</h2>
+        <div style="display:grid; gap:10px;">
+            {% if upcoming_classes %}
+                {% for slot in upcoming_classes %}
+                <div style="padding:12px 14px; border:1px solid var(--border-color); border-radius:12px; background:#fafbfc; display:flex; justify-content:space-between; gap:12px; align-items:flex-start;">
+                    <div>
+                        <div style="font-weight:700;">{{ slot.subject_name or slot.subject or 'Untitled class' }}</div>
+                        <div style="color:var(--text-secondary); font-size:0.9rem;">{{ slot.branch_name or slot.branch or teacher.current_branch_name or 'Assigned branch' }}{% if slot.section %} · Section {{ slot.section }}{% endif %}</div>
+                    </div>
+                    <div style="text-align:right; font-weight:700; color:var(--primary-color);">{{ slot.start_time or '' }} - {{ slot.end_time or '' }}</div>
+                </div>
+                {% endfor %}
+            {% else %}
+                <div style="padding:14px; border:1px dashed var(--border-color); border-radius:12px; color:var(--text-secondary);">No upcoming classes are configured for today.</div>
+            {% endif %}
+        </div>
+    </div>
+</div>
+
 <div class="stats-grid" style="margin-top: 24px;">
     <div class="stat-box">
         <h3>Assigned Subjects</h3>

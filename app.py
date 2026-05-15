@@ -2298,6 +2298,15 @@ def dashboard():
                 """
             )
 
+        current_active_period = None
+        upcoming_timetable = []
+        try:
+            import timetable as _timetable
+            current_active_period = _timetable.get_global_active_class(db)
+            upcoming_timetable = _timetable.get_upcoming_classes(db, "", "", limit=4)
+        except Exception as timetable_err:
+            print(f"[dashboard] timetable widget load skipped: {repr(timetable_err)}")
+
         db.close()
         database_info = {
             "storage": "PostgreSQL" if str(app.config.get("DATABASE", "")).startswith("postgresql") else "SQLite",
@@ -2339,6 +2348,8 @@ def dashboard():
             monthly_labels=monthly_labels,
             monthly_percentages=monthly_percentages,
             recent_activity=recent_activity,
+            current_active_period=current_active_period,
+            upcoming_timetable=upcoming_timetable,
         )
     except Exception as e:
         print(f"[dashboard] CRITICAL ERROR: {repr(e)}")
@@ -4743,6 +4754,8 @@ def teacher_dashboard():
         placeholder = get_placeholder()
         subject_name = teacher["subject_name"]
         current_branch_id = teacher["current_branch_id"]
+        current_branch_name = teacher["current_branch_name"] or ""
+        current_section = teacher.get("current_section") or ""
         subject_row = teacher["subject_row"]
         subject_id = row_get(subject_row, "id") if subject_row else None
 
@@ -4782,8 +4795,18 @@ def teacher_dashboard():
                 active_slot = _timetable.get_current_slot(db, current_branch_name or "", current_section or "")
             except Exception:
                 active_slot = None
+            try:
+                global_active_slot = _timetable.get_global_active_class(db)
+            except Exception:
+                global_active_slot = None
+            try:
+                upcoming_classes = _timetable.get_upcoming_classes(db, "", "", limit=4)
+            except Exception:
+                upcoming_classes = []
         except Exception:
             active_slot = None
+            global_active_slot = None
+            upcoming_classes = []
 
         return render_template(
             "teacher_dashboard.html",
@@ -4793,6 +4816,8 @@ def teacher_dashboard():
             recent_records=records,
             subject_id=subject_id,
             active_slot=active_slot,
+            global_active_slot=global_active_slot,
+            upcoming_classes=upcoming_classes,
         )
     except Exception as e:
         print(f"[teacher_dashboard] ERROR: {repr(e)}")

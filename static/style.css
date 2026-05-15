@@ -127,6 +127,40 @@ nav a.nav-link.just-clicked {
     animation: navClickPulse 0.45s ease-in-out;
 }
 
+.mobile-bottom-nav {
+    display: none;
+}
+
+.mobile-bottom-nav a {
+    flex: 1 1 0;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    padding: 10px 8px;
+    font-size: 0.72rem;
+    line-height: 1.1;
+    border-radius: 0;
+    text-align: center;
+    border-top: 3px solid transparent;
+}
+
+.mobile-bottom-nav a i {
+    font-size: 1rem;
+}
+
+.mobile-bottom-nav a.is-active {
+    background: rgba(67, 97, 238, 0.08);
+    color: var(--primary-color);
+    border-top-color: var(--primary-color);
+}
+
+.mobile-bottom-nav a.logout {
+    margin-left: 0;
+}
+
 @keyframes navClickPulse {
     0% {
         outline-width: 0;
@@ -421,19 +455,44 @@ tr:hover td {
 
 @media (max-width: 768px) {
     header {
-        padding: 12px 20px;
+        padding: 12px 16px;
         flex-direction: column;
-        gap: 12px;
+        gap: 10px;
     }
     
     nav {
         overflow-x: auto;
         width: 100%;
         padding-bottom: 4px;
+        flex-wrap: nowrap;
+        scrollbar-width: thin;
     }
     
     nav a {
         padding: 6px 12px;
         font-size: 0.85rem;
+    }
+
+    main {
+        padding: 24px 14px 90px;
+    }
+
+    .mobile-bottom-nav {
+        display: flex;
+        position: fixed;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        z-index: 120;
+        background: rgba(255, 255, 255, 0.96);
+        border-top: 1px solid var(--border-color);
+        box-shadow: 0 -8px 24px rgba(15, 23, 42, 0.08);
+        backdrop-filter: blur(12px);
+    }
+}
+
+@media (min-width: 769px) {
+    .mobile-bottom-nav {
+        display: none !important;
     }
 }

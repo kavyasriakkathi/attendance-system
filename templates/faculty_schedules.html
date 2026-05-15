@@ -1,0 +1,53 @@
+{% extends "layout.html" %}
+{% block content %}
+<div class="card" style="margin-bottom:24px;">
+    <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:16px; flex-wrap:wrap;">
+        <div>
+            <p style="margin:0 0 6px 0; text-transform:uppercase; letter-spacing:0.7px; color:var(--text-secondary); font-weight:700; font-size:0.8rem;">Faculty Schedules</p>
+            <h1 style="margin:0 0 8px 0;">Today's timetable by faculty</h1>
+            <p style="margin:0; color:var(--text-secondary);">Browse the current day's schedule using normalized timetable entries with legacy fallback.</p>
+        </div>
+        <div style="display:flex; gap:10px; flex-wrap:wrap;">
+            <a class="button" href="{{ url_for('timetable_home') }}"><i class="fa-solid fa-gauge-high"></i> Timetable Dashboard</a>
+            <a class="button" href="{{ url_for('timetable_manage') }}" style="background:var(--text-secondary);"><i class="fa-solid fa-gear"></i> Manage Timetable</a>
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    <div class="table-responsive">
+        <table>
+            <thead>
+                <tr>
+                    <th>Day</th>
+                    <th>Time</th>
+                    <th>Branch</th>
+                    <th>Section</th>
+                    <th>Subject</th>
+                    <th>Faculty</th>
+                    <th>Type</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% if schedules %}
+                    {% for slot in schedules %}
+                    <tr>
+                        <td>{{ slot.day }}</td>
+                        <td>{{ slot.start_time }} - {{ slot.end_time }}</td>
+                        <td>{{ slot.branch_name or slot.branch or slot.branch_id }}</td>
+                        <td>{{ slot.section or '-' }}</td>
+                        <td>{{ slot.subject_name or slot.subject or slot.subject_id }}</td>
+                        <td>{{ slot.teacher_name or slot.faculty_name or slot.teacher_id }}</td>
+                        <td>{{ 'Lab' if slot.is_lab else 'Theory' }}</td>
+                    </tr>
+                    {% endfor %}
+                {% else %}
+                    <tr>
+                        <td colspan="7">No faculty schedules found for today.</td>
+                    </tr>
+                {% endif %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}
