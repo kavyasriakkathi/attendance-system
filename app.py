@@ -1521,6 +1521,107 @@ def init_db(db=None):
     
     default_branch_id = row_get(default_branch, "id")
 
+    # ✅ Create normalized timetable_entries table for production-ready timetable data
+    try:
+        if str(app.config.get("DATABASE", "")).startswith("postgres"):
+            db.execute("""
+            CREATE TABLE IF NOT EXISTS timetable_entries (
+                id SERIAL PRIMARY KEY,
+                branch_id INTEGER,
+                section TEXT,
+                semester INTEGER,
+                day TEXT,
+                start_time TEXT,
+                end_time TEXT,
+                subject_id INTEGER,
+                teacher_id INTEGER,
+                is_lab INTEGER DEFAULT 0,
+                room TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+        else:
+            db.execute("""
+            CREATE TABLE IF NOT EXISTS timetable_entries (
+                id INTEGER PRIMARY KEY,
+                branch_id INTEGER,
+                section TEXT,
+                semester INTEGER,
+                day TEXT,
+                start_time TEXT,
+                end_time TEXT,
+                subject_id INTEGER,
+                teacher_id INTEGER,
+                is_lab INTEGER DEFAULT 0,
+                room TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+        db.commit()
+        _db_log("SUCCESS", "db.init", "timetable_entries table ensured")
+    except Exception as te_err:
+        _db_log("WARNING", "db.init", f"timetable_entries creation skipped: {repr(te_err)}")
+
+    # Safe migration: map legacy timetable_slots -> timetable_entries (best-effort)
+    try:
+        # Only migrate if timetable_slots exist and timetable_entries is empty
+        cols = _table_columns(db, "timetable_slots")
+        if cols:
+            existing = db.execute("SELECT COUNT(1) AS c FROM timetable_entries").fetchone()
+            existing_count = int(row_get(existing, "c", 0) or 0)
+            if existing_count == 0:
+                _db_log("INFO", "db.migrate", "Starting migration from timetable_slots to timetable_entries")
+                slots = db.execute("SELECT id, branch, section, semester, day, start_time, end_time, subject_name, faculty_name, is_lab, room FROM timetable_slots ORDER BY id").fetchall()
+                migrated = 0
+                placeholder = get_placeholder()
+                for s in slots:
+                    bname = row_get(s, "branch") or ""
+                    sec = row_get(s, "section") or ""
+                    sem = row_get(s, "semester")
+                    day = row_get(s, "day") or ""
+                    st = row_get(s, "start_time") or ""
+                    et = row_get(s, "end_time") or ""
+                    subj_name = row_get(s, "subject_name") or ""
+                    fac_name = row_get(s, "faculty_name") or ""
+                    is_lab = int(row_get(s, "is_lab") or 0)
+                    room = row_get(s, "room") or ""
+
+                    branch_id = None
+                    try:
+                        row = db.execute(f"SELECT id FROM branches WHERE LOWER(name)=LOWER({placeholder}) LIMIT 1", (bname,)).fetchone()
+                        branch_id = row_get(row, "id") if row else None
+                    except Exception:
+                        branch_id = None
+
+                    subject_id = None
+                    try:
+                        row = db.execute(f"SELECT id FROM subjects WHERE LOWER(name)=LOWER({placeholder}) LIMIT 1", (subj_name,)).fetchone()
+                        subject_id = row_get(row, "id") if row else None
+                    except Exception:
+                        subject_id = None
+
+                    teacher_id = None
+                    try:
+                        row = db.execute(f"SELECT id FROM teachers WHERE LOWER(name)=LOWER({placeholder}) LIMIT 1", (fac_name,)).fetchone()
+                        teacher_id = row_get(row, "id") if row else None
+                    except Exception:
+                        teacher_id = None
+
+                    try:
+                        db.execute(
+                            f"INSERT INTO timetable_entries (branch_id, section, semester, day, start_time, end_time, subject_id, teacher_id, is_lab, room) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})",
+                            (branch_id, sec, sem, day, st, et, subject_id, teacher_id, is_lab, room),
+                        )
+                        migrated += 1
+                    except Exception:
+                        pass
+                try:
+                    db.commit()
+                except Exception:
+                    pass
+                _db_log("SUCCESS", "db.migrate", f"Migrated {migrated} timetable_slots rows to timetable_entries (best-effort)")
+    except Exception as mig_err:
+        _db_log("WARNING", "db.migrate", f"Timetable migration skipped: {repr(mig_err)}")
     # ✅ Ensure sample subjects exist
     _db_log("INFO", "db.init", "Verifying sample subjects...")
     sample_subjects = ["Mathematics", "Physics", "Chemistry", "English", "Programming", "Data Structures"]
@@ -4673,6 +4774,17 @@ def teacher_dashboard():
             (current_branch_id, subject_id),
         ).fetchall()
 
+        # Determine active slot for this teacher (prefer normalized timetable)
+        active_slot = None
+        try:
+            import timetable as _timetable
+            try:
+                active_slot = _timetable.get_current_slot(db, current_branch_name or "", current_section or "")
+            except Exception:
+                active_slot = None
+        except Exception:
+            active_slot = None
+
         return render_template(
             "teacher_dashboard.html",
             teacher=teacher,
@@ -4680,6 +4792,7 @@ def teacher_dashboard():
             attendance_count=row_get(attendance_count, "count", 0) or 0,
             recent_records=records,
             subject_id=subject_id,
+            active_slot=active_slot,
         )
     except Exception as e:
         print(f"[teacher_dashboard] ERROR: {repr(e)}")
@@ -6401,6 +6514,49 @@ def _rows_to_dataframe(rows):
             "branch_name": row_get(r, "branch_name"),
         })
     return _pd.DataFrame(data)
+
+
+def _register_timetable_routes_and_log():
+    """Register timetable routes at import time and emit startup diagnostics."""
+    try:
+        import timetable as _timetable
+    except Exception as e:
+        print(f"[timetable] Timetable module unavailable: {type(e).__name__}: {str(e)}")
+        return False
+
+    try:
+        _timetable.register_routes(app, get_db)
+        print("[timetable] Timetable routes loaded")
+    except Exception as e:
+        print(f"[timetable] Failed to register timetable routes: {type(e).__name__}: {str(e)}")
+        return False
+
+    route_lines = []
+    for rule in sorted(app.url_map.iter_rules(), key=lambda r: (r.rule, r.endpoint)):
+        methods = ",".join(sorted(m for m in rule.methods if m not in {"HEAD", "OPTIONS"}))
+        route_lines.append(f"[routes] {rule.rule} -> {rule.endpoint} [{methods}]")
+
+    print(f"[routes] Total registered Flask routes: {len(route_lines)}")
+    for line in route_lines:
+        print(line)
+
+    try:
+        db = get_db()
+        try:
+            _timetable.ensure_timetable_tables(db)
+            row = db.execute("SELECT COUNT(1) AS c FROM timetable_slots").fetchone()
+            count = row_get(row, "c", 0)
+            print("[timetable] Database tables verified")
+            print(f"[timetable] Timetable entries detected: {count}")
+        finally:
+            try:
+                db.close()
+            except Exception:
+                pass
+    except Exception as e:
+        print(f"[timetable] Failed to verify timetable tables: {type(e).__name__}: {str(e)}")
+
+    return True
 
 
 @app.route("/reports/export.xlsx")

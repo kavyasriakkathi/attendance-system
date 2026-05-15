@@ -4,7 +4,7 @@ import sqlite3
 from datetime import datetime, time
 from typing import List, Dict, Optional
 
-from flask import request, redirect, url_for, render_template, flash, jsonify
+from flask import request, redirect, url_for, render_template, flash, jsonify, session, render_template_string
 
 # Parsers are optional imports - provide helpful messages if missing
 try:
@@ -41,9 +41,34 @@ CREATE_TABLES_SQL = [
 ]
 
 
+CREATE_NORMALIZED_SQL = [
+    """
+    CREATE TABLE IF NOT EXISTS timetable_entries (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        branch_id INTEGER,
+        section TEXT,
+        semester INTEGER,
+        day TEXT,
+        start_time TEXT,
+        end_time TEXT,
+        subject_id INTEGER,
+        teacher_id INTEGER,
+        is_lab INTEGER DEFAULT 0,
+        room TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    """,
+]
+
+
 def ensure_timetable_tables(db):
     for sql in CREATE_TABLES_SQL:
         db.execute(sql)
+    for sql in CREATE_NORMALIZED_SQL:
+        try:
+            db.execute(sql)
+        except Exception:
+            pass
     try:
         db.commit()
     except Exception:
@@ -202,6 +227,68 @@ def import_slots(db, slots: List[Dict]):
     return inserted
 
 
+def import_slots_normalized(db, slots: List[Dict]):
+    """Insert slots into normalized `timetable_entries` table when possible.
+    Best-effort: resolve branch -> branches.id, subject -> subjects.id, faculty -> teachers.id.
+    Falls back to leaving subject_id/teacher_id NULL if resolution fails.
+    Returns number inserted.
+    """
+    placeholder = "?"
+    inserted = 0
+    for s in slots:
+        start = s.get("start_time")
+        end = s.get("end_time")
+        if isinstance(start, tuple):
+            st, et = start
+        else:
+            st = start if isinstance(start, str) else ""
+            et = end if isinstance(end, str) else ""
+
+        bname = (s.get("branch") or "").strip()
+        sec = (s.get("section") or "").strip()
+        sem = s.get("semester")
+        day = (s.get("day") or "").strip()
+        subj_name = (s.get("subject_name") or "").strip()
+        fac_name = (s.get("faculty_name") or "").strip()
+        is_lab = int(bool(s.get("is_lab")))
+        room = (s.get("room") or "").strip()
+
+        branch_id = None
+        try:
+            row = db.execute("SELECT id FROM branches WHERE LOWER(name)=LOWER(?) LIMIT 1", (bname,)).fetchone()
+            branch_id = row[0] if row else None
+        except Exception:
+            branch_id = None
+
+        subject_id = None
+        try:
+            row = db.execute("SELECT id FROM subjects WHERE LOWER(name)=LOWER(?) LIMIT 1", (subj_name,)).fetchone()
+            subject_id = row[0] if row else None
+        except Exception:
+            subject_id = None
+
+        teacher_id = None
+        try:
+            row = db.execute("SELECT id FROM teachers WHERE LOWER(name)=LOWER(?) LIMIT 1", (fac_name,)).fetchone()
+            teacher_id = row[0] if row else None
+        except Exception:
+            teacher_id = None
+
+        try:
+            db.execute(
+                "INSERT INTO timetable_entries (branch_id, section, semester, day, start_time, end_time, subject_id, teacher_id, is_lab, room) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (branch_id, sec, sem, day, st or "", et or "", subject_id, teacher_id, is_lab, room),
+            )
+            inserted += 1
+        except Exception:
+            pass
+    try:
+        db.commit()
+    except Exception:
+        pass
+    return inserted
+
+
 # --- Lookup helpers --------------------------------------------------------
 
 def get_current_slot(db, branch: str, section: str, now: Optional[datetime] = None):
@@ -210,6 +297,22 @@ def get_current_slot(db, branch: str, section: str, now: Optional[datetime] = No
     weekday = now.strftime("%A")
     cur_time = now.strftime("%H:%M")
     placeholder = "?"
+    # Prefer normalized timetable_entries when available (uses branch_id)
+    try:
+        branch_row = db.execute("SELECT id FROM branches WHERE LOWER(name)=LOWER(?) LIMIT 1", (branch,)).fetchone()
+        branch_id = branch_row[0] if branch_row else None
+    except Exception:
+        branch_id = None
+
+    if branch_id is not None:
+        rows = db.execute(
+            "SELECT te.*, s.name AS subject_name, t.name AS teacher_name FROM timetable_entries te LEFT JOIN subjects s ON te.subject_id = s.id LEFT JOIN teachers t ON te.teacher_id = t.id WHERE te.branch_id = ? AND COALESCE(te.section, '') = ? AND te.day = ? AND te.start_time <= ? AND te.end_time >= ? ORDER BY te.start_time LIMIT 1",
+            (branch_id, section or "", weekday, cur_time, cur_time),
+        ).fetchall()
+        if rows:
+            return rows[0]
+
+    # Fallback to legacy timetable_slots text-based lookup
     rows = db.execute(
         "SELECT * FROM timetable_slots WHERE branch = ? AND section = ? AND day = ? AND start_time <= ? AND end_time >= ? ORDER BY start_time LIMIT 1",
         (branch, section, weekday, cur_time, cur_time),
@@ -221,7 +324,61 @@ def get_current_slot(db, branch: str, section: str, now: Optional[datetime] = No
 
 # --- Routes registration ---------------------------------------------------
 
-def register_routes(app):
+def register_routes(app, db_getter=None):
+    globals()["get_db"] = db_getter
+
+    @app.route("/timetable")
+    def timetable_home():
+        db = None
+        rows_count = 0
+        table_ready = False
+        try:
+            if db_getter is None:
+                raise RuntimeError("Database getter is not configured")
+            db = db_getter()
+            ensure_timetable_tables(db)
+            row = db.execute("SELECT COUNT(1) AS c FROM timetable_slots").fetchone()
+            rows_count = int(row["c"] if row and row["c"] is not None else 0)
+            table_ready = True
+        except Exception as e:
+            logger.exception("Failed to render timetable status page")
+            return render_template_string(
+                """
+                {% extends "layout.html" %}
+                {% block content %}
+                <div class="card">
+                    <h1>Timetable Status</h1>
+                    <p>Timetable routes are loaded, but the database check failed.</p>
+                    <p>{{ error }}</p>
+                    <p><a class="button" href="{{ url_for('timetable_manage') }}">Open timetable management</a></p>
+                </div>
+                {% endblock %}
+                """,
+                error=str(e),
+            )
+        finally:
+            if db:
+                try:
+                    db.close()
+                except Exception:
+                    pass
+
+        return render_template_string(
+            """
+            {% extends "layout.html" %}
+            {% block content %}
+            <div class="card">
+                <h1>Timetable Status</h1>
+                <p>Timetable routes are loaded.</p>
+                <p>Database tables: {{ 'ready' if table_ready else 'missing' }}</p>
+                <p>Timetable entries detected: {{ rows_count }}</p>
+                <p><a class="button" href="{{ url_for('timetable_manage') }}">Open timetable management</a></p>
+            </div>
+            {% endblock %}
+            """,
+            table_ready=table_ready,
+            rows_count=rows_count,
+        )
     @app.route("/timetable/manage", methods=("GET", "POST"))
     def timetable_manage():
         if session.get("role") != "admin":
@@ -249,7 +406,12 @@ def register_routes(app):
                     flash("Unsupported file type or missing parser dependencies.", "error")
                     return redirect(url_for("timetable_manage"))
                 inserted = import_slots(db, slots)
-                flash(f"Imported {inserted} timetable slots.", "success")
+                # Also populate normalized timetable_entries where possible
+                try:
+                    n_inserted = import_slots_normalized(db, slots)
+                except Exception:
+                    n_inserted = 0
+                flash(f"Imported {inserted} timetable slots. Normalized entries created: {n_inserted}.", "success")
             except Exception as e:
                 logger.exception("Failed to import timetable")
                 flash(f"Failed to import timetable: {e}", "error")
@@ -257,7 +419,12 @@ def register_routes(app):
 
         # GET: show simple management UI
         rows = db.execute("SELECT * FROM timetable_slots ORDER BY day, start_time").fetchall()
-        return render_template("timetable_manage.html", rows=rows)
+        # show normalized preview when available
+        try:
+            entries = db.execute("SELECT te.*, s.name AS subject_name, t.name AS teacher_name, b.name AS branch_name FROM timetable_entries te LEFT JOIN subjects s ON te.subject_id = s.id LEFT JOIN teachers t ON te.teacher_id = t.id LEFT JOIN branches b ON te.branch_id = b.id ORDER BY te.day, te.start_time").fetchall()
+        except Exception:
+            entries = []
+        return render_template("timetable_manage.html", rows=rows, entries=entries)
 
     @app.route("/timetable/active")
     def timetable_active():
@@ -304,47 +471,95 @@ def register_routes(app):
         slot = get_current_slot(db, branch, section)
         if not slot:
             return jsonify({"ok": False, "error": "no active slot"}), 400
-        # Load students
-        placeholder = get_placeholder()
-        students = db.execute(f"SELECT id, name FROM students WHERE branch_id = (SELECT id FROM branches WHERE name = {placeholder}) AND section = {placeholder}", (branch, section)).fetchall()
-        # Resolve subject id by matching slot subject_name to subjects table
-        subject_name = row_get(slot, 'subject_name')
-        subject_id = None
-        try:
-            if subject_name:
-                sub_row = db.execute("SELECT id FROM subjects WHERE LOWER(name)=LOWER(?) LIMIT 1", (subject_name,)).fetchone()
-                if sub_row:
-                    subject_id = row_get(sub_row, 'id')
-        except Exception:
-            pass
 
-        # Prevent duplicate attendance for the same subject today
+        # Determine subject_id / teacher_id / branch_id from normalized entry when present
+        try:
+            # slot may be sqlite3.Row or dict-like
+            subject_id = slot.get("subject_id") if isinstance(slot, dict) else (slot["subject_id"] if "subject_id" in slot.keys() else None)
+        except Exception:
+            subject_id = None
+
+        # Resolve subject_id if not present but subject_name is available
+        if not subject_id:
+            try:
+                subject_name = slot.get("subject_name") if isinstance(slot, dict) else (slot["subject_name"] if "subject_name" in slot.keys() else None)
+            except Exception:
+                subject_name = None
+            try:
+                if subject_name:
+                    sub_row = db.execute("SELECT id FROM subjects WHERE LOWER(name)=LOWER(?) LIMIT 1", (subject_name,)).fetchone()
+                    if sub_row:
+                        subject_id = sub_row[0] if isinstance(sub_row, tuple) or isinstance(sub_row, list) else sub_row["id"]
+            except Exception:
+                subject_id = None
+
+        # Determine branch_id and students list
+        try:
+            branch_id = slot.get("branch_id") if isinstance(slot, dict) else (slot["branch_id"] if "branch_id" in slot.keys() else None)
+        except Exception:
+            branch_id = None
+
+        if branch_id:
+            students = db.execute("SELECT id, name FROM students WHERE branch_id = ? AND (COALESCE(section, '') = COALESCE(?, '')) ORDER BY name", (branch_id, section or "")).fetchall()
+        else:
+            # fallback to previous name-based lookup
+            students = db.execute("SELECT s.id, s.name FROM students s JOIN branches b ON s.branch_id = b.id WHERE b.name = ? AND s.section = ? ORDER BY s.name", (branch, section)).fetchall()
+
+        # Use today's date and default period=1 for current slot marking
+        from datetime import date as _d
+        today_str = _d.today().isoformat()
+        period = 1
+
+        # Prevent duplicate attendance for the same subject today+period
         duplicate_check = False
         try:
             if subject_id:
-                dup_row = db.execute("SELECT COUNT(1) AS c FROM attendance WHERE subject_id = ? AND DATE(timestamp)=DATE('now')", (subject_id,)).fetchone()
-                if row_get(dup_row, 'c', 0) > 0:
+                dup_row = db.execute("SELECT COUNT(1) AS c FROM attendance WHERE subject_id = ? AND date = ? AND period = ?", (subject_id, today_str, period)).fetchone()
+                dup_count = dup_row[0] if dup_row is not None else 0
+                if int(dup_count) > 0:
                     duplicate_check = True
         except Exception:
-            pass
+            duplicate_check = False
 
         if duplicate_check:
             return jsonify({"ok": False, "error": "attendance already recorded for this subject today"}), 400
 
+        teacher_id = session.get("teacher_id")
+
         if action == "bulk_absent":
-            # Mark all absent for this slot
+            marked = 0
             for s in students:
-                db.execute("INSERT INTO attendance (student_id, subject_id, status, timestamp) VALUES (?, ?, ?, datetime('now'))", (row_get(s, "id"), subject_id, "Absent"))
-            db.commit()
-            return jsonify({"ok": True, "marked": len(students)})
+                sid = s[0] if not isinstance(s, dict) else s.get("id")
+                try:
+                    db.execute(
+                        "INSERT INTO attendance (student_id, branch_id, branch_section, section, subject_id, teacher_id, subject_name, date, period, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (sid, branch_id or None, None, section or None, subject_id or None, teacher_id or None, (slot.get("subject_name") if isinstance(slot, dict) else None), today_str, period, "Absent"),
+                    )
+                    marked += 1
+                except Exception:
+                    pass
+            try:
+                db.commit()
+            except Exception:
+                pass
+            return jsonify({"ok": True, "marked": marked})
         elif action in ("present", "absent"):
             student_ids = data.get("student_ids", [])
             marked = 0
             for sid in student_ids:
                 st = "Present" if action == "present" else "Absent"
-                db.execute("INSERT INTO attendance (student_id, subject_id, status, timestamp) VALUES (?, ?, ?, datetime('now'))", (sid, subject_id, st))
-                marked += 1
-            db.commit()
+                try:
+                    db.execute(
+                        "INSERT INTO attendance (student_id, branch_id, branch_section, section, subject_id, teacher_id, subject_name, date, period, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (sid, branch_id or None, None, section or None, subject_id or None, teacher_id or None, (slot.get("subject_name") if isinstance(slot, dict) else None), today_str, period, st),
+                    )
+                    marked += 1
+                except Exception:
+                    pass
+            try:
+                db.commit()
+            except Exception:
+                pass
             return jsonify({"ok": True, "marked": marked})
         else:
             return jsonify({"ok": False, "error": "unknown action"}), 400
