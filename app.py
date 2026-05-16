@@ -113,7 +113,7 @@ app.config["SECRET_KEY"] = os.getenv("SECRET_KEY", app.config.get("SECRET_KEY", 
 
 
 @app.route("/debug/env")
-def debug_env():
+def debug_env_info():
     # Temporary debug route to inspect env suitability (admin-only in production)
     return {
         "has_secret": bool(os.getenv("SECRET_KEY")),
