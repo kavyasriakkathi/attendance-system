@@ -6,6 +6,8 @@ from datetime import datetime, time, timezone
 from typing import List, Dict, Optional
 import traceback
 import difflib
+import json
+import tracemalloc
 
 from flask import request, redirect, url_for, render_template, flash, jsonify, session, render_template_string
 
@@ -816,6 +818,15 @@ def import_slots(db, slots: List[Dict]):
     preview_path = os.path.join(os.path.dirname(__file__), "uploads", "last_import_debug.jsonl")
     os.makedirs(os.path.dirname(preview_path), exist_ok=True)
     preview_written = 0
+    batch_commit_counts = 0
+    progress_log_interval = max(50, BATCH_INSERT_SIZE)
+    start_time = time.time()
+    use_tracemalloc = False
+    try:
+        tracemalloc.start()
+        use_tracemalloc = True
+    except Exception:
+        use_tracemalloc = False
 
     try:
         logger.info("import_slots: parsed_rows_count=%d", len(slots))
@@ -891,9 +902,19 @@ def import_slots(db, slots: List[Dict]):
                 if inserted_since_commit >= BATCH_INSERT_SIZE:
                     try:
                         db.commit()
+                        batch_commit_counts += 1
+                        # write a lightweight batch commit diagnostic line
+                        try:
+                            with open(preview_path, "a", encoding="utf-8") as pf:
+                                pf.write(json.dumps({"type": "batch_commit", "batch_count": inserted_since_commit, "inserted_total": counters.get("inserted"), "timestamp": time.time()}, default=str) + "\n")
+                        except Exception:
+                            logger.exception("Failed to write batch commit diagnostic")
                     except Exception:
                         logger.exception("DB commit failed during batch commit in import_slots")
                     inserted_since_commit = 0
+                # periodic progress log
+                if row_index % progress_log_interval == 0:
+                    logger.info("import_slots progress: processed=%d inserted=%d skipped=%d", row_index, counters.get("inserted"), counters.get("skipped_total"))
             except Exception:
                 counters["failures"] += 1
                 logger.exception("Import failed at row %s | row=%s", row_index, row)
@@ -911,6 +932,13 @@ def import_slots(db, slots: List[Dict]):
 
         try:
             db.commit()
+            if inserted_since_commit > 0:
+                batch_commit_counts += 1
+                try:
+                    with open(preview_path, "a", encoding="utf-8") as pf:
+                        pf.write(json.dumps({"type": "batch_commit", "batch_count": inserted_since_commit, "inserted_total": counters.get("inserted"), "timestamp": time.time()}, default=str) + "\n")
+                except Exception:
+                    logger.exception("Failed to write final batch commit diagnostic")
         except Exception:
             logger.exception("DB commit failed after import_slots")
             logger.error(traceback.format_exc())
@@ -925,7 +953,16 @@ def import_slots(db, slots: List[Dict]):
         "import_slots summary: %s",
         {k: counters.get(k) for k in ("total", "parsed", "inserted", "skipped_total", "skipped_invalid", "skipped_duplicate", "failures", "invalid_section", "normalization_failures")},
     )
-    return {"counters": counters, "skipped_rows": skipped_rows, "preview_path": preview_path if preview_written else None}
+    # capture peak memory if tracemalloc was used
+    peak = None
+    try:
+        if use_tracemalloc:
+            current, peak = tracemalloc.get_traced_memory()
+            tracemalloc.stop()
+    except Exception:
+        peak = None
+
+    return {"counters": counters, "skipped_rows": skipped_rows, "preview_path": preview_path if preview_written else None, "batch_commits": batch_commit_counts, "elapsed_seconds": time.time() - start_time, "memory_peak_bytes": peak}
 
 
 def import_slots_normalized(db, slots: List[Dict]):
@@ -954,6 +991,15 @@ def import_slots_normalized(db, slots: List[Dict]):
     preview_path = os.path.join(os.path.dirname(__file__), "uploads", "last_import_debug.jsonl")
     os.makedirs(os.path.dirname(preview_path), exist_ok=True)
     preview_written = 0
+    batch_commit_counts = 0
+    progress_log_interval = max(50, BATCH_INSERT_SIZE)
+    start_time = time.time()
+    use_tracemalloc = False
+    try:
+        tracemalloc.start()
+        use_tracemalloc = True
+    except Exception:
+        use_tracemalloc = False
     try:
         inserted_since_commit = 0
         for row_index, s in enumerate(slots, start=1):
@@ -1009,9 +1055,17 @@ def import_slots_normalized(db, slots: List[Dict]):
                 if inserted_since_commit >= BATCH_INSERT_SIZE:
                     try:
                         db.commit()
+                        batch_commit_counts += 1
+                        try:
+                            with open(preview_path, "a", encoding="utf-8") as pf:
+                                pf.write(json.dumps({"type": "batch_commit_normalized", "batch_count": inserted_since_commit, "inserted_total": counters.get("inserted"), "timestamp": time.time()}, default=str) + "\n")
+                        except Exception:
+                            logger.exception("Failed to write normalized batch commit diagnostic")
                     except Exception:
                         logger.exception("DB commit failed during batch commit in import_slots_normalized")
                     inserted_since_commit = 0
+                if row_index % progress_log_interval == 0:
+                    logger.info("import_slots_normalized progress: processed=%d inserted=%d skipped=%d", row_index, counters.get("inserted"), counters.get("skipped_total"))
             except Exception:
                 counters["failures"] += 1
                 counters["normalization_failures"] += 1
@@ -1119,6 +1173,13 @@ def import_slots_normalized(db, slots: List[Dict]):
 
         try:
             db.commit()
+            if inserted_since_commit > 0:
+                batch_commit_counts += 1
+                try:
+                    with open(preview_path, "a", encoding="utf-8") as pf:
+                        pf.write(json.dumps({"type": "batch_commit_normalized", "batch_count": inserted_since_commit, "inserted_total": counters.get("inserted"), "timestamp": time.time()}, default=str) + "\n")
+                except Exception:
+                    logger.exception("Failed to write final normalized batch commit diagnostic")
         except Exception:
             logger.exception("DB commit failed after import_slots_normalized")
             logger.error(traceback.format_exc())
@@ -1133,7 +1194,15 @@ def import_slots_normalized(db, slots: List[Dict]):
         "import_slots_normalized summary: %s",
         {k: counters.get(k) for k in ("total", "parsed", "inserted", "skipped_total", "skipped_branch", "skipped_unresolved_subject", "skipped_unresolved_teacher", "skipped_invalid", "skipped_duplicate", "failures", "missing_subjects", "missing_teachers", "invalid_section", "normalization_failures")},
     )
-    return {"counters": counters, "skipped_rows": skipped_rows, "preview_path": preview_path if preview_written else None}
+    peak = None
+    try:
+        if use_tracemalloc:
+            current, peak = tracemalloc.get_traced_memory()
+            tracemalloc.stop()
+    except Exception:
+        peak = None
+
+    return {"counters": counters, "skipped_rows": skipped_rows, "preview_path": preview_path if preview_written else None, "batch_commits": batch_commit_counts, "elapsed_seconds": time.time() - start_time, "memory_peak_bytes": peak}
 
 
 # --- Lookup helpers --------------------------------------------------------
