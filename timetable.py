@@ -330,6 +330,112 @@ def parse_docx_table(path: str) -> List[Dict]:
     return slots
 
 
+def parse_docx_grid(path: str) -> List[Dict]:
+    """Parse grid-style DOCX timetables.
+
+    Expects a table where the first column is the day and the first row
+    contains time slots. Attempts to extract subject (and optional faculty)
+    from each cell and convert into slot dicts.
+    """
+    if docx is None:
+        raise RuntimeError("python-docx is not installed. Install with: pip install python-docx")
+    doc = docx.Document(path)
+    slots = []
+    # Try to infer branch/section from title or filename
+    title_text = " ".join([p.text for p in doc.paragraphs[:3] if p.text])
+    base = os.path.splitext(os.path.basename(path))[0]
+    inferred_branch = ""
+    inferred_section = ""
+    # Heuristics: look for patterns like 'B.TECH I-2' or similar
+    m = re.search(r"([A-Za-z0-9\.\s&/]+)\s+(I\s*-?\d+|I[-\s]?\d+|II|III|IV|I-\d+)", title_text, flags=re.I)
+    if m:
+        inferred_branch = m.group(1).strip()
+        inferred_section = m.group(2).strip()
+    else:
+        parts = re.split(r"[_\-\s]+", base)
+        if parts:
+            inferred_branch = parts[0]
+            if len(parts) > 1:
+                inferred_section = parts[1]
+
+    for table_index, table in enumerate(doc.tables):
+        if not table.rows:
+            continue
+        # header row (assume first row) contains times starting from column 1
+        headers = [_clean_text(c.text) for c in table.rows[0].cells]
+        day_col = None
+        time_cols = []
+        for i, h in enumerate(headers):
+            low = h.lower()
+            if 'day' in low or 'day/time' in low or 'day time' in low:
+                day_col = i
+            else:
+                # recognize time-like headers by digits or a dash
+                if re.search(r"\d", h) or '-' in h:
+                    time_cols.append(i)
+        if day_col is None:
+            day_col = 0
+        if not time_cols:
+            time_cols = [i for i in range(len(headers)) if i != day_col]
+
+        for row_index, row in enumerate(table.rows[1:], start=1):
+            day = _clean_text(row.cells[day_col].text)
+            if not day:
+                continue
+            for col in time_cols:
+                try:
+                    cell_text = _clean_text(row.cells[col].text)
+                except Exception:
+                    cell_text = ''
+                if not cell_text:
+                    continue
+                # header time range
+                head = _clean_text(table.rows[0].cells[col].text)
+                start_time, end_time = _split_time_range(head)
+                # split multiple subjects inside the cell
+                subjects = _split_subjects(cell_text)
+                for subj in subjects:
+                    s_text = subj
+                    faculty = ""
+                    # try to extract faculty if cell has newline or a dash
+                    if '\n' in cell_text:
+                        lines = [l.strip() for l in cell_text.splitlines() if l.strip()]
+                        if len(lines) >= 2:
+                            s_text = _clean_text(lines[0])
+                            faculty = _clean_text(lines[1])
+                    else:
+                        # patterns like 'SUBJECT - FACULTY' or 'SUBJECT / FACULTY'
+                        parts = re.split(r"[-/\\r\\n]+", subj)
+                        if len(parts) >= 2:
+                            s_text = _clean_text(parts[0])
+                            faculty = _clean_text(parts[1])
+
+                    slot = {
+                        'branch': inferred_branch or base,
+                        'section': inferred_section or 'ALL',
+                        'semester': None,
+                        'day': day,
+                        'start_time': start_time or '',
+                        'end_time': end_time or '',
+                        'subject_name': s_text,
+                        'faculty_name': faculty,
+                        'is_lab': int(bool(_row_has_token(s_text, 'lab', 'practical') or _row_has_token(cell_text, 'lab', 'practical'))),
+                        'room': '',
+                    }
+                    if _valid_slot_row(slot):
+                        slots.append(slot)
+                    else:
+                        # try a relaxed insert by filling branch/section defaults
+                        slot['branch'] = slot.get('branch') or base
+                        slot['section'] = slot.get('section') or 'ALL'
+                        if _valid_slot_row(slot):
+                            slots.append(slot)
+                        else:
+                            logger.info("parse_docx_grid skipped invalid slot: %s", slot)
+    logger.info("parse_docx_grid summary: tables=%d parsed_slots=%d", len(doc.tables), len(slots))
+    return slots
+
+
 def parse_pdf_text(path: str) -> str:
     if pdfplumber is None:
         raise RuntimeError("pdfplumber is not installed. Install with: pip install pdfplumber")
@@ -1109,6 +1215,13 @@ def register_routes(app, db_getter=None):
                 else:
                     flash("Unsupported file type or missing parser dependencies.", "error")
                     return redirect(url_for("timetable_manage"))
+
+                if not slots and ext in (".docx",) and docx is not None:
+                    # try grid-style DOCX parsing as a fallback
+                    try:
+                        slots = parse_docx_grid(dest)
+                    except Exception:
+                        logger.exception("parse_docx_grid failed")
 
                 if not slots:
                     logger.warning("Timetable import parsed zero rows from file=%s ext=%s", filename, ext)
