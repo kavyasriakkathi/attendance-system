@@ -6798,5 +6798,6 @@ if __name__ == "__main__":
         register_routes(app)
     except ImportError:
         print("[INFO] timetable module not found; skipping timetable routes")
-    
-    socketio.run(app, host="0.0.0.0", port=10000, debug=True)
+
+    port = int(os.environ.get("PORT", 10000))
+    socketio.run(app, host="0.0.0.0", port=port, debug=False)
