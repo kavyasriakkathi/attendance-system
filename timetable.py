@@ -22,6 +22,10 @@ except Exception:
 
 logger = logging.getLogger("app.timetable")
 
+# Tunables for import batching and preview limits
+BATCH_INSERT_SIZE = int(os.environ.get("TIMETABLE_BATCH_SIZE", 50))
+PREVIEW_ROW_CAP = int(os.environ.get("TIMETABLE_PREVIEW_CAP", 500))
+
 # Database helper functions - use existing app.get_db() pattern where called from app.py
 
 def _is_postgres_db(db) -> bool:
@@ -809,9 +813,13 @@ def import_slots(db, slots: List[Dict]):
         "normalization_failures": 0,
     }
     skipped_rows = []
+    preview_path = os.path.join(os.path.dirname(__file__), "uploads", "last_import_debug.jsonl")
+    os.makedirs(os.path.dirname(preview_path), exist_ok=True)
+    preview_written = 0
 
     try:
         logger.info("import_slots: parsed_rows_count=%d", len(slots))
+        inserted_since_commit = 0
         for row_index, s in enumerate(slots, start=1):
             counters["parsed"] += 1
             row = {
@@ -837,7 +845,17 @@ def import_slots(db, slots: List[Dict]):
                     counters["invalid_section"] += 1
                     reason = "missing_section"
                 logger.info("import_slots skipped row %s: reason=%s normalized=%s", row_index, reason, row)
-                skipped_rows.append({"index": row_index, "raw": s, "normalized": row, "reason": reason})
+                # stream skipped row to preview file (capped)
+                if preview_written < PREVIEW_ROW_CAP:
+                    try:
+                        with open(preview_path, "a", encoding="utf-8") as pf:
+                            pf.write(json.dumps({"index": row_index, "raw": s, "normalized": row, "reason": reason}, default=str) + "\n")
+                        preview_written += 1
+                    except Exception:
+                        logger.exception("Failed to write skipped preview line")
+                # keep a small in-memory sample for immediate return
+                if len(skipped_rows) < 20:
+                    skipped_rows.append({"index": row_index, "raw": s, "normalized": row, "reason": reason})
                 continue
 
             duplicate_where = "COALESCE(branch, '') = COALESCE(%s, '') AND COALESCE(section, '') = COALESCE(%s, '') AND COALESCE(CAST(semester AS TEXT), '') = COALESCE(CAST(%s AS TEXT), '') AND COALESCE(day, '') = COALESCE(%s, '') AND COALESCE(start_time, '') = COALESCE(%s, '') AND COALESCE(end_time, '') = COALESCE(%s, '') AND COALESCE(subject_name, '') = COALESCE(%s, '') AND COALESCE(faculty_name, '') = COALESCE(%s, '') AND COALESCE(room, '') = COALESCE(%s, '')"
@@ -868,11 +886,27 @@ def import_slots(db, slots: List[Dict]):
                     (row['branch'], row['section'], row['semester'], row['day'], row['start_time'], row['end_time'], row['subject_name'], row['faculty_name'], row['is_lab'], row['room']),
                 )
                 counters["inserted"] += 1
+                inserted_since_commit += 1
+                # commit in batches to reduce transaction memory
+                if inserted_since_commit >= BATCH_INSERT_SIZE:
+                    try:
+                        db.commit()
+                    except Exception:
+                        logger.exception("DB commit failed during batch commit in import_slots")
+                    inserted_since_commit = 0
             except Exception:
                 counters["failures"] += 1
                 logger.exception("Import failed at row %s | row=%s", row_index, row)
                 logger.error(traceback.format_exc())
-                skipped_rows.append({"index": row_index, "raw": s, "normalized": row, "reason": "insert_exception"})
+                if preview_written < PREVIEW_ROW_CAP:
+                    try:
+                        with open(preview_path, "a", encoding="utf-8") as pf:
+                            pf.write(json.dumps({"index": row_index, "raw": s, "normalized": row, "reason": "insert_exception"}, default=str) + "\n")
+                        preview_written += 1
+                    except Exception:
+                        logger.exception("Failed to write insert_exception preview line")
+                if len(skipped_rows) < 20:
+                    skipped_rows.append({"index": row_index, "raw": s, "normalized": row, "reason": "insert_exception"})
                 raise
 
         try:
@@ -891,7 +925,7 @@ def import_slots(db, slots: List[Dict]):
         "import_slots summary: %s",
         {k: counters.get(k) for k in ("total", "parsed", "inserted", "skipped_total", "skipped_invalid", "skipped_duplicate", "failures", "invalid_section", "normalization_failures")},
     )
-    return {"counters": counters, "skipped_rows": skipped_rows}
+    return {"counters": counters, "skipped_rows": skipped_rows, "preview_path": preview_path if preview_written else None}
 
 
 def import_slots_normalized(db, slots: List[Dict]):
@@ -917,7 +951,11 @@ def import_slots_normalized(db, slots: List[Dict]):
         "normalization_failures": 0,
     }
     skipped_rows = []
+    preview_path = os.path.join(os.path.dirname(__file__), "uploads", "last_import_debug.jsonl")
+    os.makedirs(os.path.dirname(preview_path), exist_ok=True)
+    preview_written = 0
     try:
+        inserted_since_commit = 0
         for row_index, s in enumerate(slots, start=1):
             counters["parsed"] += 1
             bname = _clean_text(s.get("branch"))
@@ -950,22 +988,45 @@ def import_slots_normalized(db, slots: List[Dict]):
                 counters["invalid_section"] += 1
                 reason = "invalid_row"
                 logger.info("import_slots_normalized skipped row %s: reason=%s normalized=%s", row_index, reason, normalized_row)
-                skipped_rows.append({"index": row_index, "raw": s, "normalized": normalized_row, "reason": reason})
+                if preview_written < PREVIEW_ROW_CAP:
+                    try:
+                        with open(preview_path, "a", encoding="utf-8") as pf:
+                            pf.write(json.dumps({"index": row_index, "raw": s, "normalized": normalized_row, "reason": reason}, default=str) + "\n")
+                        preview_written += 1
+                    except Exception:
+                        logger.exception("Failed to write normalized skipped preview line")
+                if len(skipped_rows) < 20:
+                    skipped_rows.append({"index": row_index, "raw": s, "normalized": normalized_row, "reason": reason})
                 continue
-
-            branch_id = None
             try:
-                row = _db_execute(db, "SELECT id FROM branches WHERE LOWER(TRIM(name))=LOWER(TRIM(%s)) LIMIT 1", (bname,)).fetchone()
-                branch_id = row[0] if row and not hasattr(row, 'keys') else (row['id'] if row else None)
+                _db_execute(
+                    db,
+                    "INSERT INTO timetable_entries (branch_id, section, semester, day, start_time, end_time, subject_id, teacher_id, is_lab, room) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                    (row['branch_id'], row['section'], row['semester'], row['day'], row['start_time'], row['end_time'], row['subject_id'], row['teacher_id'], row['is_lab'], row['room']),
+                )
+                counters["inserted"] += 1
+                inserted_since_commit += 1
+                if inserted_since_commit >= BATCH_INSERT_SIZE:
+                    try:
+                        db.commit()
+                    except Exception:
+                        logger.exception("DB commit failed during batch commit in import_slots_normalized")
+                    inserted_since_commit = 0
             except Exception:
-                branch_id = None
-
-            subject_id = None
-            try:
-                row = _db_execute(db, "SELECT id FROM subjects WHERE LOWER(name)=LOWER(%s) LIMIT 1", (subj_name,)).fetchone()
-                subject_id = row[0] if row and not hasattr(row, 'keys') else (row['id'] if row else None)
-            except Exception:
-                subject_id = None
+                counters["failures"] += 1
+                counters["normalization_failures"] += 1
+                logger.exception("Import failed at normalized row %s | row=%s", row_index, normalized_row)
+                logger.error(traceback.format_exc())
+                if preview_written < PREVIEW_ROW_CAP:
+                    try:
+                        with open(preview_path, "a", encoding="utf-8") as pf:
+                            pf.write(json.dumps({"index": row_index, "raw": s, "normalized": normalized_row, "reason": "insert_exception"}, default=str) + "\n")
+                        preview_written += 1
+                    except Exception:
+                        logger.exception("Failed to write normalized insert_exception preview line")
+                if len(skipped_rows) < 20:
+                    skipped_rows.append({"index": row_index, "raw": s, "normalized": normalized_row, "reason": "insert_exception"})
+                raise
 
             teacher_id = None
             try:
@@ -1072,7 +1133,7 @@ def import_slots_normalized(db, slots: List[Dict]):
         "import_slots_normalized summary: %s",
         {k: counters.get(k) for k in ("total", "parsed", "inserted", "skipped_total", "skipped_branch", "skipped_unresolved_subject", "skipped_unresolved_teacher", "skipped_invalid", "skipped_duplicate", "failures", "missing_subjects", "missing_teachers", "invalid_section", "normalization_failures")},
     )
-    return {"counters": counters, "skipped_rows": skipped_rows}
+    return {"counters": counters, "skipped_rows": skipped_rows, "preview_path": preview_path if preview_written else None}
 
 
 # --- Lookup helpers --------------------------------------------------------
