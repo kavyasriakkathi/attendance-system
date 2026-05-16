@@ -1,0 +1,14 @@
+{
+  "parsed_slots": 0,
+  "inserted": 0,
+  "inserted_normalized": 0,
+  "skipped": 0,
+  "skipped_normalized": 0,
+  "batch_commits": [],
+  "elapsed_seconds": 0.0017669200897216797,
+  "memory_peak_bytes": 4923,
+  "problematic_merged_cells": [],
+  "faculty_issues_sample": [],
+  "preview_path": null,
+  "error": "PackageNotFoundError(\"Package not found at 'C:\\\\Users\\\\kavya\\\\OneDrive\\\\Desktop\\\\project 1\\\\uploads\\\\timetable_upload.docx'\")"
+}
