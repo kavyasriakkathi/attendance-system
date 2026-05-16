@@ -1109,6 +1109,15 @@ def register_routes(app, db_getter=None):
                 else:
                     flash("Unsupported file type or missing parser dependencies.", "error")
                     return redirect(url_for("timetable_manage"))
+
+                if not slots:
+                    logger.warning("Timetable import parsed zero rows from file=%s ext=%s", filename, ext)
+                    flash(
+                        "No timetable rows were parsed from the uploaded file. Check that the DOCX/PDF contains a readable table with branch, section, day, time, and subject columns.",
+                        "error",
+                    )
+                    return redirect(url_for("timetable_manage"))
+
                 inserted_info = import_slots(db, slots)
                 normalized_info = import_slots_normalized(db, slots)
 
