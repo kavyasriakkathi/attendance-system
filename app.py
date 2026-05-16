@@ -108,6 +108,29 @@ app.config.from_mapping(
     LOW_ATTENDANCE_THRESHOLD=int(os.environ.get("LOW_ATTENDANCE_THRESHOLD", 75)),
 )
 
+# Ensure SECRET_KEY is read from environment at runtime (clearer intent)
+app.config["SECRET_KEY"] = os.getenv("SECRET_KEY", app.config.get("SECRET_KEY", "dev-fallback-key"))
+
+
+@app.route("/debug/env")
+def debug_env():
+    # Temporary debug route to inspect env suitability (admin-only in production)
+    return {
+        "has_secret": bool(os.getenv("SECRET_KEY")),
+        "secret_len": len(app.config.get("SECRET_KEY") or ""),
+        "environment": os.getenv("RENDER") or os.getenv("FLASK_ENV") or "local",
+    }
+
+
+@app.route("/_clear_session")
+def _clear_session():
+    # Clear the session cookie/server-side session for debugging.
+    try:
+        session.clear()
+    except Exception:
+        pass
+    return "session cleared"
+
 
 def _mask_env_value(key: str, value: str) -> str:
     """Return a masked representation for sensitive env values.

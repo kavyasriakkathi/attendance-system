@@ -25,6 +25,20 @@
         <button type="submit" class="button" style="background:#b91c1c;">Delete Timetable</button>
     </form>
 
+    <!-- Admin: bulk-resolve subjects/teachers -->
+    <form method="post" action="{{ url_for('timetable_admin_bulk_resolve') }}" style="margin-top:8px; display:flex; gap:8px; align-items:center;">
+        <label style="display:flex; gap:8px; align-items:center;"><input type="checkbox" name="create_missing_subjects" value="1"> Create missing subjects</label>
+        <button type="submit" class="button" style="background:var(--accent);">Bulk Resolve Subjects/Teachers</button>
+    </form>
+
+    {% if skipped_preview %}
+    <div class="card" style="margin-top:16px; border:1px solid #e5e7eb;">
+        <h2 style="margin-top:0;">Last Import Preview</h2>
+        <p style="margin:0 0 8px 0; color:var(--text-secondary);">Temporary preview of skipped/processed rows from the last upload.</p>
+        <pre style="white-space:pre-wrap; word-break:break-word; background:#f8fafc; padding:12px; border-radius:8px; max-height:320px; overflow:auto;">{{ skipped_preview }}</pre>
+    </div>
+    {% endif %}
+
     <hr>
     <div class="grid" style="grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 20px;">
         <div>

@@ -4,6 +4,8 @@ import sqlite3
 import re
 from datetime import datetime, time, timezone
 from typing import List, Dict, Optional
+import traceback
+import difflib
 
 from flask import request, redirect, url_for, render_template, flash, jsonify, session, render_template_string
 
@@ -685,12 +687,27 @@ def get_faculty_schedule(db, teacher_id, now: Optional[datetime] = None):
 # --- DB import --------------------------------------------------------------
 
 def import_slots(db, slots: List[Dict]):
-    inserted = 0
-    skipped = 0
-    failures = 0
+    """Import raw timetable slots into `timetable_slots` with verbose diagnostics.
+
+    Returns a dict: {"counters": {...}, "skipped_rows": [...]}
+    """
+    counters = {
+        "total": len(slots),
+        "parsed": 0,
+        "inserted": 0,
+        "skipped_total": 0,
+        "skipped_invalid": 0,
+        "skipped_duplicate": 0,
+        "failures": 0,
+        "invalid_section": 0,
+        "normalization_failures": 0,
+    }
+    skipped_rows = []
+
     try:
         logger.info("import_slots: parsed_rows_count=%d", len(slots))
-        for s in slots:
+        for row_index, s in enumerate(slots, start=1):
+            counters["parsed"] += 1
             row = {
                 "branch": _clean_text(s.get("branch")),
                 "section": _clean_text(s.get("section")),
@@ -703,54 +720,100 @@ def import_slots(db, slots: List[Dict]):
                 "is_lab": int(bool(s.get("is_lab"))),
                 "room": _clean_text(s.get("room")),
             }
+
+            logger.info("Processing row %s: raw=%s normalized=%s", row_index, s, row)
+
             if not _valid_slot_row(row):
-                skipped += 1
-                logger.info("import_slots skipped invalid row: %s", row)
+                counters["skipped_total"] += 1
+                counters["skipped_invalid"] += 1
+                reason = "invalid_row"
+                if not row.get("section"):
+                    counters["invalid_section"] += 1
+                    reason = "missing_section"
+                logger.info("import_slots skipped row %s: reason=%s normalized=%s", row_index, reason, row)
+                skipped_rows.append({"index": row_index, "raw": s, "normalized": row, "reason": reason})
                 continue
+
             duplicate_where = "COALESCE(branch, '') = COALESCE(%s, '') AND COALESCE(section, '') = COALESCE(%s, '') AND COALESCE(CAST(semester AS TEXT), '') = COALESCE(CAST(%s AS TEXT), '') AND COALESCE(day, '') = COALESCE(%s, '') AND COALESCE(start_time, '') = COALESCE(%s, '') AND COALESCE(end_time, '') = COALESCE(%s, '') AND COALESCE(subject_name, '') = COALESCE(%s, '') AND COALESCE(faculty_name, '') = COALESCE(%s, '') AND COALESCE(room, '') = COALESCE(%s, '')"
-            # SQLite gets the same query through _db_execute, which rewrites placeholders.
-            if _row_exists(
-                db,
-                "timetable_slots",
-                duplicate_where,
-                (row['branch'], row['section'], row['semester'], row['day'], row['start_time'], row['end_time'], row['subject_name'], row['faculty_name'], row['room']),
-            ):
-                skipped += 1
-                logger.info("import_slots skipped duplicate: %s", row)
-                continue
-            logger.info("import_slots inserting: %s", row)
-            # Use Postgres-style placeholders (%s) by default; _db_execute will adapt for sqlite
+            try:
+                if _row_exists(
+                    db,
+                    "timetable_slots",
+                    duplicate_where,
+                    (row['branch'], row['section'], row['semester'], row['day'], row['start_time'], row['end_time'], row['subject_name'], row['faculty_name'], row['room']),
+                ):
+                    counters["skipped_total"] += 1
+                    counters["skipped_duplicate"] += 1
+                    reason = "duplicate"
+                    logger.info("import_slots skipped duplicate row %s: %s", row_index, row)
+                    skipped_rows.append({"index": row_index, "raw": s, "normalized": row, "reason": reason})
+                    continue
+            except Exception:
+                counters["normalization_failures"] += 1
+                logger.exception("Duplicate check failed at row %s | row=%s", row_index, row)
+                logger.error(traceback.format_exc())
+                skipped_rows.append({"index": row_index, "raw": s, "normalized": row, "reason": "dup_check_exception"})
+                raise
+
             try:
                 _db_execute(
                     db,
                     "INSERT INTO timetable_slots (branch, section, semester, day, start_time, end_time, subject_name, faculty_name, is_lab, room) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
                     (row['branch'], row['section'], row['semester'], row['day'], row['start_time'], row['end_time'], row['subject_name'], row['faculty_name'], row['is_lab'], row['room']),
                 )
-                inserted += 1
+                counters["inserted"] += 1
             except Exception:
-                failures += 1
-                logger.exception("failed to insert slot row")
+                counters["failures"] += 1
+                logger.exception("Import failed at row %s | row=%s", row_index, row)
+                logger.error(traceback.format_exc())
+                skipped_rows.append({"index": row_index, "raw": s, "normalized": row, "reason": "insert_exception"})
+                raise
+
         try:
             db.commit()
         except Exception:
-            pass
+            logger.exception("DB commit failed after import_slots")
+            logger.error(traceback.format_exc())
+            raise
+
     except Exception:
         logger.exception("import_slots failed")
-    logger.info("import_slots summary: parsed_rows=%d inserted_rows=%d skipped_rows=%d failures=%d", len(slots), inserted, skipped, failures)
-    return inserted
+        logger.error(traceback.format_exc())
+        raise
+
+    logger.info(
+        "import_slots summary: %s",
+        {k: counters.get(k) for k in ("total", "parsed", "inserted", "skipped_total", "skipped_invalid", "skipped_duplicate", "failures", "invalid_section", "normalization_failures")},
+    )
+    return {"counters": counters, "skipped_rows": skipped_rows}
 
 
 def import_slots_normalized(db, slots: List[Dict]):
     """Insert slots into normalized `timetable_entries` table when possible.
     Best-effort: resolve branch -> branches.id, subject -> subjects.id, faculty -> teachers.id.
     Falls back to leaving subject_id/teacher_id NULL if resolution fails.
-    Returns number inserted.
+    Returns a dict: {"counters": {...}, "skipped_rows": [...]}
     """
-    inserted = 0
-    skipped = 0
-    failures = 0
+    counters = {
+        "total": len(slots),
+        "parsed": 0,
+        "inserted": 0,
+        "skipped_total": 0,
+        "skipped_branch": 0,
+        "skipped_unresolved_subject": 0,
+        "skipped_unresolved_teacher": 0,
+        "skipped_invalid": 0,
+        "skipped_duplicate": 0,
+        "failures": 0,
+        "missing_subjects": 0,
+        "missing_teachers": 0,
+        "invalid_section": 0,
+        "normalization_failures": 0,
+    }
+    skipped_rows = []
     try:
-        for s in slots:
+        for row_index, s in enumerate(slots, start=1):
+            counters["parsed"] += 1
             bname = _clean_text(s.get("branch"))
             sec = _clean_text(s.get("section"))
             sem = _safe_int(s.get("semester"))
@@ -762,9 +825,26 @@ def import_slots_normalized(db, slots: List[Dict]):
             is_lab = int(bool(s.get("is_lab")))
             room = _clean_text(s.get("room"))
 
+            normalized_row = {
+                "branch": bname,
+                "section": sec,
+                "semester": sem,
+                "day": day,
+                "start_time": start,
+                "end_time": end,
+                "subject_name": subj_name,
+                "faculty_name": fac_name,
+                "is_lab": is_lab,
+                "room": room,
+            }
+            logger.info("Processing normalized row %s: raw=%s normalized=%s", row_index, s, normalized_row)
             if not _valid_slot_row({"branch": bname, "section": sec, "day": day, "start_time": start, "end_time": end, "subject_name": subj_name}):
-                skipped += 1
-                logger.info("import_slots_normalized skipped invalid row: %s", s)
+                counters["skipped_total"] += 1
+                counters["skipped_invalid"] += 1
+                counters["invalid_section"] += 1
+                reason = "invalid_row"
+                logger.info("import_slots_normalized skipped row %s: reason=%s normalized=%s", row_index, reason, normalized_row)
+                skipped_rows.append({"index": row_index, "raw": s, "normalized": normalized_row, "reason": reason})
                 continue
 
             branch_id = None
@@ -788,16 +868,29 @@ def import_slots_normalized(db, slots: List[Dict]):
             except Exception:
                 teacher_id = None
 
-            if branch_id is None or subject_id is None or teacher_id is None:
-                skipped += 1
+            if branch_id is None:
+                counters["skipped_total"] += 1
+                counters["skipped_branch"] += 1
+                reason = "missing_branch"
+                logger.info("import_slots_normalized skipped unresolved branch for row %s: %s", row_index, normalized_row)
+                skipped_rows.append({"index": row_index, "raw": s, "normalized": normalized_row, "reason": reason})
+                continue
+
+            if subject_id is None:
+                counters["skipped_unresolved_subject"] += 1
+                counters["missing_subjects"] += 1
+            if teacher_id is None:
+                counters["skipped_unresolved_teacher"] += 1
+                counters["missing_teachers"] += 1
+
+            if subject_id is None or teacher_id is None:
                 logger.info(
-                    "import_slots_normalized skipped unresolved mapping branch=%s subject=%s faculty=%s row=%s",
+                    "import_slots_normalized inserting with unresolved subject/teacher branch=%s subject=%s teacher=%s row_index=%s",
                     branch_id,
                     subject_id,
                     teacher_id,
-                    s,
+                    row_index,
                 )
-                continue
 
             row = {
                 'branch_id': branch_id,
@@ -811,35 +904,69 @@ def import_slots_normalized(db, slots: List[Dict]):
                 'is_lab': is_lab,
                 'room': room,
             }
-            logger.info("import_slots_normalized inserting: %s", row)
+            logger.info("import_slots_normalized inserting (row_index=%s): %s", row_index, row)
             duplicate_where = "COALESCE(CAST(branch_id AS TEXT), '') = COALESCE(CAST(%s AS TEXT), '') AND COALESCE(section, '') = COALESCE(%s, '') AND COALESCE(CAST(semester AS TEXT), '') = COALESCE(CAST(%s AS TEXT), '') AND COALESCE(day, '') = COALESCE(%s, '') AND COALESCE(start_time, '') = COALESCE(%s, '') AND COALESCE(end_time, '') = COALESCE(%s, '') AND COALESCE(CAST(subject_id AS TEXT), '') = COALESCE(CAST(%s AS TEXT), '') AND COALESCE(CAST(teacher_id AS TEXT), '') = COALESCE(CAST(%s AS TEXT), '') AND COALESCE(room, '') = COALESCE(%s, '')"
-            if _row_exists(
-                db,
-                "timetable_entries",
-                duplicate_where,
-                (row['branch_id'], row['section'], row['semester'], row['day'], row['start_time'], row['end_time'], row['subject_id'], row['teacher_id'], row['room']),
-            ):
-                skipped += 1
-                logger.info("import_slots_normalized skipped duplicate: %s", row)
-                continue
             try:
+                if _row_exists(
+                    db,
+                    "timetable_entries",
+                    duplicate_where,
+                    (row['branch_id'], row['section'], row['semester'], row['day'], row['start_time'], row['end_time'], row['subject_id'], row['teacher_id'], row['room']),
+                ):
+                    counters["skipped_total"] += 1
+                    counters["skipped_duplicate"] += 1
+                    reason = "duplicate"
+                    logger.info("import_slots_normalized skipped duplicate row %s: %s", row_index, row)
+                    skipped_rows.append({"index": row_index, "raw": s, "normalized": normalized_row, "reason": reason})
+                    continue
+            except Exception:
+                counters["normalization_failures"] += 1
+                logger.exception("Duplicate check failed at row %s | row=%s", row_index, normalized_row)
+                logger.error(traceback.format_exc())
+                skipped_rows.append({"index": row_index, "raw": s, "normalized": normalized_row, "reason": "dup_check_exception"})
+                raise
+
+            try:
+                logger.info(
+                    "Normalized values | subject=%s teacher=%s section=%s day=%s time=%s-%s",
+                    subj_name,
+                    fac_name,
+                    sec,
+                    day,
+                    start,
+                    end,
+                )
                 _db_execute(
                     db,
                     "INSERT INTO timetable_entries (branch_id, section, semester, day, start_time, end_time, subject_id, teacher_id, is_lab, room) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
                     (row['branch_id'], row['section'], row['semester'], row['day'], row['start_time'], row['end_time'], row['subject_id'], row['teacher_id'], row['is_lab'], row['room']),
                 )
-                inserted += 1
+                counters["inserted"] += 1
             except Exception:
-                failures += 1
-                logger.exception("failed to insert normalized row")
+                counters["failures"] += 1
+                counters["normalization_failures"] += 1
+                logger.exception("Import failed at normalized row %s | row=%s", row_index, normalized_row)
+                logger.error(traceback.format_exc())
+                skipped_rows.append({"index": row_index, "raw": s, "normalized": normalized_row, "reason": "insert_exception"})
+                raise
+
         try:
             db.commit()
         except Exception:
-            pass
+            logger.exception("DB commit failed after import_slots_normalized")
+            logger.error(traceback.format_exc())
+            raise
+
     except Exception:
         logger.exception("import_slots_normalized failed")
-    logger.info("import_slots_normalized summary: parsed_rows=%d inserted_rows=%d skipped_rows=%d failures=%d", len(slots), inserted, skipped, failures)
-    return inserted
+        logger.error(traceback.format_exc())
+        raise
+
+    logger.info(
+        "import_slots_normalized summary: %s",
+        {k: counters.get(k) for k in ("total", "parsed", "inserted", "skipped_total", "skipped_branch", "skipped_unresolved_subject", "skipped_unresolved_teacher", "skipped_invalid", "skipped_duplicate", "failures", "missing_subjects", "missing_teachers", "invalid_section", "normalization_failures")},
+    )
+    return {"counters": counters, "skipped_rows": skipped_rows}
 
 
 # --- Lookup helpers --------------------------------------------------------
@@ -891,7 +1018,6 @@ def register_routes(app, db_getter=None):
         db = None
         rows_count = 0
         table_ready = False
-        active_slot = None
         upcoming_classes = []
         try:
             if db_getter is None:
@@ -983,13 +1109,28 @@ def register_routes(app, db_getter=None):
                 else:
                     flash("Unsupported file type or missing parser dependencies.", "error")
                     return redirect(url_for("timetable_manage"))
-                inserted = import_slots(db, slots)
-                # Also populate normalized timetable_entries where possible
+                inserted_info = import_slots(db, slots)
+                normalized_info = import_slots_normalized(db, slots)
+
+                # Persist a temporary preview of skipped rows for admin review
+                preview = {
+                    "raw_insert": inserted_info,
+                    "normalized_insert": normalized_info,
+                }
                 try:
-                    n_inserted = import_slots_normalized(db, slots)
+                    preview_path = os.path.join(os.path.dirname(__file__), "uploads", "last_import_debug.json")
+                    with open(preview_path, "w", encoding="utf-8") as f:
+                        import json
+                        json.dump(preview, f, indent=2, default=str)
                 except Exception:
-                    n_inserted = 0
-                flash(f"Imported {inserted} timetable slots. Normalized entries created: {n_inserted}.", "success")
+                    logger.exception("Failed to write import debug preview")
+
+                i_c = inserted_info.get("counters", {}) if isinstance(inserted_info, dict) else {}
+                n_c = normalized_info.get("counters", {}) if isinstance(normalized_info, dict) else {}
+                flash(
+                    f"Imported slots: inserted={i_c.get('inserted', 0)} skipped={i_c.get('skipped_total', 0)}. Normalized: inserted={n_c.get('inserted', 0)} skipped={n_c.get('skipped_total', 0)}. Preview file written.",
+                    "success",
+                )
             except Exception as e:
                 logger.exception("Failed to import timetable")
                 flash(f"Failed to import timetable: {e}", "error")
@@ -997,12 +1138,20 @@ def register_routes(app, db_getter=None):
 
         # GET: show simple management UI
         rows = _db_execute(db, "SELECT * FROM timetable_slots ORDER BY day, start_time").fetchall()
+        skipped_preview = None
+        try:
+            preview_path = os.path.join(os.path.dirname(__file__), "uploads", "last_import_debug.json")
+            if os.path.exists(preview_path):
+                with open(preview_path, "r", encoding="utf-8") as f:
+                    skipped_preview = f.read()
+        except Exception:
+            logger.exception("Failed to load skipped preview")
         # show normalized preview when available
         try:
             entries = _db_execute(db, "SELECT te.*, s.name AS subject_name, t.name AS teacher_name, b.name AS branch_name FROM timetable_entries te LEFT JOIN subjects s ON te.subject_id = s.id LEFT JOIN teachers t ON te.teacher_id = t.id LEFT JOIN branches b ON te.branch_id = b.id ORDER BY te.day, te.start_time").fetchall()
         except Exception:
             entries = []
-        return render_template("timetable_manage.html", rows=rows, entries=entries)
+        return render_template("timetable_manage.html", rows=rows, entries=entries, skipped_preview=skipped_preview)
 
     @app.route("/timetable/active")
     def timetable_active():
@@ -1018,6 +1167,127 @@ def register_routes(app, db_getter=None):
             "active": True,
             "slot": _row_to_dict(row)
         })
+
+    @app.route("/timetable/admin/bulk_resolve", methods=("POST",))
+    def timetable_admin_bulk_resolve():
+        if session.get("role") != "admin":
+            return redirect(url_for("dashboard"))
+        db = get_db()
+        create_missing = request.form.get("create_missing_subjects") in ("1", "true", "True")
+        summary = {
+            "subjects_checked": 0,
+            "subjects_created": 0,
+            "subjects_mapped": 0,
+            "teachers_checked": 0,
+            "teachers_mapped": 0,
+        }
+        try:
+            # Gather distinct subject names
+            rows = _db_execute(db, "SELECT DISTINCT TRIM(subject_name) AS subject_name FROM timetable_slots WHERE subject_name IS NOT NULL").fetchall()
+            slot_subjects = [r[0] if not hasattr(r, 'keys') else r.get('subject_name') for r in rows if r and (r[0] if not hasattr(r, 'keys') else r.get('subject_name'))]
+            rows = _db_execute(db, "SELECT DISTINCT TRIM(subject_name) AS subject_name FROM timetable_entries WHERE subject_name IS NOT NULL").fetchall()
+            entry_subjects = [r[0] if not hasattr(r, 'keys') else r.get('subject_name') for r in rows if r and (r[0] if not hasattr(r, 'keys') else r.get('subject_name'))]
+            distinct = sorted(set([_clean_text(s) for s in (slot_subjects + entry_subjects) if s]))
+
+            existing = _db_execute(db, "SELECT id, name FROM subjects").fetchall()
+            existing_map = { (r[1].lower() if not hasattr(r, 'keys') else r.get('name').lower()): (r[0] if not hasattr(r, 'keys') else r.get('id')) for r in existing }
+            existing_names = list(existing_map.keys())
+
+            # default branch for created subjects
+            row = _db_execute(db, "SELECT id FROM branches ORDER BY id LIMIT 1").fetchone()
+            default_branch_id = (row[0] if not hasattr(row, 'keys') else row.get('id')) if row else None
+
+            for name in distinct:
+                if not name:
+                    continue
+                summary["subjects_checked"] += 1
+                lname = name.lower()
+                if lname in existing_map:
+                    summary["subjects_mapped"] += 1
+                    continue
+                # fuzzy match to existing subjects
+                match = difflib.get_close_matches(name, existing_names, n=1, cutoff=0.8)
+                if match:
+                    matched_lower = match[0]
+                    existing_map[lname] = existing_map[matched_lower]
+                    summary["subjects_mapped"] += 1
+                    continue
+                if create_missing:
+                    display = name.title()
+                    try:
+                        _db_execute(db, "INSERT INTO subjects (name, branch_id) VALUES (%s, %s)", (display, default_branch_id))
+                        try:
+                            db.commit()
+                        except Exception:
+                            pass
+                        row = _db_execute(db, "SELECT id FROM subjects WHERE name = %s LIMIT 1", (display,)).fetchone()
+                        sid = (row[0] if not hasattr(row, 'keys') else row.get('id')) if row else None
+                        if sid:
+                            existing_map[lname] = sid
+                            existing_names.append(lname)
+                            summary["subjects_created"] += 1
+                    except Exception:
+                        logger.exception("failed to create subject %s", display)
+
+            # Apply mappings: update timetable_entries subject_id where subject_name matches
+            for raw_lower, sid in list(existing_map.items()):
+                if not sid:
+                    continue
+                try:
+                    _db_execute(db, "UPDATE timetable_entries SET subject_id = %s WHERE subject_id IS NULL AND LOWER(TRIM(subject_name)) = LOWER(TRIM(%s))", (sid, raw_lower))
+                except Exception:
+                    logger.exception("failed to update timetable_entries for subject %s", raw_lower)
+
+            # Teachers: normalize names and attempt to map
+            rows = _db_execute(db, "SELECT DISTINCT TRIM(faculty_name) AS faculty_name FROM timetable_slots WHERE faculty_name IS NOT NULL").fetchall()
+            slot_teachers = [r[0] if not hasattr(r, 'keys') else r.get('faculty_name') for r in rows if r and (r[0] if not hasattr(r, 'keys') else r.get('faculty_name'))]
+            rows = _db_execute(db, "SELECT DISTINCT TRIM(faculty_name) AS faculty_name FROM timetable_entries WHERE faculty_name IS NOT NULL").fetchall()
+            entry_teachers = [r[0] if not hasattr(r, 'keys') else r.get('faculty_name') for r in rows if r and (r[0] if not hasattr(r, 'keys') else r.get('faculty_name'))]
+            tdistinct = sorted(set([_clean_text(t) for t in (slot_teachers + entry_teachers) if t]))
+            existing_t = _db_execute(db, "SELECT id, name FROM teachers").fetchall()
+            existing_t_map = { (r[1].lower() if not hasattr(r, 'keys') else r.get('name').lower()): (r[0] if not hasattr(r, 'keys') else r.get('id')) for r in existing_t }
+            existing_t_names = list(existing_t_map.keys())
+
+            def normalize_teacher_name(n):
+                if not n:
+                    return ""
+                t = re.sub(r'^(mr|ms|mrs|dr)\.?\s+', '', n, flags=re.I)
+                t = re.sub(r'[^\w\s]', ' ', t)
+                return ' '.join(t.split()).strip()
+
+            for tname in tdistinct:
+                if not tname:
+                    continue
+                summary["teachers_checked"] += 1
+                norm = normalize_teacher_name(tname)
+                ln = norm.lower()
+                if ln in existing_t_map:
+                    summary["teachers_mapped"] += 1
+                    tid = existing_t_map[ln]
+                    try:
+                        _db_execute(db, "UPDATE timetable_entries SET teacher_id = %s WHERE teacher_id IS NULL AND LOWER(TRIM(faculty_name)) = LOWER(TRIM(%s))", (tid, tname))
+                    except Exception:
+                        logger.exception("failed to update teacher mapping for %s", tname)
+                    continue
+                match = difflib.get_close_matches(norm, existing_t_names, n=1, cutoff=0.85)
+                if match:
+                    matched = match[0]
+                    tid = existing_t_map[matched]
+                    summary["teachers_mapped"] += 1
+                    try:
+                        _db_execute(db, "UPDATE timetable_entries SET teacher_id = %s WHERE teacher_id IS NULL AND LOWER(TRIM(faculty_name)) = LOWER(TRIM(%s))", (tid, tname))
+                    except Exception:
+                        logger.exception("failed to update teacher mapping for %s", tname)
+
+            try:
+                db.commit()
+            except Exception:
+                pass
+            flash(f"Bulk resolve completed: {summary}", "success")
+        except Exception as e:
+            logger.exception("bulk_resolve failed")
+            flash(f"Bulk resolve failed: {e}", "error")
+        return redirect(url_for("timetable_manage"))
 
     @app.route("/timetable/faculty-schedules")
     def timetable_faculty_schedules():
