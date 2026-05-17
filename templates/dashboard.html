@@ -2,8 +2,22 @@
 {% block head %}
 <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
 <script>
+function getRealtimeSocket() {
+    if (!window.__attendanceRealtimeSocket) {
+        window.__attendanceRealtimeSocket = io({
+            transports: ['websocket'],
+            upgrade: false,
+            reconnection: true,
+            reconnectionDelay: 1000,
+            reconnectionDelayMax: 5000,
+            timeout: 20000,
+        });
+    }
+    return window.__attendanceRealtimeSocket;
+}
+
 document.addEventListener('DOMContentLoaded', function() {
-    const socket = io();
+    const socket = getRealtimeSocket();
 
     socket.on('connect', function() {
         console.log('Connected to real-time server');
@@ -130,7 +144,7 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 
     // Ensure initial activity feed is present; socket updates will append later
-    const socket = io();
+    const socket = getRealtimeSocket();
     socket.on('stats_update', function(data) {
         if (data && data.recent_activity) {
             const feed = document.getElementById('activity-feed');
@@ -447,7 +461,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
 <script>
 document.addEventListener('DOMContentLoaded', function() {
-    const socket = io();
+    const socket = getRealtimeSocket();
     const activityFeed = document.getElementById('activity-feed');
 
     socket.on('connect', function() {

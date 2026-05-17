@@ -2,8 +2,22 @@
 {% block head %}
 <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
 <script>
+function getRealtimeSocket() {
+    if (!window.__attendanceRealtimeSocket) {
+        window.__attendanceRealtimeSocket = io({
+            transports: ['websocket'],
+            upgrade: false,
+            reconnection: true,
+            reconnectionDelay: 1000,
+            reconnectionDelayMax: 5000,
+            timeout: 20000,
+        });
+    }
+    return window.__attendanceRealtimeSocket;
+}
+
 document.addEventListener('DOMContentLoaded', function() {
-    const socket = io();
+    const socket = getRealtimeSocket();
 
     socket.on('connect', function() {
         console.log('Connected to real-time attendance system');
