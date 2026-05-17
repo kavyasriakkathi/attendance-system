@@ -4,7 +4,7 @@ import sqlite3
 import re
 import time
 from datetime import datetime, timezone
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Iterator, Iterable
 import traceback
 import difflib
 import json
@@ -26,8 +26,8 @@ except Exception:
 logger = logging.getLogger("app.timetable")
 
 # Tunables for import batching and preview limits
-BATCH_INSERT_SIZE = int(os.environ.get("TIMETABLE_BATCH_SIZE", 50))
-PREVIEW_ROW_CAP = int(os.environ.get("TIMETABLE_PREVIEW_CAP", 500))
+BATCH_INSERT_SIZE = int(os.environ.get("TIMETABLE_BATCH_SIZE", 15))
+PREVIEW_ROW_CAP = int(os.environ.get("TIMETABLE_PREVIEW_CAP", 80))
 SKIPPED_ROW_SAMPLE_CAP = int(os.environ.get("TIMETABLE_SKIPPED_SAMPLE_CAP", 25))
 ENABLE_IMPORT_TRACEMALLOC = os.environ.get("TIMETABLE_ENABLE_TRACEMALLOC", "false").strip().lower() in ("1", "true", "yes", "on")
 
@@ -282,87 +282,61 @@ def _table_diagnostics(db):
 
 # --- Simple parsing helpers -------------------------------------------------
 
-def parse_docx_table(path: str) -> List[Dict]:
-    """Parse a DOCX timetable file using heuristic: look for tables and extract rows.
-
-    Returns a list of slot dicts with keys: branch, section, semester, day, start_time, end_time, subject_name, faculty_name, is_lab, room
-    """
+def iter_docx_table_slots(path: str) -> Iterator[Dict]:
+    """Yield DOCX timetable slots row-by-row to keep memory usage low."""
     if docx is None:
         raise RuntimeError("python-docx is not installed. Install with: pip install python-docx")
     doc = docx.Document(path)
-    slots = []
     parsed_rows = 0
     skipped_rows = 0
     failed_rows = 0
-    try:
-        for table_index, table in enumerate(doc.tables):
-            if not table.rows:
-                logger.info("parse_docx_table table=%s empty", table_index)
-                continue
-            headers = [_normalize_key(c.text) for c in table.rows[0].cells]
-            logger.info("parse_docx_table table=%s rows=%s headers=%s", table_index, len(table.rows), headers)
-            for row_index, row in enumerate(table.rows[1:], start=1):
-                values = [_clean_text(c.text) for c in row.cells]
-                row_text = " | ".join(values)
-                row_map = {headers[i]: values[i] for i in range(min(len(headers), len(values))) if headers[i]}
-                try:
-                    normalized = _normalize_slot_row(row_map, row_text=row_text)
-                    subject_raw = normalized["subject_name"]
-                    faculty_raw = normalized["faculty_name"]
-                    skip_tokens = ("short break", "lunch break", "lib", "sports", "break")
-                    if _row_has_token(subject_raw, *skip_tokens) or _row_has_token(faculty_raw, *skip_tokens) or _row_has_token(row_text, *skip_tokens):
+    skip_tokens = ("short break", "lunch break", "lib", "sports", "break")
+    for table_index, table in enumerate(doc.tables):
+        if not table.rows:
+            continue
+        headers = [_normalize_key(c.text) for c in table.rows[0].cells]
+        for row_index, row in enumerate(table.rows[1:], start=1):
+            values = [_clean_text(c.text) for c in row.cells]
+            row_text = " | ".join(values)
+            row_map = {headers[i]: values[i] for i in range(min(len(headers), len(values))) if headers[i]}
+            try:
+                normalized = _normalize_slot_row(row_map, row_text=row_text)
+                subject_raw = normalized["subject_name"]
+                faculty_raw = normalized["faculty_name"]
+                if _row_has_token(subject_raw, *skip_tokens) or _row_has_token(faculty_raw, *skip_tokens) or _row_has_token(row_text, *skip_tokens):
+                    skipped_rows += 1
+                    continue
+                if not _valid_slot_row(normalized):
+                    skipped_rows += 1
+                    continue
+                subjects = _split_subjects(subject_raw)
+                if not subjects:
+                    skipped_rows += 1
+                    continue
+                for subject in subjects:
+                    slot = dict(normalized)
+                    slot["subject_name"] = _clean_text(subject)
+                    slot["is_lab"] = int(bool(_row_has_token(subject, "lab", "practical") or normalized["is_lab"]))
+                    if not _valid_slot_row(slot):
                         skipped_rows += 1
-                        logger.info("parse_docx_table skipped break row table=%s row=%s text=%s", table_index, row_index, row_text)
                         continue
-                    if not _valid_slot_row(normalized):
-                        skipped_rows += 1
-                        logger.info("parse_docx_table skipped invalid row table=%s row=%s normalized=%s text=%s", table_index, row_index, normalized, row_text)
-                        continue
-
-                    subjects = _split_subjects(subject_raw)
-                    if not subjects:
-                        skipped_rows += 1
-                        logger.info("parse_docx_table skipped row with no subject split table=%s row=%s text=%s", table_index, row_index, row_text)
-                        continue
-
-                    for subject in subjects:
-                        slot = dict(normalized)
-                        slot["subject_name"] = _clean_text(subject)
-                        slot["is_lab"] = int(bool(_row_has_token(subject, "lab", "practical") or normalized["is_lab"]))
-                        if not _valid_slot_row(slot):
-                            skipped_rows += 1
-                            logger.info("parse_docx_table skipped normalized subject row table=%s row=%s slot=%s text=%s", table_index, row_index, slot, row_text)
-                            continue
-                        slots.append(slot)
-                        parsed_rows += 1
-                        logger.info("parse_docx_table parsed row table=%s row=%s slot=%s", table_index, row_index, slot)
-                except Exception:
-                    failed_rows += 1
-                    logger.exception("parse_docx_table failed table=%s row=%s raw=%s", table_index, row_index, row_text)
-    except Exception as e:
-        logger.exception("parse_docx_table failed")
-        raise
-    logger.info("parse_docx_table summary: tables=%d parsed_rows=%d skipped_rows=%d failed_rows=%d", len(doc.tables), parsed_rows, skipped_rows, failed_rows)
-    return slots
+                    parsed_rows += 1
+                    yield slot
+            except Exception:
+                failed_rows += 1
+                logger.exception("iter_docx_table_slots failed table=%s row=%s", table_index, row_index)
+    logger.info("iter_docx_table_slots summary: tables=%d parsed_rows=%d skipped_rows=%d failed_rows=%d", len(doc.tables), parsed_rows, skipped_rows, failed_rows)
 
 
-def parse_docx_grid(path: str) -> List[Dict]:
-    """Parse grid-style DOCX timetables.
-
-    Expects a table where the first column is the day and the first row
-    contains time slots. Attempts to extract subject (and optional faculty)
-    from each cell and convert into slot dicts.
-    """
+def iter_docx_grid_slots(path: str) -> Iterator[Dict]:
+    """Yield grid-style DOCX slots row-by-row without retaining full table structures."""
     if docx is None:
         raise RuntimeError("python-docx is not installed. Install with: pip install python-docx")
     doc = docx.Document(path)
-    slots = []
-    # Try to infer branch/section from title or filename
-    title_text = " ".join([p.text for p in doc.paragraphs[:3] if p.text])
     base = os.path.splitext(os.path.basename(path))[0]
+    title_text = " ".join([p.text for p in doc.paragraphs[:3] if p.text])
     inferred_branch = ""
     inferred_section = ""
-    # Heuristics: look for patterns like 'B.TECH I-2' or similar
     m = re.search(r"([A-Za-z0-9\.\s&/]+)\s+(I\s*-?\d+|I[-\s]?\d+|II|III|IV|I-\d+)", title_text, flags=re.I)
     if m:
         inferred_branch = m.group(1).strip()
@@ -374,82 +348,73 @@ def parse_docx_grid(path: str) -> List[Dict]:
             if len(parts) > 1:
                 inferred_section = parts[1]
 
-    for table_index, table in enumerate(doc.tables):
+    emitted = 0
+    for table in doc.tables:
         if not table.rows:
             continue
-        # header row (assume first row) contains times starting from column 1
-        headers = [_clean_text(c.text) for c in table.rows[0].cells]
-        day_col = None
+        header_cells = table.rows[0].cells
+        headers = [_clean_text(c.text) for c in header_cells]
+        day_col = 0
         time_cols = []
         for i, h in enumerate(headers):
             low = h.lower()
-            if 'day' in low or 'day/time' in low or 'day time' in low:
+            if "day" in low:
                 day_col = i
-            else:
-                # recognize time-like headers by digits or a dash
-                if re.search(r"\d", h) or '-' in h:
-                    time_cols.append(i)
-        if day_col is None:
-            day_col = 0
+            elif re.search(r"\d", h) or "-" in h:
+                time_cols.append(i)
         if not time_cols:
             time_cols = [i for i in range(len(headers)) if i != day_col]
 
-        for row_index, row in enumerate(table.rows[1:], start=1):
+        for row in table.rows[1:]:
             day = _clean_text(row.cells[day_col].text)
             if not day:
                 continue
             for col in time_cols:
-                try:
-                    cell_text = _clean_text(row.cells[col].text)
-                except Exception:
-                    cell_text = ''
+                cell_text = _clean_text(row.cells[col].text) if col < len(row.cells) else ""
                 if not cell_text:
                     continue
-                # header time range
-                head = _clean_text(table.rows[0].cells[col].text)
+                head = _clean_text(header_cells[col].text) if col < len(header_cells) else ""
                 start_time, end_time = _split_time_range(head)
-                # split multiple subjects inside the cell
-                subjects = _split_subjects(cell_text)
-                for subj in subjects:
+                for subj in _split_subjects(cell_text):
                     s_text = subj
                     faculty = ""
-                    # try to extract faculty if cell has newline or a dash
-                    if '\n' in cell_text:
+                    if "\n" in cell_text:
                         lines = [l.strip() for l in cell_text.splitlines() if l.strip()]
                         if len(lines) >= 2:
                             s_text = _clean_text(lines[0])
                             faculty = _clean_text(lines[1])
                     else:
-                        # patterns like 'SUBJECT - FACULTY' or 'SUBJECT / FACULTY'
                         parts = re.split(r"[-/\\r\\n]+", subj)
                         if len(parts) >= 2:
                             s_text = _clean_text(parts[0])
                             faculty = _clean_text(parts[1])
 
                     slot = {
-                        'branch': inferred_branch or base,
-                        'section': inferred_section or 'ALL',
-                        'semester': None,
-                        'day': day,
-                        'start_time': start_time or '',
-                        'end_time': end_time or '',
-                        'subject_name': s_text,
-                        'faculty_name': faculty,
-                        'is_lab': int(bool(_row_has_token(s_text, 'lab', 'practical') or _row_has_token(cell_text, 'lab', 'practical'))),
-                        'room': '',
+                        "branch": inferred_branch or base,
+                        "section": inferred_section or "ALL",
+                        "semester": None,
+                        "day": day,
+                        "start_time": start_time or "",
+                        "end_time": end_time or "",
+                        "subject_name": s_text,
+                        "faculty_name": faculty,
+                        "is_lab": int(bool(_row_has_token(s_text, "lab", "practical") or _row_has_token(cell_text, "lab", "practical"))),
+                        "room": "",
                     }
                     if _valid_slot_row(slot):
-                        slots.append(slot)
-                    else:
-                        # try a relaxed insert by filling branch/section defaults
-                        slot['branch'] = slot.get('branch') or base
-                        slot['section'] = slot.get('section') or 'ALL'
-                        if _valid_slot_row(slot):
-                            slots.append(slot)
-                        else:
-                            logger.info("parse_docx_grid skipped invalid slot: %s", slot)
-    logger.info("parse_docx_grid summary: tables=%d parsed_slots=%d", len(doc.tables), len(slots))
-    return slots
+                        emitted += 1
+                        yield slot
+    logger.info("iter_docx_grid_slots summary: tables=%d parsed_slots=%d", len(doc.tables), emitted)
+
+
+def parse_docx_table(path: str) -> List[Dict]:
+    """Compatibility wrapper for existing callers expecting a list."""
+    return list(iter_docx_table_slots(path))
+
+
+def parse_docx_grid(path: str) -> List[Dict]:
+    """Compatibility wrapper for existing callers expecting a list."""
+    return list(iter_docx_grid_slots(path))
 
 
 def parse_pdf_text(path: str) -> str:
@@ -807,6 +772,203 @@ def get_faculty_schedule(db, teacher_id, now: Optional[datetime] = None):
 
 
 # --- DB import --------------------------------------------------------------
+
+def _write_preview_line(preview_path: str, preview_state: Dict[str, int], payload: Dict):
+    if preview_state["written"] >= PREVIEW_ROW_CAP:
+        return
+    try:
+        with open(preview_path, "a", encoding="utf-8") as pf:
+            pf.write(json.dumps(payload, default=str) + "\n")
+        preview_state["written"] += 1
+    except Exception:
+        logger.exception("Failed to write import preview line")
+
+
+def _iter_docx_slots_with_fallback(path: str) -> Iterator[Dict]:
+    primary_iter = iter(iter_docx_table_slots(path))
+    first_item = next(primary_iter, None)
+    if first_item is None:
+        yield from iter_docx_grid_slots(path)
+        return
+    yield first_item
+    for item in primary_iter:
+        yield item
+
+
+def import_slots_streaming(db, slots_iter: Iterable[Dict]):
+    """Import slots from an iterator to avoid retaining full parsed timetable in memory."""
+    raw_counters = {
+        "processed": 0,
+        "inserted": 0,
+        "skipped_total": 0,
+        "skipped_invalid": 0,
+        "skipped_duplicate": 0,
+        "failures": 0,
+    }
+    normalized_counters = {
+        "processed": 0,
+        "inserted": 0,
+        "skipped_total": 0,
+        "skipped_branch": 0,
+        "skipped_duplicate": 0,
+        "missing_subjects": 0,
+        "missing_teachers": 0,
+        "failures": 0,
+    }
+
+    preview_path = os.path.join(os.path.dirname(__file__), "uploads", "last_import_debug.jsonl")
+    os.makedirs(os.path.dirname(preview_path), exist_ok=True)
+    preview_state = {"written": 0}
+    batch_size = max(10, min(20, int(BATCH_INSERT_SIZE)))
+    inserted_since_commit = 0
+    batch_commits = 0
+    start_ts = time.time()
+
+    branch_cache = {}
+    subject_cache = {}
+    teacher_cache = {}
+
+    for row_index, slot_in in enumerate(slots_iter, start=1):
+        row = {
+            "branch": _clean_text(slot_in.get("branch")),
+            "section": _clean_text(slot_in.get("section")),
+            "semester": _safe_int(slot_in.get("semester")),
+            "day": _clean_text(slot_in.get("day")),
+            "start_time": _clean_text(slot_in.get("start_time")),
+            "end_time": _clean_text(slot_in.get("end_time")),
+            "subject_name": _clean_text(slot_in.get("subject_name")),
+            "faculty_name": _clean_text(slot_in.get("faculty_name")),
+            "is_lab": int(bool(slot_in.get("is_lab"))),
+            "room": _clean_text(slot_in.get("room")),
+        }
+        raw_counters["processed"] += 1
+
+        if not _valid_slot_row(row):
+            raw_counters["skipped_total"] += 1
+            raw_counters["skipped_invalid"] += 1
+            _write_preview_line(preview_path, preview_state, {"index": row_index, "reason": "invalid_row", "row": row})
+            continue
+
+        try:
+            if _row_exists(
+                db,
+                "timetable_slots",
+                "COALESCE(branch, '') = COALESCE(%s, '') AND COALESCE(section, '') = COALESCE(%s, '') AND COALESCE(CAST(semester AS TEXT), '') = COALESCE(CAST(%s AS TEXT), '') AND COALESCE(day, '') = COALESCE(%s, '') AND COALESCE(start_time, '') = COALESCE(%s, '') AND COALESCE(end_time, '') = COALESCE(%s, '') AND COALESCE(subject_name, '') = COALESCE(%s, '') AND COALESCE(faculty_name, '') = COALESCE(%s, '') AND COALESCE(room, '') = COALESCE(%s, '')",
+                (row["branch"], row["section"], row["semester"], row["day"], row["start_time"], row["end_time"], row["subject_name"], row["faculty_name"], row["room"]),
+            ):
+                raw_counters["skipped_total"] += 1
+                raw_counters["skipped_duplicate"] += 1
+            else:
+                _db_execute(
+                    db,
+                    "INSERT INTO timetable_slots (branch, section, semester, day, start_time, end_time, subject_name, faculty_name, is_lab, room) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                    (row["branch"], row["section"], row["semester"], row["day"], row["start_time"], row["end_time"], row["subject_name"], row["faculty_name"], row["is_lab"], row["room"]),
+                )
+                raw_counters["inserted"] += 1
+                inserted_since_commit += 1
+        except Exception:
+            raw_counters["failures"] += 1
+            _write_preview_line(preview_path, preview_state, {"index": row_index, "reason": "raw_insert_exception", "row": row})
+            raise
+
+        normalized_counters["processed"] += 1
+        branch_key = row["branch"].strip().lower()
+        if branch_key not in branch_cache:
+            b_row = _db_execute(db, "SELECT id FROM branches WHERE LOWER(TRIM(name))=LOWER(TRIM(%s)) LIMIT 1", (row["branch"],)).fetchone()
+            branch_cache[branch_key] = b_row[0] if b_row and not hasattr(b_row, "keys") else (b_row["id"] if b_row else None)
+        branch_id = branch_cache.get(branch_key)
+        if branch_id is None:
+            normalized_counters["skipped_total"] += 1
+            normalized_counters["skipped_branch"] += 1
+            _write_preview_line(preview_path, preview_state, {"index": row_index, "reason": "missing_branch", "row": row})
+        else:
+            subj_key = row["subject_name"].strip().lower()
+            if subj_key not in subject_cache:
+                s_row = _db_execute(db, "SELECT id FROM subjects WHERE LOWER(TRIM(name))=LOWER(TRIM(%s)) LIMIT 1", (row["subject_name"],)).fetchone()
+                subject_cache[subj_key] = s_row[0] if s_row and not hasattr(s_row, "keys") else (s_row["id"] if s_row else None)
+            subject_id = subject_cache.get(subj_key)
+            if subject_id is None:
+                normalized_counters["missing_subjects"] += 1
+
+            teacher_id = None
+            if row["faculty_name"]:
+                t_key = row["faculty_name"].strip().lower()
+                if t_key not in teacher_cache:
+                    t_row = _db_execute(db, "SELECT id FROM teachers WHERE LOWER(TRIM(name))=LOWER(TRIM(%s)) LIMIT 1", (row["faculty_name"],)).fetchone()
+                    teacher_cache[t_key] = t_row[0] if t_row and not hasattr(t_row, "keys") else (t_row["id"] if t_row else None)
+                teacher_id = teacher_cache.get(t_key)
+                if teacher_id is None:
+                    normalized_counters["missing_teachers"] += 1
+
+            norm_row = {
+                "branch_id": branch_id,
+                "section": row["section"],
+                "semester": row["semester"],
+                "day": row["day"],
+                "start_time": row["start_time"],
+                "end_time": row["end_time"],
+                "subject_id": subject_id,
+                "teacher_id": teacher_id,
+                "is_lab": row["is_lab"],
+                "room": row["room"],
+            }
+            try:
+                if _row_exists(
+                    db,
+                    "timetable_entries",
+                    "COALESCE(CAST(branch_id AS TEXT), '') = COALESCE(CAST(%s AS TEXT), '') AND COALESCE(section, '') = COALESCE(%s, '') AND COALESCE(CAST(semester AS TEXT), '') = COALESCE(CAST(%s AS TEXT), '') AND COALESCE(day, '') = COALESCE(%s, '') AND COALESCE(start_time, '') = COALESCE(%s, '') AND COALESCE(end_time, '') = COALESCE(%s, '') AND COALESCE(CAST(subject_id AS TEXT), '') = COALESCE(CAST(%s AS TEXT), '') AND COALESCE(CAST(teacher_id AS TEXT), '') = COALESCE(CAST(%s AS TEXT), '') AND COALESCE(room, '') = COALESCE(%s, '')",
+                    (norm_row["branch_id"], norm_row["section"], norm_row["semester"], norm_row["day"], norm_row["start_time"], norm_row["end_time"], norm_row["subject_id"], norm_row["teacher_id"], norm_row["room"]),
+                ):
+                    normalized_counters["skipped_total"] += 1
+                    normalized_counters["skipped_duplicate"] += 1
+                else:
+                    _db_execute(
+                        db,
+                        "INSERT INTO timetable_entries (branch_id, section, semester, day, start_time, end_time, subject_id, teacher_id, is_lab, room) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                        (norm_row["branch_id"], norm_row["section"], norm_row["semester"], norm_row["day"], norm_row["start_time"], norm_row["end_time"], norm_row["subject_id"], norm_row["teacher_id"], norm_row["is_lab"], norm_row["room"]),
+                    )
+                    normalized_counters["inserted"] += 1
+                    inserted_since_commit += 1
+            except Exception:
+                normalized_counters["failures"] += 1
+                _write_preview_line(preview_path, preview_state, {"index": row_index, "reason": "normalized_insert_exception", "row": norm_row})
+                raise
+
+        if inserted_since_commit >= batch_size:
+            db.commit()
+            batch_commits += 1
+            inserted_since_commit = 0
+            _write_preview_line(
+                preview_path,
+                preview_state,
+                {"type": "batch_commit", "processed": row_index, "raw_inserted": raw_counters["inserted"], "normalized_inserted": normalized_counters["inserted"], "timestamp": time.time()},
+            )
+
+        if row_index % max(20, batch_size) == 0:
+            elapsed = time.time() - start_ts
+            rate = row_index / elapsed if elapsed > 0 else 0
+            logger.info(
+                "import_slots_streaming progress processed=%d raw_inserted=%d normalized_inserted=%d skipped=%d rate=%.1f rows/s",
+                row_index,
+                raw_counters["inserted"],
+                normalized_counters["inserted"],
+                raw_counters["skipped_total"] + normalized_counters["skipped_total"],
+                rate,
+            )
+
+    if inserted_since_commit > 0:
+        db.commit()
+        batch_commits += 1
+
+    elapsed_seconds = time.time() - start_ts
+    return {
+        "raw_insert": {"counters": raw_counters},
+        "normalized_insert": {"counters": normalized_counters},
+        "preview_path": preview_path if preview_state["written"] else None,
+        "preview_written": preview_state["written"],
+        "batch_commits": batch_commits,
+        "elapsed_seconds": elapsed_seconds,
+    }
 
 def import_slots(db, slots: List[Dict]):
     """Import raw timetable slots into `timetable_slots` with verbose diagnostics.
@@ -1348,22 +1510,21 @@ def register_routes(app, db_getter=None):
             # Parse file
             ext = os.path.splitext(filename)[1].lower()
             try:
+                slots_iter = None
                 if ext in (".docx",) and docx is not None:
-                    slots = parse_docx_table(dest)
+                    slots_iter = _iter_docx_slots_with_fallback(dest)
                 elif ext in (".pdf",) and pdfplumber is not None:
-                    slots = parse_pdf_to_slots(dest)
+                    # PDF parser currently returns list; convert to iterator to keep importer generic.
+                    slots_iter = iter(parse_pdf_to_slots(dest))
                 else:
                     flash("Unsupported file type or missing parser dependencies.", "error")
                     return redirect(url_for("timetable_manage"))
 
-                if not slots and ext in (".docx",) and docx is not None:
-                    # try grid-style DOCX parsing as a fallback
-                    try:
-                        slots = parse_docx_grid(dest)
-                    except Exception:
-                        logger.exception("parse_docx_grid failed")
-
-                if not slots:
+                import_info = import_slots_streaming(db, slots_iter)
+                inserted_info = import_info.get("raw_insert", {})
+                normalized_info = import_info.get("normalized_insert", {})
+                i_c = inserted_info.get("counters", {}) if isinstance(inserted_info, dict) else {}
+                if int(i_c.get("processed", 0) or 0) == 0:
                     logger.warning("Timetable import parsed zero rows from file=%s ext=%s", filename, ext)
                     flash(
                         "No timetable rows were parsed from the uploaded file. Check that the DOCX/PDF contains a readable table with branch, section, day, time, and subject columns.",
@@ -1371,13 +1532,14 @@ def register_routes(app, db_getter=None):
                     )
                     return redirect(url_for("timetable_manage"))
 
-                inserted_info = import_slots(db, slots)
-                normalized_info = import_slots_normalized(db, slots)
-
                 # Persist a temporary preview of skipped rows for admin review
                 preview = {
                     "raw_insert": inserted_info,
                     "normalized_insert": normalized_info,
+                    "batch_commits": import_info.get("batch_commits", 0),
+                    "elapsed_seconds": import_info.get("elapsed_seconds", 0),
+                    "preview_path": import_info.get("preview_path"),
+                    "preview_written": import_info.get("preview_written", 0),
                 }
                 try:
                     preview_path = os.path.join(os.path.dirname(__file__), "uploads", "last_import_debug.json")
@@ -1387,10 +1549,9 @@ def register_routes(app, db_getter=None):
                 except Exception:
                     logger.exception("Failed to write import debug preview")
 
-                i_c = inserted_info.get("counters", {}) if isinstance(inserted_info, dict) else {}
                 n_c = normalized_info.get("counters", {}) if isinstance(normalized_info, dict) else {}
                 flash(
-                    f"Imported slots: inserted={i_c.get('inserted', 0)} skipped={i_c.get('skipped_total', 0)}. Normalized: inserted={n_c.get('inserted', 0)} skipped={n_c.get('skipped_total', 0)}. Preview file written.",
+                    f"Imported slots: processed={i_c.get('processed', 0)} inserted={i_c.get('inserted', 0)} skipped={i_c.get('skipped_total', 0)}. Normalized: processed={n_c.get('processed', 0)} inserted={n_c.get('inserted', 0)} skipped={n_c.get('skipped_total', 0)}. Batch commits={import_info.get('batch_commits', 0)}.",
                     "success",
                 )
             except Exception as e:
