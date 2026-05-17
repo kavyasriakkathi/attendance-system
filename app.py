@@ -23,10 +23,31 @@ from flask_socketio import SocketIO, emit, join_room
 
 app = Flask(__name__)
 
-# Initialize SocketIO after app creation
-# Use threading mode for compatibility with the workspace Python version and tests.
-# Disable engineio logger noise so stale polling sessions do not spam logs.
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading", logger=False, engineio_logger=False)
+# Determine deployment mode early so secret/session policy can be applied consistently.
+is_prod = bool(os.environ.get("RENDER") or os.environ.get("RENDER_INTERNAL_HOSTNAME") or os.environ.get("FLASK_ENV", "").lower() == "production")
+
+# Use a fixed secret from environment in production to prevent session invalidation after restarts.
+_secret_key_from_env = (os.getenv("SECRET_KEY") or "").strip()
+if _secret_key_from_env:
+    _effective_secret_key = _secret_key_from_env
+elif is_prod:
+    raise RuntimeError("SECRET_KEY environment variable is required in production (Render).")
+else:
+    _effective_secret_key = "dev-key-change-in-production"
+
+_socketio_async_mode = os.getenv("SOCKETIO_ASYNC_MODE", "eventlet" if is_prod else "threading").strip().lower()
+
+# Initialize SocketIO with Render-safe defaults and Flask-managed sessions.
+socketio = SocketIO(
+    app,
+    cors_allowed_origins="*",
+    manage_session=False,
+    async_mode=_socketio_async_mode,
+    logger=False,
+    engineio_logger=False,
+    ping_interval=25,
+    ping_timeout=60,
+)
 # Email sending is handled by the `send_email` helper defined later in the file.
 
 
@@ -85,7 +106,6 @@ logging.getLogger("itsdangerous").setLevel(logging.ERROR)
 
 # Session cookie and lifetime configuration
 # In production (Render) ensure cookies are secure and SECRET_KEY is set.
-is_prod = bool(os.environ.get("RENDER") or os.environ.get("RENDER_INTERNAL_HOSTNAME") or os.environ.get("FLASK_ENV", "").lower() == "production")
 
 # Normalize Resend credentials from environment
 raw_resend_api_key = os.environ.get("RESEND_API_KEY") or ""
@@ -94,7 +114,7 @@ resend_api_key = raw_resend_api_key.strip() if raw_resend_api_key else None
 mail_from = raw_mail_from.strip() if raw_mail_from else None
 
 app.config.from_mapping(
-    SECRET_KEY=os.environ.get("SECRET_KEY", "dev-key-change-in-production"),
+    SECRET_KEY=_effective_secret_key,
     DATABASE=database_path,
     RESEND_API_KEY=resend_api_key,
     MAIL_FROM=mail_from,
@@ -108,8 +128,8 @@ app.config.from_mapping(
     LOW_ATTENDANCE_THRESHOLD=int(os.environ.get("LOW_ATTENDANCE_THRESHOLD", 75)),
 )
 
-# Ensure SECRET_KEY is read from environment at runtime (clearer intent)
-app.config["SECRET_KEY"] = os.getenv("SECRET_KEY", app.config.get("SECRET_KEY", "dev-fallback-key"))
+# Keep the resolved startup secret stable for this process.
+app.config["SECRET_KEY"] = _effective_secret_key
 
 
 @app.route("/debug/env")
