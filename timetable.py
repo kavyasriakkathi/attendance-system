@@ -28,6 +28,15 @@ logger = logging.getLogger("app.timetable")
 # Tunables for import batching and preview limits
 BATCH_INSERT_SIZE = int(os.environ.get("TIMETABLE_BATCH_SIZE", 50))
 PREVIEW_ROW_CAP = int(os.environ.get("TIMETABLE_PREVIEW_CAP", 500))
+SKIPPED_ROW_SAMPLE_CAP = int(os.environ.get("TIMETABLE_SKIPPED_SAMPLE_CAP", 25))
+ENABLE_IMPORT_TRACEMALLOC = os.environ.get("TIMETABLE_ENABLE_TRACEMALLOC", "false").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _append_skipped_sample(skipped_rows: List[Dict], skipped_rows_omitted: int, payload: Dict) -> int:
+    if len(skipped_rows) < SKIPPED_ROW_SAMPLE_CAP:
+        skipped_rows.append(payload)
+        return skipped_rows_omitted
+    return skipped_rows_omitted + 1
 
 # Database helper functions - use existing app.get_db() pattern where called from app.py
 
@@ -816,6 +825,7 @@ def import_slots(db, slots: List[Dict]):
         "normalization_failures": 0,
     }
     skipped_rows = []
+    skipped_rows_omitted = 0
     preview_path = os.path.join(os.path.dirname(__file__), "uploads", "last_import_debug.jsonl")
     os.makedirs(os.path.dirname(preview_path), exist_ok=True)
     preview_written = 0
@@ -823,11 +833,12 @@ def import_slots(db, slots: List[Dict]):
     progress_log_interval = max(50, BATCH_INSERT_SIZE)
     start_time = time.time()
     use_tracemalloc = False
-    try:
-        tracemalloc.start()
-        use_tracemalloc = True
-    except Exception:
-        use_tracemalloc = False
+    if ENABLE_IMPORT_TRACEMALLOC:
+        try:
+            tracemalloc.start()
+            use_tracemalloc = True
+        except Exception:
+            use_tracemalloc = False
 
     try:
         logger.info("import_slots: parsed_rows_count=%d", len(slots))
@@ -866,8 +877,7 @@ def import_slots(db, slots: List[Dict]):
                     except Exception:
                         logger.exception("Failed to write skipped preview line")
                 # keep a small in-memory sample for immediate return
-                if len(skipped_rows) < 20:
-                    skipped_rows.append({"index": row_index, "raw": s, "normalized": row, "reason": reason})
+                skipped_rows_omitted = _append_skipped_sample(skipped_rows, skipped_rows_omitted, {"index": row_index, "raw": s, "normalized": row, "reason": reason})
                 continue
 
             duplicate_where = "COALESCE(branch, '') = COALESCE(%s, '') AND COALESCE(section, '') = COALESCE(%s, '') AND COALESCE(CAST(semester AS TEXT), '') = COALESCE(CAST(%s AS TEXT), '') AND COALESCE(day, '') = COALESCE(%s, '') AND COALESCE(start_time, '') = COALESCE(%s, '') AND COALESCE(end_time, '') = COALESCE(%s, '') AND COALESCE(subject_name, '') = COALESCE(%s, '') AND COALESCE(faculty_name, '') = COALESCE(%s, '') AND COALESCE(room, '') = COALESCE(%s, '')"
@@ -882,13 +892,13 @@ def import_slots(db, slots: List[Dict]):
                     counters["skipped_duplicate"] += 1
                     reason = "duplicate"
                     logger.info("import_slots skipped duplicate row %s: %s", row_index, row)
-                    skipped_rows.append({"index": row_index, "raw": s, "normalized": row, "reason": reason})
+                    skipped_rows_omitted = _append_skipped_sample(skipped_rows, skipped_rows_omitted, {"index": row_index, "raw": s, "normalized": row, "reason": reason})
                     continue
             except Exception:
                 counters["normalization_failures"] += 1
                 logger.exception("Duplicate check failed at row %s | row=%s", row_index, row)
                 logger.error(traceback.format_exc())
-                skipped_rows.append({"index": row_index, "raw": s, "normalized": row, "reason": "dup_check_exception"})
+                skipped_rows_omitted = _append_skipped_sample(skipped_rows, skipped_rows_omitted, {"index": row_index, "raw": s, "normalized": row, "reason": "dup_check_exception"})
                 raise
 
             try:
@@ -927,8 +937,7 @@ def import_slots(db, slots: List[Dict]):
                         preview_written += 1
                     except Exception:
                         logger.exception("Failed to write insert_exception preview line")
-                if len(skipped_rows) < 20:
-                    skipped_rows.append({"index": row_index, "raw": s, "normalized": row, "reason": "insert_exception"})
+                skipped_rows_omitted = _append_skipped_sample(skipped_rows, skipped_rows_omitted, {"index": row_index, "raw": s, "normalized": row, "reason": "insert_exception"})
                 raise
 
         try:
@@ -963,7 +972,7 @@ def import_slots(db, slots: List[Dict]):
     except Exception:
         peak = None
 
-    return {"counters": counters, "skipped_rows": skipped_rows, "preview_path": preview_path if preview_written else None, "batch_commits": batch_commit_counts, "elapsed_seconds": time.time() - start_time, "memory_peak_bytes": peak}
+    return {"counters": counters, "skipped_rows": skipped_rows, "skipped_rows_omitted": skipped_rows_omitted, "preview_path": preview_path if preview_written else None, "batch_commits": batch_commit_counts, "elapsed_seconds": time.time() - start_time, "memory_peak_bytes": peak}
 
 
 def import_slots_normalized(db, slots: List[Dict]):
@@ -989,6 +998,7 @@ def import_slots_normalized(db, slots: List[Dict]):
         "normalization_failures": 0,
     }
     skipped_rows = []
+    skipped_rows_omitted = 0
     preview_path = os.path.join(os.path.dirname(__file__), "uploads", "last_import_debug.jsonl")
     os.makedirs(os.path.dirname(preview_path), exist_ok=True)
     preview_written = 0
@@ -996,11 +1006,12 @@ def import_slots_normalized(db, slots: List[Dict]):
     progress_log_interval = max(50, BATCH_INSERT_SIZE)
     start_time = time.time()
     use_tracemalloc = False
-    try:
-        tracemalloc.start()
-        use_tracemalloc = True
-    except Exception:
-        use_tracemalloc = False
+    if ENABLE_IMPORT_TRACEMALLOC:
+        try:
+            tracemalloc.start()
+            use_tracemalloc = True
+        except Exception:
+            use_tracemalloc = False
     try:
         inserted_since_commit = 0
         for row_index, s in enumerate(slots, start=1):
@@ -1042,8 +1053,7 @@ def import_slots_normalized(db, slots: List[Dict]):
                         preview_written += 1
                     except Exception:
                         logger.exception("Failed to write normalized skipped preview line")
-                if len(skipped_rows) < 20:
-                    skipped_rows.append({"index": row_index, "raw": s, "normalized": normalized_row, "reason": reason})
+                skipped_rows_omitted = _append_skipped_sample(skipped_rows, skipped_rows_omitted, {"index": row_index, "raw": s, "normalized": normalized_row, "reason": reason})
                 continue
             try:
                 _db_execute(
@@ -1079,8 +1089,7 @@ def import_slots_normalized(db, slots: List[Dict]):
                         preview_written += 1
                     except Exception:
                         logger.exception("Failed to write normalized insert_exception preview line")
-                if len(skipped_rows) < 20:
-                    skipped_rows.append({"index": row_index, "raw": s, "normalized": normalized_row, "reason": "insert_exception"})
+                skipped_rows_omitted = _append_skipped_sample(skipped_rows, skipped_rows_omitted, {"index": row_index, "raw": s, "normalized": normalized_row, "reason": "insert_exception"})
                 raise
 
             teacher_id = None
@@ -1095,7 +1104,7 @@ def import_slots_normalized(db, slots: List[Dict]):
                 counters["skipped_branch"] += 1
                 reason = "missing_branch"
                 logger.info("import_slots_normalized skipped unresolved branch for row %s: %s", row_index, normalized_row)
-                skipped_rows.append({"index": row_index, "raw": s, "normalized": normalized_row, "reason": reason})
+                skipped_rows_omitted = _append_skipped_sample(skipped_rows, skipped_rows_omitted, {"index": row_index, "raw": s, "normalized": normalized_row, "reason": reason})
                 continue
 
             if subject_id is None:
@@ -1139,13 +1148,13 @@ def import_slots_normalized(db, slots: List[Dict]):
                     counters["skipped_duplicate"] += 1
                     reason = "duplicate"
                     logger.info("import_slots_normalized skipped duplicate row %s: %s", row_index, row)
-                    skipped_rows.append({"index": row_index, "raw": s, "normalized": normalized_row, "reason": reason})
+                    skipped_rows_omitted = _append_skipped_sample(skipped_rows, skipped_rows_omitted, {"index": row_index, "raw": s, "normalized": normalized_row, "reason": reason})
                     continue
             except Exception:
                 counters["normalization_failures"] += 1
                 logger.exception("Duplicate check failed at row %s | row=%s", row_index, normalized_row)
                 logger.error(traceback.format_exc())
-                skipped_rows.append({"index": row_index, "raw": s, "normalized": normalized_row, "reason": "dup_check_exception"})
+                skipped_rows_omitted = _append_skipped_sample(skipped_rows, skipped_rows_omitted, {"index": row_index, "raw": s, "normalized": normalized_row, "reason": "dup_check_exception"})
                 raise
 
             try:
@@ -1169,7 +1178,7 @@ def import_slots_normalized(db, slots: List[Dict]):
                 counters["normalization_failures"] += 1
                 logger.exception("Import failed at normalized row %s | row=%s", row_index, normalized_row)
                 logger.error(traceback.format_exc())
-                skipped_rows.append({"index": row_index, "raw": s, "normalized": normalized_row, "reason": "insert_exception"})
+                skipped_rows_omitted = _append_skipped_sample(skipped_rows, skipped_rows_omitted, {"index": row_index, "raw": s, "normalized": normalized_row, "reason": "insert_exception"})
                 raise
 
         try:
@@ -1203,7 +1212,7 @@ def import_slots_normalized(db, slots: List[Dict]):
     except Exception:
         peak = None
 
-    return {"counters": counters, "skipped_rows": skipped_rows, "preview_path": preview_path if preview_written else None, "batch_commits": batch_commit_counts, "elapsed_seconds": time.time() - start_time, "memory_peak_bytes": peak}
+    return {"counters": counters, "skipped_rows": skipped_rows, "skipped_rows_omitted": skipped_rows_omitted, "preview_path": preview_path if preview_written else None, "batch_commits": batch_commit_counts, "elapsed_seconds": time.time() - start_time, "memory_peak_bytes": peak}
 
 
 # --- Lookup helpers --------------------------------------------------------
