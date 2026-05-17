@@ -179,9 +179,28 @@ def ensure_timetable_tables(db):
     except Exception:
         pass
 
+    # Add DB-level duplicate protection. If legacy duplicates exist, continue with warnings.
+    unique_index_sql = [
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_timetable_slots_dedupe ON timetable_slots (branch, section, semester, day, start_time, end_time, subject_name, faculty_name, room)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_timetable_entries_dedupe ON timetable_entries (branch_id, section, semester, day, start_time, end_time, subject_id, teacher_id, room)",
+    ]
+    for sql in unique_index_sql:
+        try:
+            _db_execute(db, sql)
+        except Exception as e:
+            logger.warning("Unique index creation skipped: %s", repr(e))
+    try:
+        db.commit()
+    except Exception:
+        pass
+
 
 def _clean_text(value) -> str:
     return (str(value).strip() if value is not None else "")
+
+
+def _dup_key(*parts) -> str:
+    return "|".join(_clean_text(p) for p in parts)
 
 
 def _table_diagnostics(db):
@@ -823,12 +842,23 @@ def import_slots_streaming(db, slots_iter: Iterable[Dict]):
     inserted_since_commit = 0
     batch_commits = 0
     start_ts = time.time()
+    peak_mem_estimate_bytes = 0
 
     branch_cache = {}
     subject_cache = {}
     teacher_cache = {}
+    seen_raw_keys = set()
+    seen_norm_keys = set()
 
     for row_index, slot_in in enumerate(slots_iter, start=1):
+        mem_estimate = (
+            (len(seen_raw_keys) + len(seen_norm_keys)) * 96
+            + (len(branch_cache) + len(subject_cache) + len(teacher_cache)) * 80
+            + preview_state["written"] * 120
+        )
+        if mem_estimate > peak_mem_estimate_bytes:
+            peak_mem_estimate_bytes = mem_estimate
+
         row = {
             "branch": _clean_text(slot_in.get("branch")),
             "section": _clean_text(slot_in.get("section")),
@@ -843,6 +873,15 @@ def import_slots_streaming(db, slots_iter: Iterable[Dict]):
         }
         raw_counters["processed"] += 1
 
+        raw_key = _dup_key(
+            row["branch"], row["section"], row["semester"], row["day"], row["start_time"], row["end_time"], row["subject_name"], row["faculty_name"], row["room"]
+        )
+        if raw_key in seen_raw_keys:
+            raw_counters["skipped_total"] += 1
+            raw_counters["skipped_duplicate"] += 1
+            continue
+        seen_raw_keys.add(raw_key)
+
         if not _valid_slot_row(row):
             raw_counters["skipped_total"] += 1
             raw_counters["skipped_invalid"] += 1
@@ -850,23 +889,22 @@ def import_slots_streaming(db, slots_iter: Iterable[Dict]):
             continue
 
         try:
-            if _row_exists(
+            cur = _db_execute(
                 db,
-                "timetable_slots",
-                "COALESCE(branch, '') = COALESCE(%s, '') AND COALESCE(section, '') = COALESCE(%s, '') AND COALESCE(CAST(semester AS TEXT), '') = COALESCE(CAST(%s AS TEXT), '') AND COALESCE(day, '') = COALESCE(%s, '') AND COALESCE(start_time, '') = COALESCE(%s, '') AND COALESCE(end_time, '') = COALESCE(%s, '') AND COALESCE(subject_name, '') = COALESCE(%s, '') AND COALESCE(faculty_name, '') = COALESCE(%s, '') AND COALESCE(room, '') = COALESCE(%s, '')",
-                (row["branch"], row["section"], row["semester"], row["day"], row["start_time"], row["end_time"], row["subject_name"], row["faculty_name"], row["room"]),
-            ):
+                "INSERT INTO timetable_slots (branch, section, semester, day, start_time, end_time, subject_name, faculty_name, is_lab, room) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                (row["branch"], row["section"], row["semester"], row["day"], row["start_time"], row["end_time"], row["subject_name"], row["faculty_name"], row["is_lab"], row["room"]),
+            )
+            if hasattr(cur, "rowcount") and int(cur.rowcount or 0) == 0:
                 raw_counters["skipped_total"] += 1
                 raw_counters["skipped_duplicate"] += 1
             else:
-                _db_execute(
-                    db,
-                    "INSERT INTO timetable_slots (branch, section, semester, day, start_time, end_time, subject_name, faculty_name, is_lab, room) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
-                    (row["branch"], row["section"], row["semester"], row["day"], row["start_time"], row["end_time"], row["subject_name"], row["faculty_name"], row["is_lab"], row["room"]),
-                )
                 raw_counters["inserted"] += 1
                 inserted_since_commit += 1
-        except Exception:
+        except Exception as e:
+            if "unique" in str(e).lower() or "duplicate" in str(e).lower():
+                raw_counters["skipped_total"] += 1
+                raw_counters["skipped_duplicate"] += 1
+                continue
             raw_counters["failures"] += 1
             _write_preview_line(preview_path, preview_state, {"index": row_index, "reason": "raw_insert_exception", "row": row})
             raise
@@ -912,32 +950,57 @@ def import_slots_streaming(db, slots_iter: Iterable[Dict]):
                 "is_lab": row["is_lab"],
                 "room": row["room"],
             }
-            try:
-                if _row_exists(
-                    db,
-                    "timetable_entries",
-                    "COALESCE(CAST(branch_id AS TEXT), '') = COALESCE(CAST(%s AS TEXT), '') AND COALESCE(section, '') = COALESCE(%s, '') AND COALESCE(CAST(semester AS TEXT), '') = COALESCE(CAST(%s AS TEXT), '') AND COALESCE(day, '') = COALESCE(%s, '') AND COALESCE(start_time, '') = COALESCE(%s, '') AND COALESCE(end_time, '') = COALESCE(%s, '') AND COALESCE(CAST(subject_id AS TEXT), '') = COALESCE(CAST(%s AS TEXT), '') AND COALESCE(CAST(teacher_id AS TEXT), '') = COALESCE(CAST(%s AS TEXT), '') AND COALESCE(room, '') = COALESCE(%s, '')",
-                    (norm_row["branch_id"], norm_row["section"], norm_row["semester"], norm_row["day"], norm_row["start_time"], norm_row["end_time"], norm_row["subject_id"], norm_row["teacher_id"], norm_row["room"]),
-                ):
-                    normalized_counters["skipped_total"] += 1
-                    normalized_counters["skipped_duplicate"] += 1
-                else:
-                    _db_execute(
+            norm_key = _dup_key(
+                norm_row["branch_id"], norm_row["section"], norm_row["semester"], norm_row["day"], norm_row["start_time"], norm_row["end_time"], norm_row["subject_id"], norm_row["teacher_id"], norm_row["room"]
+            )
+            if norm_key in seen_norm_keys:
+                normalized_counters["skipped_total"] += 1
+                normalized_counters["skipped_duplicate"] += 1
+            else:
+                seen_norm_keys.add(norm_key)
+                if norm_row["subject_id"] is None or norm_row["teacher_id"] is None:
+                    if _row_exists(
+                        db,
+                        "timetable_entries",
+                        "COALESCE(CAST(branch_id AS TEXT), '') = COALESCE(CAST(%s AS TEXT), '') AND COALESCE(section, '') = COALESCE(%s, '') AND COALESCE(CAST(semester AS TEXT), '') = COALESCE(CAST(%s AS TEXT), '') AND COALESCE(day, '') = COALESCE(%s, '') AND COALESCE(start_time, '') = COALESCE(%s, '') AND COALESCE(end_time, '') = COALESCE(%s, '') AND COALESCE(CAST(subject_id AS TEXT), '') = COALESCE(CAST(%s AS TEXT), '') AND COALESCE(CAST(teacher_id AS TEXT), '') = COALESCE(CAST(%s AS TEXT), '') AND COALESCE(room, '') = COALESCE(%s, '')",
+                        (norm_row["branch_id"], norm_row["section"], norm_row["semester"], norm_row["day"], norm_row["start_time"], norm_row["end_time"], norm_row["subject_id"], norm_row["teacher_id"], norm_row["room"]),
+                    ):
+                        normalized_counters["skipped_total"] += 1
+                        normalized_counters["skipped_duplicate"] += 1
+                        continue
+                try:
+                    cur = _db_execute(
                         db,
                         "INSERT INTO timetable_entries (branch_id, section, semester, day, start_time, end_time, subject_id, teacher_id, is_lab, room) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
                         (norm_row["branch_id"], norm_row["section"], norm_row["semester"], norm_row["day"], norm_row["start_time"], norm_row["end_time"], norm_row["subject_id"], norm_row["teacher_id"], norm_row["is_lab"], norm_row["room"]),
                     )
-                    normalized_counters["inserted"] += 1
-                    inserted_since_commit += 1
-            except Exception:
-                normalized_counters["failures"] += 1
-                _write_preview_line(preview_path, preview_state, {"index": row_index, "reason": "normalized_insert_exception", "row": norm_row})
-                raise
+                    if hasattr(cur, "rowcount") and int(cur.rowcount or 0) == 0:
+                        normalized_counters["skipped_total"] += 1
+                        normalized_counters["skipped_duplicate"] += 1
+                    else:
+                        normalized_counters["inserted"] += 1
+                        inserted_since_commit += 1
+                except Exception as e:
+                    if "unique" in str(e).lower() or "duplicate" in str(e).lower():
+                        normalized_counters["skipped_total"] += 1
+                        normalized_counters["skipped_duplicate"] += 1
+                    else:
+                        normalized_counters["failures"] += 1
+                        _write_preview_line(preview_path, preview_state, {"index": row_index, "reason": "normalized_insert_exception", "row": norm_row})
+                        raise
 
         if inserted_since_commit >= batch_size:
             db.commit()
             batch_commits += 1
             inserted_since_commit = 0
+            seen_raw_keys.clear()
+            seen_norm_keys.clear()
+            if len(branch_cache) > 1024:
+                branch_cache.clear()
+            if len(subject_cache) > 1024:
+                subject_cache.clear()
+            if len(teacher_cache) > 1024:
+                teacher_cache.clear()
             _write_preview_line(
                 preview_path,
                 preview_state,
@@ -948,17 +1011,30 @@ def import_slots_streaming(db, slots_iter: Iterable[Dict]):
             elapsed = time.time() - start_ts
             rate = row_index / elapsed if elapsed > 0 else 0
             logger.info(
-                "import_slots_streaming progress processed=%d raw_inserted=%d normalized_inserted=%d skipped=%d rate=%.1f rows/s",
+                "import_slots_streaming progress processed=%d raw_inserted=%d normalized_inserted=%d skipped=%d commits=%d elapsed=%.1fs rate=%.1f rows/s peak_mem_estimate_kb=%.1f",
                 row_index,
                 raw_counters["inserted"],
                 normalized_counters["inserted"],
                 raw_counters["skipped_total"] + normalized_counters["skipped_total"],
+                batch_commits,
+                elapsed,
                 rate,
+                peak_mem_estimate_bytes / 1024.0,
             )
 
     if inserted_since_commit > 0:
         db.commit()
         batch_commits += 1
+        seen_raw_keys.clear()
+        seen_norm_keys.clear()
+
+    final_mem_estimate = (
+        (len(seen_raw_keys) + len(seen_norm_keys)) * 96
+        + (len(branch_cache) + len(subject_cache) + len(teacher_cache)) * 80
+        + preview_state["written"] * 120
+    )
+    if final_mem_estimate > peak_mem_estimate_bytes:
+        peak_mem_estimate_bytes = final_mem_estimate
 
     elapsed_seconds = time.time() - start_ts
     return {
@@ -968,6 +1044,7 @@ def import_slots_streaming(db, slots_iter: Iterable[Dict]):
         "preview_written": preview_state["written"],
         "batch_commits": batch_commits,
         "elapsed_seconds": elapsed_seconds,
+        "peak_memory_estimate_bytes": peak_mem_estimate_bytes,
     }
 
 def import_slots(db, slots: List[Dict]):
