@@ -9,6 +9,8 @@ import traceback
 import difflib
 import json
 import tracemalloc
+import zipfile
+import xml.etree.ElementTree as ET
 
 from flask import request, redirect, url_for, render_template, flash, jsonify, session, render_template_string
 
@@ -201,6 +203,14 @@ def _clean_text(value) -> str:
 
 def _dup_key(*parts) -> str:
     return "|".join(_clean_text(p) for p in parts)
+
+
+def _insert_ignore_sql(db, table: str, columns: List[str]) -> str:
+    column_list = ", ".join(columns)
+    placeholder_list = ", ".join(["%s"] * len(columns))
+    if _is_postgres_db(db):
+        return f"INSERT INTO {table} ({column_list}) VALUES ({placeholder_list}) ON CONFLICT DO NOTHING"
+    return f"INSERT OR IGNORE INTO {table} ({column_list}) VALUES ({placeholder_list})"
 
 
 def _table_diagnostics(db):
@@ -428,12 +438,428 @@ def iter_docx_grid_slots(path: str) -> Iterator[Dict]:
 
 def parse_docx_table(path: str) -> List[Dict]:
     """Compatibility wrapper for existing callers expecting a list."""
-    return list(iter_docx_table_slots(path))
+    return list(iter_docx_section_slots(path))
 
 
 def parse_docx_grid(path: str) -> List[Dict]:
     """Compatibility wrapper for existing callers expecting a list."""
-    return list(iter_docx_grid_slots(path))
+    return list(iter_docx_section_slots(path))
+
+
+DOCX_W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+W_BODY = f"{{{DOCX_W_NS}}}body"
+W_P = f"{{{DOCX_W_NS}}}p"
+W_TBL = f"{{{DOCX_W_NS}}}tbl"
+W_TR = f"{{{DOCX_W_NS}}}tr"
+W_TC = f"{{{DOCX_W_NS}}}tc"
+W_T = f"{{{DOCX_W_NS}}}t"
+W_TC_PR = f"{{{DOCX_W_NS}}}tcPr"
+W_GRID_SPAN = f"{{{DOCX_W_NS}}}gridSpan"
+W_VMERGE = f"{{{DOCX_W_NS}}}vMerge"
+W_VAL = f"{{{DOCX_W_NS}}}val"
+W_BR = f"{{{DOCX_W_NS}}}br"
+W_TAB = f"{{{DOCX_W_NS}}}tab"
+
+
+def _docx_text(elem) -> str:
+    parts = []
+    for node in elem.iter():
+        if node.tag == W_T and node.text:
+            parts.append(node.text)
+        elif node.tag in (W_BR, W_TAB):
+            parts.append(" ")
+    return _clean_text("".join(parts).replace("\xa0", " "))
+
+
+def _docx_cell_span(tc) -> int:
+    span = 1
+    tc_pr = tc.find(W_TC_PR)
+    if tc_pr is not None:
+        grid_span = tc_pr.find(W_GRID_SPAN)
+        if grid_span is not None:
+            try:
+                span = max(1, int(grid_span.attrib.get(W_VAL, "1") or 1))
+            except Exception:
+                span = 1
+    return span
+
+
+def _docx_cell_vmerge(tc) -> str:
+    tc_pr = tc.find(W_TC_PR)
+    if tc_pr is None:
+        return ""
+    vmerge = tc_pr.find(W_VMERGE)
+    if vmerge is None:
+        return ""
+    return (vmerge.attrib.get(W_VAL) or "continue").strip().lower()
+
+
+def _docx_expand_rows(table_elem) -> List[Dict]:
+    rows = []
+    previous_expanded = []
+    for tr in table_elem.findall(W_TR):
+        row_cells = []
+        expanded = []
+        logical_col = 0
+        for tc in tr.findall(W_TC):
+            text = _docx_text(tc)
+            span = _docx_cell_span(tc)
+            vmerge = _docx_cell_vmerge(tc)
+            if vmerge == "continue" and logical_col < len(previous_expanded):
+                text = previous_expanded[logical_col]
+            row_cells.append(
+                {
+                    "text": text,
+                    "span": span,
+                    "start_col": logical_col,
+                    "end_col": logical_col + span - 1,
+                    "vmerge": vmerge,
+                }
+            )
+            for _ in range(span):
+                expanded.append(text)
+                logical_col += 1
+        if row_cells:
+            rows.append({"cells": row_cells, "expanded": expanded})
+            previous_expanded = expanded
+    return rows
+
+
+def _docx_iter_blocks(path: str):
+    with zipfile.ZipFile(path) as archive:
+        with archive.open("word/document.xml") as xml_fp:
+            context = ET.iterparse(xml_fp, events=("start", "end"))
+            stack = []
+            for event, elem in context:
+                if event == "start":
+                    stack.append(elem)
+                    continue
+                parent = stack[-2] if len(stack) >= 2 else None
+                if parent is not None and parent.tag == W_BODY:
+                    if elem.tag == W_P:
+                        yield ("paragraph", _docx_text(elem))
+                        elem.clear()
+                    elif elem.tag == W_TBL:
+                        yield ("table", _docx_expand_rows(elem))
+                        elem.clear()
+                if stack:
+                    stack.pop()
+
+
+def _section_from_text(text: str) -> str:
+    text = _clean_text(text)
+    if not text:
+        return ""
+    patterns = [
+        r"\b([A-Z]{2,}[A-Z0-9]*(?:\s*[-/]\s*[A-Z0-9]{1,4})+)\b",
+        r"\b([A-Z]{2,}[A-Z0-9]*\s*[-]\s*[A-Z0-9]{1,4})\b",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            return re.sub(r"\s*[-/]\s*", "-", match.group(1).strip().upper())
+    return ""
+
+
+_ROMAN_VALUES = {"I": 1, "V": 5, "X": 10, "L": 50, "C": 100}
+
+
+def _roman_to_int(value: str) -> Optional[int]:
+    value = _clean_text(value).upper()
+    if not value or any(ch not in _ROMAN_VALUES for ch in value):
+        return None
+    total = 0
+    previous = 0
+    for char in reversed(value):
+        current = _ROMAN_VALUES[char]
+        if current < previous:
+            total -= current
+        else:
+            total += current
+            previous = current
+    return total or None
+
+
+def _semester_from_text(text: str) -> Optional[int]:
+    text = _clean_text(text)
+    match = re.search(r"\b([IVX]+|\d+)\s*[-]?\s*Semester\b", text, flags=re.IGNORECASE)
+    if not match:
+        return None
+    value = match.group(1)
+    if value.isdigit():
+        try:
+            return int(value)
+        except Exception:
+            return None
+    return _roman_to_int(value)
+
+
+def _subject_acronym(subject_name: str) -> str:
+    tokens = re.findall(r"[A-Za-z0-9]+", _clean_text(subject_name).upper())
+    stopwords = {"AND", "OF", "THE", "FOR", "IN", "ON", "TO", "WITH", "A", "AN", "LAB", "PRACTICAL"}
+    return "".join(token[0] for token in tokens if token and token not in stopwords)
+
+
+def _faculty_lookup(entries: List[Dict]) -> Dict[str, Dict]:
+    lookup: Dict[str, Dict] = {}
+    for entry in entries:
+        subject_name = _clean_text(entry.get("subject_name"))
+        sub_code = _clean_text(entry.get("sub_code"))
+        faculty_name = _clean_text(entry.get("faculty_name"))
+        aliases = [
+            _normalize_key(subject_name),
+            _normalize_key(subject_name.replace("lab", "")),
+            _normalize_key(sub_code),
+            _normalize_key(_subject_acronym(subject_name)),
+        ]
+        for alias in aliases:
+            if alias and alias not in lookup:
+                lookup[alias] = {"subject_name": subject_name, "faculty_name": faculty_name, "sub_code": sub_code}
+    return lookup
+
+
+def _resolve_subject(subject_text: str, lookup: Dict[str, Dict]) -> Dict:
+    cleaned = _clean_text(subject_text)
+    for candidate in (_normalize_key(cleaned), _normalize_key(cleaned.replace("lab", "")), _normalize_key(_subject_acronym(cleaned))):
+        if candidate and candidate in lookup:
+            return lookup[candidate]
+    return {}
+
+
+def _append_jsonl(path: str, payload: Dict):
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, default=str) + "\n")
+    except Exception:
+        logger.exception("Failed to write jsonl event")
+
+
+def _section_branch_name(section_name: str, fallback: str = "") -> str:
+    section_name = _clean_text(section_name)
+    if section_name and "-" in section_name:
+        return _clean_text(section_name.split("-", 1)[0])
+    return _clean_text(fallback)
+
+
+def _is_faculty_table(table_rows: List[Dict]) -> bool:
+    if not table_rows:
+        return False
+    header = _normalize_key(" ".join(table_rows[0].get("expanded") or []))
+    return "sub code" in header and ("faculty" in header or "subject name" in header)
+
+
+def _is_timetable_table(table_rows: List[Dict]) -> bool:
+    if not table_rows:
+        return False
+    header = table_rows[0].get("expanded") or []
+    header_text = " ".join(header)
+    header_key = _normalize_key(header_text)
+    if "day" in header_key and re.search(r"\d{1,2}:\d{2}", header_text):
+        return True
+    if any("break" in _normalize_key(value) for value in header):
+        return True
+    return False
+
+
+def _expand_time_bounds(header_cells: List[str], start_col: int, end_col: int) -> tuple[str, str]:
+    start_time = ""
+    end_time = ""
+    for header in header_cells[start_col:end_col + 1]:
+        header_start, header_end = _split_time_range(header)
+        if header_start and not start_time:
+            start_time = header_start
+        if header_end:
+            end_time = header_end
+    return start_time, end_time
+
+
+def _finalize_section_slots(section_state: Dict) -> List[Dict]:
+    faculty_map = _faculty_lookup(section_state.get("faculty_entries", []))
+    timetable_tables = section_state.get("timetable_tables", [])
+    resolved_slots: List[Dict] = []
+    section_name = _clean_text(section_state.get("section")) or _clean_text(section_state.get("section_hint"))
+    branch_name = _clean_text(section_state.get("branch")) or _section_branch_name(section_name, section_state.get("doc_base", ""))
+    semester = section_state.get("semester")
+
+    for table_info in timetable_tables:
+        table_rows = table_info.get("rows") or []
+        if not table_rows:
+            continue
+        header_cells = table_rows[0].get("expanded") or []
+        day_col = 0
+        for idx, header in enumerate(header_cells):
+            if "day" in _normalize_key(header):
+                day_col = idx
+                break
+        for row in table_rows[1:]:
+            expanded = row.get("expanded") or []
+            if not expanded:
+                continue
+            day = _clean_text(expanded[day_col]) if day_col < len(expanded) else ""
+            if not day or _row_has_token(day, "short break", "lunch break", "break"):
+                continue
+            for cell in row.get("cells", []):
+                if cell.get("start_col") == day_col:
+                    continue
+                cell_text = _clean_text(cell.get("text"))
+                if not cell_text or _row_has_token(cell_text, "short break", "lunch break", "break"):
+                    continue
+                start_time, end_time = _expand_time_bounds(header_cells, cell.get("start_col", 0), cell.get("end_col", 0))
+                if not start_time and not end_time:
+                    continue
+                for subject_piece in _split_subjects(cell_text):
+                    resolved = _resolve_subject(subject_piece, faculty_map)
+                    subject_name = _clean_text(resolved.get("subject_name") or subject_piece)
+                    faculty_name = _clean_text(resolved.get("faculty_name") or "")
+                    slot = {
+                        "branch": branch_name,
+                        "section": section_name,
+                        "semester": semester,
+                        "day": day,
+                        "start_time": start_time,
+                        "end_time": end_time,
+                        "subject_name": subject_name,
+                        "faculty_name": faculty_name,
+                        "is_lab": int(bool(_row_has_token(subject_piece, "lab", "practical") or _row_has_token(cell_text, "lab", "practical"))),
+                        "room": _clean_text(section_state.get("room", "")),
+                    }
+                    if _valid_slot_row(slot):
+                        resolved_slots.append(slot)
+    return resolved_slots
+
+
+def iter_docx_section_slots(path: str, debug_jsonl_path: Optional[str] = None) -> Iterator[Dict]:
+    """Stream DOCX timetable rows section-by-section without materializing the full document."""
+    if docx is None:
+        raise RuntimeError("python-docx is not installed. Install with: pip install python-docx")
+
+    base_name = os.path.splitext(os.path.basename(path))[0]
+    section_state = {
+        "section": "",
+        "section_hint": "",
+        "branch": "",
+        "semester": None,
+        "doc_base": base_name,
+        "room": "",
+        "timetable_tables": [],
+        "faculty_entries": [],
+    }
+    total_tables = 0
+    total_slots = 0
+    parse_failures = 0
+
+    def flush_section(reason: str):
+        nonlocal section_state, total_slots
+        if not section_state["timetable_tables"] and not section_state["faculty_entries"]:
+            return
+        section_name = _clean_text(section_state.get("section")) or _clean_text(section_state.get("section_hint")) or f"section_{total_tables}"
+        slots = _finalize_section_slots(section_state)
+        if debug_jsonl_path:
+            _append_jsonl(
+                debug_jsonl_path,
+                {
+                    "type": "section_flush",
+                    "reason": reason,
+                    "section": section_name,
+                    "branch": _clean_text(section_state.get("branch")) or _section_branch_name(section_name, section_state.get("doc_base", "")),
+                    "semester": section_state.get("semester"),
+                    "table_count": len(section_state["timetable_tables"]),
+                    "faculty_entry_count": len(section_state["faculty_entries"]),
+                    "slot_count": len(slots),
+                    "timestamp": time.time(),
+                },
+            )
+        total_slots += len(slots)
+        for slot in slots:
+            yield slot
+        section_state = {
+            "section": "",
+            "section_hint": "",
+            "branch": "",
+            "semester": None,
+            "doc_base": base_name,
+            "room": "",
+            "timetable_tables": [],
+            "faculty_entries": [],
+        }
+
+    try:
+        for block_type, payload in _docx_iter_blocks(path):
+            if block_type == "paragraph":
+                text = _clean_text(payload)
+                if not text:
+                    continue
+                section_name = _section_from_text(text)
+                if section_name:
+                    if section_state["timetable_tables"] or section_state["faculty_entries"]:
+                        yield from flush_section("new_section")
+                    section_state["section"] = section_name
+                    section_state["section_hint"] = section_name
+                    section_state["branch"] = _section_branch_name(section_name, section_state.get("doc_base", ""))
+                    if section_state["semester"] is None:
+                        section_state["semester"] = _semester_from_text(text)
+                    if debug_jsonl_path:
+                        _append_jsonl(
+                            debug_jsonl_path,
+                            {
+                                "type": "section_start",
+                                "section": section_name,
+                                "branch": section_state["branch"],
+                                "semester": section_state["semester"],
+                                "timestamp": time.time(),
+                            },
+                        )
+                    continue
+                semester = _semester_from_text(text)
+                if semester is not None and section_state["semester"] is None:
+                    section_state["semester"] = semester
+                if not section_state["branch"]:
+                    section_state["branch"] = _section_branch_name(text, section_state.get("doc_base", ""))
+                continue
+
+            if block_type != "table":
+                continue
+
+            table_rows = payload or []
+            total_tables += 1
+            try:
+                if _is_faculty_table(table_rows):
+                    entries = []
+                    for row in table_rows[1:]:
+                        expanded = row.get("expanded") or []
+                        for offset in range(0, len(expanded), 3):
+                            group = expanded[offset:offset + 3]
+                            if len(group) < 3:
+                                continue
+                            sub_code = _clean_text(group[0])
+                            subject_name = _clean_text(group[1])
+                            faculty_name = _clean_text(group[2])
+                            if not (sub_code or subject_name or faculty_name):
+                                continue
+                            if _normalize_key(sub_code) in {"sub code", "subject code"} or _normalize_key(subject_name) == "subject name":
+                                continue
+                            entries.append({"sub_code": sub_code, "subject_name": subject_name, "faculty_name": faculty_name})
+                    section_state["faculty_entries"].extend(entries)
+                    if debug_jsonl_path:
+                        _append_jsonl(debug_jsonl_path, {"type": "faculty_table", "section": section_state.get("section") or section_state.get("section_hint") or f"section_{total_tables}", "entries": len(entries), "timestamp": time.time()})
+                    continue
+
+                if _is_timetable_table(table_rows) or not section_state["timetable_tables"]:
+                    section_state["timetable_tables"].append({"rows": table_rows})
+                    if debug_jsonl_path:
+                        _append_jsonl(debug_jsonl_path, {"type": "timetable_table", "section": section_state.get("section") or section_state.get("section_hint") or f"section_{total_tables}", "rows": len(table_rows), "timestamp": time.time()})
+            except Exception:
+                parse_failures += 1
+                logger.exception("Failed to classify DOCX table index=%d", total_tables)
+                continue
+
+    except Exception:
+        logger.exception("DOCX section iterator failed for %s", path)
+        raise
+
+    yield from flush_section("eof")
+    logger.info("iter_docx_section_slots summary: tables=%d slots=%d failures=%d file=%s", total_tables, total_slots, parse_failures, os.path.basename(path))
 
 
 def parse_pdf_text(path: str) -> str:
@@ -804,14 +1230,7 @@ def _write_preview_line(preview_path: str, preview_state: Dict[str, int], payloa
 
 
 def _iter_docx_slots_with_fallback(path: str) -> Iterator[Dict]:
-    primary_iter = iter(iter_docx_table_slots(path))
-    first_item = next(primary_iter, None)
-    if first_item is None:
-        yield from iter_docx_grid_slots(path)
-        return
-    yield first_item
-    for item in primary_iter:
-        yield item
+    yield from iter_docx_section_slots(path)
 
 
 def import_slots_streaming(db, slots_iter: Iterable[Dict]):
@@ -891,7 +1310,7 @@ def import_slots_streaming(db, slots_iter: Iterable[Dict]):
         try:
             cur = _db_execute(
                 db,
-                "INSERT INTO timetable_slots (branch, section, semester, day, start_time, end_time, subject_name, faculty_name, is_lab, room) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                _insert_ignore_sql(db, "timetable_slots", ["branch", "section", "semester", "day", "start_time", "end_time", "subject_name", "faculty_name", "is_lab", "room"]),
                 (row["branch"], row["section"], row["semester"], row["day"], row["start_time"], row["end_time"], row["subject_name"], row["faculty_name"], row["is_lab"], row["room"]),
             )
             if hasattr(cur, "rowcount") and int(cur.rowcount or 0) == 0:
@@ -971,7 +1390,7 @@ def import_slots_streaming(db, slots_iter: Iterable[Dict]):
                 try:
                     cur = _db_execute(
                         db,
-                        "INSERT INTO timetable_entries (branch_id, section, semester, day, start_time, end_time, subject_id, teacher_id, is_lab, room) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                        _insert_ignore_sql(db, "timetable_entries", ["branch_id", "section", "semester", "day", "start_time", "end_time", "subject_id", "teacher_id", "is_lab", "room"]),
                         (norm_row["branch_id"], norm_row["section"], norm_row["semester"], norm_row["day"], norm_row["start_time"], norm_row["end_time"], norm_row["subject_id"], norm_row["teacher_id"], norm_row["is_lab"], norm_row["room"]),
                     )
                     if hasattr(cur, "rowcount") and int(cur.rowcount or 0) == 0:
@@ -1011,7 +1430,8 @@ def import_slots_streaming(db, slots_iter: Iterable[Dict]):
             elapsed = time.time() - start_ts
             rate = row_index / elapsed if elapsed > 0 else 0
             logger.info(
-                "import_slots_streaming progress processed=%d raw_inserted=%d normalized_inserted=%d skipped=%d commits=%d elapsed=%.1fs rate=%.1f rows/s peak_mem_estimate_kb=%.1f",
+                "import_slots_streaming progress section=%s processed=%d raw_inserted=%d normalized_inserted=%d skipped=%d commits=%d elapsed=%.1fs rate=%.1f rows/s peak_mem_estimate_kb=%.1f",
+                row["section"],
                 row_index,
                 raw_counters["inserted"],
                 normalized_counters["inserted"],
@@ -1143,7 +1563,7 @@ def import_slots(db, slots: List[Dict]):
             try:
                 _db_execute(
                     db,
-                    "INSERT INTO timetable_slots (branch, section, semester, day, start_time, end_time, subject_name, faculty_name, is_lab, room) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                    _insert_ignore_sql(db, "timetable_slots", ["branch", "section", "semester", "day", "start_time", "end_time", "subject_name", "faculty_name", "is_lab", "room"]),
                     (row['branch'], row['section'], row['semester'], row['day'], row['start_time'], row['end_time'], row['subject_name'], row['faculty_name'], row['is_lab'], row['room']),
                 )
                 counters["inserted"] += 1
@@ -1297,7 +1717,7 @@ def import_slots_normalized(db, slots: List[Dict]):
             try:
                 _db_execute(
                     db,
-                    "INSERT INTO timetable_entries (branch_id, section, semester, day, start_time, end_time, subject_id, teacher_id, is_lab, room) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                    _insert_ignore_sql(db, "timetable_entries", ["branch_id", "section", "semester", "day", "start_time", "end_time", "subject_id", "teacher_id", "is_lab", "room"]),
                     (row['branch_id'], row['section'], row['semester'], row['day'], row['start_time'], row['end_time'], row['subject_id'], row['teacher_id'], row['is_lab'], row['room']),
                 )
                 counters["inserted"] += 1
@@ -1408,7 +1828,7 @@ def import_slots_normalized(db, slots: List[Dict]):
                 )
                 _db_execute(
                     db,
-                    "INSERT INTO timetable_entries (branch_id, section, semester, day, start_time, end_time, subject_id, teacher_id, is_lab, room) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                    _insert_ignore_sql(db, "timetable_entries", ["branch_id", "section", "semester", "day", "start_time", "end_time", "subject_id", "teacher_id", "is_lab", "room"]),
                     (row['branch_id'], row['section'], row['semester'], row['day'], row['start_time'], row['end_time'], row['subject_id'], row['teacher_id'], row['is_lab'], row['room']),
                 )
                 counters["inserted"] += 1

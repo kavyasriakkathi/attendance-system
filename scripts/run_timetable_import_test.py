@@ -22,6 +22,7 @@ if not os.path.exists(DOCX):
 
 out = {
     'parsed_slots': 0,
+    'streamed_slots': 0,
     'inserted': 0,
     'inserted_normalized': 0,
     'skipped': 0,
@@ -41,44 +42,42 @@ try:
     db = get_db()
     timetable.ensure_timetable_tables(db)
 
-    # parse using grid parser explicitly
     slots = []
+    faculty_issues = []
     try:
-        slots = timetable.parse_docx_grid(DOCX)
+        if os.path.exists(DOCX):
+            def _slot_source():
+                for slot in timetable.iter_docx_section_slots(DOCX, debug_jsonl_path=os.path.join(os.path.dirname(__file__), '..', 'uploads', 'last_import_debug.jsonl')):
+                    slots.append(slot)
+                    if not (slot.get('faculty_name') and str(slot.get('faculty_name')).strip()):
+                        faculty_issues.append(slot)
+                    yield slot
+
+            import_info = timetable.import_slots_streaming(db, _slot_source())
+            out['streamed_slots'] = int(import_info.get('raw_insert', {}).get('counters', {}).get('processed', 0))
+            out['parsed_slots'] = len(slots)
+        else:
+            raise FileNotFoundError(DOCX)
     except Exception as e:
-        print('PARSE_GRID_FAILED', e)
+        print('STREAM_PARSE_FAILED', e)
         raise
 
-    out['parsed_slots'] = len(slots)
+    out['inserted'] = int(import_info.get('raw_insert', {}).get('counters', {}).get('inserted', 0))
+    out['skipped'] = int(import_info.get('raw_insert', {}).get('counters', {}).get('skipped_total', 0))
+    out['inserted_normalized'] = int(import_info.get('normalized_insert', {}).get('counters', {}).get('inserted', 0))
+    out['skipped_normalized'] = int(import_info.get('normalized_insert', {}).get('counters', {}).get('skipped_total', 0))
+    out['preview_path'] = import_info.get('preview_path')
 
-    # quick merged-cell detection: scan docx for gridSpan/vMerge markers
     try:
-        if timetable.docx:
-            doc = timetable.docx.Document(DOCX)
-            for ti, table in enumerate(doc.tables):
-                for ri, row in enumerate(table.rows):
-                    for ci, cell in enumerate(row.cells):
-                        tc_xml = cell._tc.xml if hasattr(cell, '_tc') else ''
-                        if 'gridSpan' in tc_xml or 'vMerge' in tc_xml:
-                            out['problematic_merged_cells'].append({'table': ti, 'row': ri, 'col': ci, 'text': cell.text[:200]})
+        debug_jsonl = os.path.join(os.path.dirname(__file__), '..', 'uploads', 'last_import_debug.jsonl')
+        if os.path.exists(debug_jsonl):
+            with open(debug_jsonl, 'r', encoding='utf-8') as handle:
+                out['debug_jsonl_lines'] = sum(1 for _ in handle)
     except Exception:
-        pass
-
-    # run import_slots (raw)
-    ins = timetable.import_slots(db, slots)
-    nc = timetable.import_slots_normalized(db, slots)
-
-    counters = ins.get('counters', {})
-    nc_counters = nc.get('counters', {})
-    out['inserted'] = int(counters.get('inserted', 0))
-    out['skipped'] = int(counters.get('skipped_total', 0))
-    out['inserted_normalized'] = int(nc_counters.get('inserted', 0))
-    out['skipped_normalized'] = int(nc_counters.get('skipped_total', 0))
-    out['preview_path'] = ins.get('preview_path') or nc.get('preview_path')
+        out['debug_jsonl_lines'] = None
 
     # faculty issues: samples where faculty_name is empty
-    fac_issues = [s for s in slots if not (s.get('faculty_name') and s.get('faculty_name').strip())]
-    out['faculty_issues_sample'] = fac_issues[:20]
+    out['faculty_issues_sample'] = faculty_issues[:20]
 
     # attempt to capture DB duplicate diagnostics
     try:
