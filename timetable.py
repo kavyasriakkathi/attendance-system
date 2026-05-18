@@ -1129,6 +1129,47 @@ def _lookup_branch_id(db, branch_name: str):
     return None
 
 
+def _resolve_or_create_branch_id(db, branch_name: str, branch_cache: Optional[Dict[str, Optional[int]]] = None):
+    branch_name = _clean_text(branch_name)
+    if not branch_name:
+        return None
+
+    cache_key = branch_name.lower()
+    if branch_cache is not None and cache_key in branch_cache:
+        return branch_cache[cache_key]
+
+    candidates = [branch_name]
+    if "-" in branch_name:
+        candidates.append(_clean_text(branch_name.split("-", 1)[0]))
+    if branch_name.endswith("SECTION"):
+        candidates.append(branch_name[:-7].strip())
+
+    for candidate in candidates:
+        if not candidate:
+            continue
+        branch_id = _lookup_branch_id(db, candidate)
+        if branch_id is not None:
+            if branch_cache is not None:
+                branch_cache[cache_key] = branch_id
+                branch_cache[candidate.lower()] = branch_id
+            return branch_id
+
+    try:
+        _db_execute(db, _insert_ignore_sql(db, "branches", ["name", "location"]), (branch_name, "Auto-imported timetable branch"))
+        try:
+            db.commit()
+        except Exception:
+            pass
+    except Exception:
+        logger.exception("Failed to auto-create branch %s", branch_name)
+        return None
+
+    branch_id = _lookup_branch_id(db, branch_name)
+    if branch_cache is not None:
+        branch_cache[cache_key] = branch_id
+    return branch_id
+
+
 def get_upcoming_classes(db, branch: str = "", section: str = "", limit: int = 3, now: Optional[datetime] = None):
     """Return upcoming classes for the current day using normalized data first."""
     current = _current_local_datetime(now)
@@ -1331,8 +1372,7 @@ def import_slots_streaming(db, slots_iter: Iterable[Dict]):
         normalized_counters["processed"] += 1
         branch_key = row["branch"].strip().lower()
         if branch_key not in branch_cache:
-            b_row = _db_execute(db, "SELECT id FROM branches WHERE LOWER(TRIM(name))=LOWER(TRIM(%s)) LIMIT 1", (row["branch"],)).fetchone()
-            branch_cache[branch_key] = b_row[0] if b_row and not hasattr(b_row, "keys") else (b_row["id"] if b_row else None)
+            branch_cache[branch_key] = _resolve_or_create_branch_id(db, row["branch"], branch_cache)
         branch_id = branch_cache.get(branch_key)
         if branch_id is None:
             normalized_counters["skipped_total"] += 1
@@ -1758,6 +1798,9 @@ def import_slots_normalized(db, slots: List[Dict]):
             except Exception:
                 teacher_id = None
 
+            if branch_id is None:
+                branch_id = _resolve_or_create_branch_id(db, bname or sec or row.get("branch", ""), branch_cache)
+                branch_cache[branch_key] = branch_id
             if branch_id is None:
                 counters["skipped_total"] += 1
                 counters["skipped_branch"] += 1
