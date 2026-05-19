@@ -862,27 +862,16 @@ def iter_docx_section_slots(path: str, debug_jsonl_path: Optional[str] = None) -
     logger.info("iter_docx_section_slots summary: tables=%d slots=%d failures=%d file=%s", total_tables, total_slots, parse_failures, os.path.basename(path))
 
 
-def parse_pdf_text(path: str) -> str:
+def parse_pdf_to_slots(path: str) -> Iterator[Dict]:
     if pdfplumber is None:
         raise RuntimeError("pdfplumber is not installed. Install with: pip install pdfplumber")
-    text = []
-    with pdfplumber.open(path) as pdf:
-        for page in pdf.pages:
-            text.append(page.extract_text() or "")
-    return "\n".join(text)
-
-
-def parse_pdf_to_slots(path: str) -> List[Dict]:
-    text = parse_pdf_text(path)
-    # Heuristic parsing: look for lines that contain day/time/subject
-    lines = [l.strip() for l in text.splitlines() if l.strip()]
-    slots = []
     parsed_rows = 0
     skipped_rows = 0
     failed_rows = 0
 
-    def _emit_row(row_map: Dict[str, str], raw_text: str, context_label: str):
+    def _normalize_pdf_row(row_map: Dict[str, str], raw_text: str, context_label: str) -> List[Dict]:
         nonlocal parsed_rows, skipped_rows, failed_rows
+        emitted_slots = []
         try:
             normalized = _normalize_slot_row(row_map, row_text=raw_text)
             subject_raw = normalized["subject_name"]
@@ -891,16 +880,16 @@ def parse_pdf_to_slots(path: str) -> List[Dict]:
             if _row_has_token(subject_raw, *skip_tokens) or _row_has_token(faculty_raw, *skip_tokens) or _row_has_token(raw_text, *skip_tokens):
                 skipped_rows += 1
                 logger.info("parse_pdf_to_slots skipped break %s text=%s", context_label, raw_text)
-                return
+                return emitted_slots
             if not _valid_slot_row(normalized):
                 skipped_rows += 1
                 logger.info("parse_pdf_to_slots skipped invalid %s normalized=%s text=%s", context_label, normalized, raw_text)
-                return
+                return emitted_slots
             subjects = _split_subjects(subject_raw)
             if not subjects:
                 skipped_rows += 1
                 logger.info("parse_pdf_to_slots skipped subjectless %s text=%s", context_label, raw_text)
-                return
+                return emitted_slots
             for subject in subjects:
                 slot = dict(normalized)
                 slot["subject_name"] = _clean_text(subject)
@@ -909,12 +898,13 @@ def parse_pdf_to_slots(path: str) -> List[Dict]:
                     skipped_rows += 1
                     logger.info("parse_pdf_to_slots skipped normalized subject row %s slot=%s text=%s", context_label, slot, raw_text)
                     continue
-                slots.append(slot)
                 parsed_rows += 1
+                emitted_slots.append(slot)
                 logger.info("parse_pdf_to_slots parsed %s slot=%s", context_label, slot)
         except Exception:
             failed_rows += 1
             logger.exception("parse_pdf_to_slots failed %s raw=%s", context_label, raw_text)
+        return emitted_slots
 
     # Prefer structured extraction from tables embedded in PDFs
     try:
@@ -934,34 +924,42 @@ def parse_pdf_to_slots(path: str) -> List[Dict]:
                             raw_values = [_clean_text(v) for v in values]
                             row_text = " | ".join(raw_values)
                             row_map = {headers[i]: raw_values[i] for i in range(min(len(headers), len(raw_values))) if headers[i]}
-                            _emit_row(row_map, row_text, f"page={page_index} table={table_index} row={row_index}")
+                            for slot in _normalize_pdf_row(row_map, row_text, f"page={page_index} table={table_index} row={row_index}"):
+                                yield slot
     except Exception:
         logger.exception("parse_pdf_to_slots table extraction failed")
 
-    for ln in lines:
-        try:
-            parts = [p.strip() for p in re.split(r"\s*[-|]\s*", ln) if p.strip()]
-            if len(parts) >= 3:
-                day = parts[0]
-                time_part = parts[1]
-                subj_raw = parts[2]
-                fac = parts[3] if len(parts) > 3 else ""
-                row_map = {
-                    "day": day,
-                    "time": time_part,
-                    "subject": subj_raw,
-                    "faculty": fac,
-                }
-                _emit_row(row_map, ln, f"line={ln[:80]}")
-            else:
-                skipped_rows += 1
-                logger.info("parse_pdf_to_slots skipped unstructured line=%s", ln)
-        except Exception:
-            failed_rows += 1
-            logger.exception("parse_pdf_to_slots line parse failed: %s", ln)
-            continue
+    # Fallback to plain-text parsing, page by page, to avoid building a giant in-memory string.
+    try:
+        with pdfplumber.open(path) as pdf:
+            for page_index, page in enumerate(pdf.pages):
+                page_text = page.extract_text() or ""
+                for line_index, ln in enumerate((l.strip() for l in page_text.splitlines() if l.strip()), start=1):
+                    try:
+                        parts = [p.strip() for p in re.split(r"\s*[-|]\s*", ln) if p.strip()]
+                        if len(parts) >= 3:
+                            day = parts[0]
+                            time_part = parts[1]
+                            subj_raw = parts[2]
+                            fac = parts[3] if len(parts) > 3 else ""
+                            row_map = {
+                                "day": day,
+                                "time": time_part,
+                                "subject": subj_raw,
+                                "faculty": fac,
+                            }
+                            for slot in _normalize_pdf_row(row_map, ln, f"page={page_index} line={line_index}"):
+                                yield slot
+                        else:
+                            skipped_rows += 1
+                            logger.info("parse_pdf_to_slots skipped unstructured line=%s", ln)
+                    except Exception:
+                        failed_rows += 1
+                        logger.exception("parse_pdf_to_slots line parse failed: %s", ln)
+                        continue
+    except Exception:
+        logger.exception("parse_pdf_to_slots text extraction failed")
     logger.info("parse_pdf_to_slots summary: parsed_rows=%d skipped_rows=%d failed_rows=%d", parsed_rows, skipped_rows, failed_rows)
-    return slots
 
 
 def _row_exists(db, table: str, where_clause: str, params: tuple) -> bool:
@@ -1298,7 +1296,8 @@ def import_slots_streaming(db, slots_iter: Iterable[Dict]):
     preview_path = os.path.join(os.path.dirname(__file__), "uploads", "last_import_debug.jsonl")
     os.makedirs(os.path.dirname(preview_path), exist_ok=True)
     preview_state = {"written": 0}
-    batch_size = max(10, min(20, int(BATCH_INSERT_SIZE)))
+    # Use larger batch size for better performance and memory efficiency
+    batch_size = max(50, int(BATCH_INSERT_SIZE) * 3)
     inserted_since_commit = 0
     batch_commits = 0
     start_ts = time.time()
@@ -1454,11 +1453,11 @@ def import_slots_streaming(db, slots_iter: Iterable[Dict]):
             inserted_since_commit = 0
             seen_raw_keys.clear()
             seen_norm_keys.clear()
-            if len(branch_cache) > 1024:
+            # Aggressively clear caches to prevent OOM on large imports
+            if len(branch_cache) > 256 or len(subject_cache) > 256 or len(teacher_cache) > 256:
+                logger.debug("Clearing timetable import caches (branch=%d, subject=%d, teacher=%d)", len(branch_cache), len(subject_cache), len(teacher_cache))
                 branch_cache.clear()
-            if len(subject_cache) > 1024:
                 subject_cache.clear()
-            if len(teacher_cache) > 1024:
                 teacher_cache.clear()
             _write_preview_line(
                 preview_path,
@@ -1485,8 +1484,13 @@ def import_slots_streaming(db, slots_iter: Iterable[Dict]):
     if inserted_since_commit > 0:
         db.commit()
         batch_commits += 1
-        seen_raw_keys.clear()
-        seen_norm_keys.clear()
+    
+    # Final cleanup to free memory
+    seen_raw_keys.clear()
+    seen_norm_keys.clear()
+    branch_cache.clear()
+    subject_cache.clear()
+    teacher_cache.clear()
 
     final_mem_estimate = (
         (len(seen_raw_keys) + len(seen_norm_keys)) * 96
@@ -2054,8 +2058,7 @@ def register_routes(app, db_getter=None):
                 if ext in (".docx",) and docx is not None:
                     slots_iter = _iter_docx_slots_with_fallback(dest)
                 elif ext in (".pdf",) and pdfplumber is not None:
-                    # PDF parser currently returns list; convert to iterator to keep importer generic.
-                    slots_iter = iter(parse_pdf_to_slots(dest))
+                    slots_iter = parse_pdf_to_slots(dest)
                 else:
                     flash("Unsupported file type or missing parser dependencies.", "error")
                     return redirect(url_for("timetable_manage"))
