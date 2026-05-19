@@ -5790,6 +5790,69 @@ def build_report_pdf(records):
     return output.getvalue(), filename
 
 
+def build_report_docx(records):
+    """Build a DOCX attendance report using python-docx."""
+    try:
+        from docx import Document
+        from docx.shared import Inches, Pt, RGBColor
+        from docx.enum.text import WD_ALIGN_PARAGRAPH
+    except Exception as e:
+        raise RuntimeError("DOCX export requires python-docx. Add python-docx to requirements.txt") from e
+
+    doc = Document()
+    
+    # Add title
+    title = doc.add_heading("Attendance Report", 0)
+    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    
+    # Add generated date
+    date_para = doc.add_paragraph(f"Generated on: {date.today().isoformat()}")
+    date_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    
+    # Add table
+    table = doc.add_table(rows=1, cols=6)
+    table.style = "Light Grid Accent 1"
+    
+    # Add header row
+    header_cells = table.rows[0].cells
+    headers = ["Name", "Enrollment", "Subject", "Date", "Period", "Status"]
+    for i, header_text in enumerate(headers):
+        header_cells[i].text = header_text
+        # Style header
+        for paragraph in header_cells[i].paragraphs:
+            for run in paragraph.runs:
+                run.bold = True
+                run.font.color.rgb = RGBColor(255, 255, 255)
+            paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        from docx.oxml import parse_xml
+        from docx.oxml.ns import nsdecls
+        shading_elm = parse_xml(r'<w:shd {} w:fill="4361EE"/>'.format(nsdecls('w')))
+        header_cells[i]._element.get_or_add_tcPr().append(shading_elm)
+    
+    # Add data rows
+    for record in records:
+        row_cells = table.add_row().cells
+        row_data = [
+            str(row_get(record, "student_name") or ""),
+            str(row_get(record, "enrollment") or ""),
+            str(row_get(record, "subject_name") or ""),
+            str(row_get(record, "date") or ""),
+            str(row_get(record, "period") or "1"),
+            str(row_get(record, "status") or ""),
+        ]
+        for i, cell_text in enumerate(row_data):
+            row_cells[i].text = cell_text
+            for paragraph in row_cells[i].paragraphs:
+                paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    
+    output = BytesIO()
+    doc.save(output)
+    output.seek(0)
+    
+    filename = f"attendance_report_{date.today().isoformat()}.docx"
+    return output.getvalue(), filename
+
+
 @app.route("/download_attendance")
 @login_required
 def download_attendance():
@@ -6801,6 +6864,63 @@ def reports_export_pdf():
     except Exception as e:
         print(f"[reports_export_pdf] ERROR: {repr(e)}")
         flash("PDF export failed.", "error")
+        return redirect(url_for("reports_index"))
+    finally:
+        if db:
+            try: db.close()
+            except: pass
+
+
+@app.route("/reports/export.docx")
+@login_required
+@admin_required
+def reports_export_docx():
+    db = None
+    try:
+        db = get_db()
+        # Validate params
+        subject_id_raw = request.args.get("subject_id") or None
+        branch_id_raw = request.args.get("branch_id") or None
+        subject_id = _parse_int_param(subject_id_raw)
+        branch_id = _parse_int_param(branch_id_raw)
+        start_date = _parse_date_param(request.args.get("start_date"))
+        end_date = _parse_date_param(request.args.get("end_date"))
+
+        if start_date and end_date and start_date > end_date:
+            flash("Start date cannot be after end date.", "error")
+            return redirect(url_for("reports_index"))
+
+        if subject_id_raw and subject_id is None:
+            flash("Invalid subject id.", "error")
+            return redirect(url_for("reports_index"))
+        if branch_id_raw and branch_id is None:
+            flash("Invalid branch id.", "error")
+            return redirect(url_for("reports_index"))
+
+        if subject_id and not _exists_id(db, "subjects", subject_id):
+            flash("Subject not found.", "error")
+            return redirect(url_for("reports_index"))
+        if branch_id and not _exists_id(db, "branches", branch_id):
+            flash("Branch not found.", "error")
+            return redirect(url_for("reports_index"))
+
+        # Enforce maximum export rows
+        MAX_EXPORT_ROWS = int(os.environ.get("REPORT_MAX_ROWS", "10000"))
+        rows = _get_report_rows(db, subject_id=subject_id, branch_id=branch_id, start_date=start_date, end_date=end_date)
+        if len(rows) > MAX_EXPORT_ROWS:
+            rows = rows[:MAX_EXPORT_ROWS]
+            flash(f"Export limited to first {MAX_EXPORT_ROWS} rows.", "warning")
+
+        content, filename = build_report_docx(rows)
+        return send_file(
+            BytesIO(content),
+            as_attachment=True,
+            download_name=filename,
+            mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        )
+    except Exception as e:
+        print(f"[reports_export_docx] ERROR: {repr(e)}")
+        flash("DOCX export failed.", "error")
         return redirect(url_for("reports_index"))
     finally:
         if db:

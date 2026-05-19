@@ -70,7 +70,8 @@
         <div class="muted">Daily / Subject / Branch reports. Use filters and click Run to preview results.</div>
         <div style="margin-left:auto">
           <a href="/reports/export.xlsx?{% if filters.subject_id %}subject_id={{filters.subject_id}}&{% endif %}{% if filters.branch_id %}branch_id={{filters.branch_id}}&{% endif %}{% if filters.start_date %}start_date={{filters.start_date}}&{% endif %}{% if filters.end_date %}end_date={{filters.end_date}}&{% endif %}" style="margin-right:8px"><button>Export XLSX</button></a>
-          <a href="/reports/export.pdf?{% if filters.subject_id %}subject_id={{filters.subject_id}}&{% endif %}{% if filters.branch_id %}branch_id={{filters.branch_id}}&{% endif %}{% if filters.start_date %}start_date={{filters.start_date}}&{% endif %}{% if filters.end_date %}end_date={{filters.end_date}}&{% endif %}"><button>Export PDF</button></a>
+          <a href="/reports/export.pdf?{% if filters.subject_id %}subject_id={{filters.subject_id}}&{% endif %}{% if filters.branch_id %}branch_id={{filters.branch_id}}&{% endif %}{% if filters.start_date %}start_date={{filters.start_date}}&{% endif %}{% if filters.end_date %}end_date={{filters.end_date}}&{% endif %}" style="margin-right:8px"><button>Export PDF</button></a>
+          <a href="/reports/export.docx?{% if filters.subject_id %}subject_id={{filters.subject_id}}&{% endif %}{% if filters.branch_id %}branch_id={{filters.branch_id}}&{% endif %}{% if filters.start_date %}start_date={{filters.start_date}}&{% endif %}{% if filters.end_date %}end_date={{filters.end_date}}&{% endif %}"><button>Export DOCX</button></a>
         </div>
       </div>
 
