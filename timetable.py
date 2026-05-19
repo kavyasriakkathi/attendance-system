@@ -3,6 +3,7 @@ import logging
 import sqlite3
 import re
 import time
+import gc
 from datetime import datetime, timezone
 from typing import List, Dict, Optional, Iterator, Iterable
 import traceback
@@ -28,9 +29,9 @@ except Exception:
 logger = logging.getLogger("app.timetable")
 
 # Tunables for import batching and preview limits
-BATCH_INSERT_SIZE = int(os.environ.get("TIMETABLE_BATCH_SIZE", 15))
-PREVIEW_ROW_CAP = int(os.environ.get("TIMETABLE_PREVIEW_CAP", 80))
-SKIPPED_ROW_SAMPLE_CAP = int(os.environ.get("TIMETABLE_SKIPPED_SAMPLE_CAP", 25))
+BATCH_INSERT_SIZE = int(os.environ.get("TIMETABLE_BATCH_SIZE", 5))
+PREVIEW_ROW_CAP = int(os.environ.get("TIMETABLE_PREVIEW_CAP", 0))
+SKIPPED_ROW_SAMPLE_CAP = int(os.environ.get("TIMETABLE_SKIPPED_SAMPLE_CAP", 5))
 ENABLE_IMPORT_TRACEMALLOC = os.environ.get("TIMETABLE_ENABLE_TRACEMALLOC", "false").strip().lower() in ("1", "true", "yes", "on")
 
 
@@ -618,6 +619,28 @@ def _faculty_lookup(entries: List[Dict]) -> Dict[str, Dict]:
     return lookup
 
 
+def _merge_faculty_entries(lookup: Dict[str, Dict], entries: List[Dict]) -> None:
+    if not entries:
+        return
+    for entry in entries:
+        subject_name = _clean_text(entry.get("subject_name"))
+        sub_code = _clean_text(entry.get("sub_code"))
+        faculty_name = _clean_text(entry.get("faculty_name"))
+        aliases = [
+            _normalize_key(subject_name),
+            _normalize_key(subject_name.replace("lab", "")),
+            _normalize_key(sub_code),
+            _normalize_key(_subject_acronym(subject_name)),
+        ]
+        for alias in aliases:
+            if alias and alias not in lookup:
+                lookup[alias] = {
+                    "subject_name": subject_name,
+                    "faculty_name": faculty_name,
+                    "sub_code": sub_code,
+                }
+
+
 def _resolve_subject(subject_text: str, lookup: Dict[str, Dict]) -> Dict:
     cleaned = _clean_text(subject_text)
     for candidate in (_normalize_key(cleaned), _normalize_key(cleaned.replace("lab", "")), _normalize_key(_subject_acronym(cleaned))):
@@ -675,58 +698,62 @@ def _expand_time_bounds(header_cells: List[str], start_col: int, end_col: int) -
 
 
 def _finalize_section_slots(section_state: Dict) -> List[Dict]:
-    faculty_map = _faculty_lookup(section_state.get("faculty_entries", []))
+    faculty_map = section_state.get("faculty_map") or _faculty_lookup(section_state.get("faculty_entries", []))
     timetable_tables = section_state.get("timetable_tables", [])
     resolved_slots: List[Dict] = []
+    for table_info in timetable_tables:
+        table_rows = table_info.get("rows") or []
+        for slot in _iter_section_table_slots(table_rows, section_state, faculty_map):
+            resolved_slots.append(slot)
+    return resolved_slots
+
+
+def _iter_section_table_slots(table_rows: List[Dict], section_state: Dict, faculty_map: Dict[str, Dict]) -> Iterator[Dict]:
+    if not table_rows:
+        return
     section_name = _clean_text(section_state.get("section")) or _clean_text(section_state.get("section_hint"))
     branch_name = _clean_text(section_state.get("branch")) or _section_branch_name(section_name, section_state.get("doc_base", ""))
     semester = section_state.get("semester")
-
-    for table_info in timetable_tables:
-        table_rows = table_info.get("rows") or []
-        if not table_rows:
+    header_cells = table_rows[0].get("expanded") or []
+    day_col = 0
+    for idx, header in enumerate(header_cells):
+        if "day" in _normalize_key(header):
+            day_col = idx
+            break
+    for row in table_rows[1:]:
+        expanded = row.get("expanded") or []
+        if not expanded:
             continue
-        header_cells = table_rows[0].get("expanded") or []
-        day_col = 0
-        for idx, header in enumerate(header_cells):
-            if "day" in _normalize_key(header):
-                day_col = idx
-                break
-        for row in table_rows[1:]:
-            expanded = row.get("expanded") or []
-            if not expanded:
+        day = _clean_text(expanded[day_col]) if day_col < len(expanded) else ""
+        if not day or _row_has_token(day, "short break", "lunch break", "break"):
+            continue
+        for cell in row.get("cells", []):
+            if cell.get("start_col") == day_col:
                 continue
-            day = _clean_text(expanded[day_col]) if day_col < len(expanded) else ""
-            if not day or _row_has_token(day, "short break", "lunch break", "break"):
+            cell_text = _clean_text(cell.get("text"))
+            if not cell_text or _row_has_token(cell_text, "short break", "lunch break", "break"):
                 continue
-            for cell in row.get("cells", []):
-                if cell.get("start_col") == day_col:
-                    continue
-                cell_text = _clean_text(cell.get("text"))
-                if not cell_text or _row_has_token(cell_text, "short break", "lunch break", "break"):
-                    continue
-                start_time, end_time = _expand_time_bounds(header_cells, cell.get("start_col", 0), cell.get("end_col", 0))
-                if not start_time and not end_time:
-                    continue
-                for subject_piece in _split_subjects(cell_text):
-                    resolved = _resolve_subject(subject_piece, faculty_map)
-                    subject_name = _clean_text(resolved.get("subject_name") or subject_piece)
-                    faculty_name = _clean_text(resolved.get("faculty_name") or "")
-                    slot = {
-                        "branch": branch_name,
-                        "section": section_name,
-                        "semester": semester,
-                        "day": day,
-                        "start_time": start_time,
-                        "end_time": end_time,
-                        "subject_name": subject_name,
-                        "faculty_name": faculty_name,
-                        "is_lab": int(bool(_row_has_token(subject_piece, "lab", "practical") or _row_has_token(cell_text, "lab", "practical"))),
-                        "room": _clean_text(section_state.get("room", "")),
-                    }
-                    if _valid_slot_row(slot):
-                        resolved_slots.append(slot)
-    return resolved_slots
+            start_time, end_time = _expand_time_bounds(header_cells, cell.get("start_col", 0), cell.get("end_col", 0))
+            if not start_time and not end_time:
+                continue
+            for subject_piece in _split_subjects(cell_text):
+                resolved = _resolve_subject(subject_piece, faculty_map)
+                subject_name = _clean_text(resolved.get("subject_name") or subject_piece)
+                faculty_name = _clean_text(resolved.get("faculty_name") or "")
+                slot = {
+                    "branch": branch_name,
+                    "section": section_name,
+                    "semester": semester,
+                    "day": day,
+                    "start_time": start_time,
+                    "end_time": end_time,
+                    "subject_name": subject_name,
+                    "faculty_name": faculty_name,
+                    "is_lab": int(bool(_row_has_token(subject_piece, "lab", "practical") or _row_has_token(cell_text, "lab", "practical"))),
+                    "room": _clean_text(section_state.get("room", "")),
+                }
+                if _valid_slot_row(slot):
+                    yield slot
 
 
 def iter_docx_section_slots(path: str, debug_jsonl_path: Optional[str] = None) -> Iterator[Dict]:
@@ -742,8 +769,9 @@ def iter_docx_section_slots(path: str, debug_jsonl_path: Optional[str] = None) -
         "semester": None,
         "doc_base": base_name,
         "room": "",
-        "timetable_tables": [],
-        "faculty_entries": [],
+        "faculty_map": {},
+        "table_count": 0,
+        "slot_count": 0,
     }
     total_tables = 0
     total_slots = 0
@@ -751,10 +779,9 @@ def iter_docx_section_slots(path: str, debug_jsonl_path: Optional[str] = None) -
 
     def flush_section(reason: str):
         nonlocal section_state, total_slots
-        if not section_state["timetable_tables"] and not section_state["faculty_entries"]:
+        if section_state.get("table_count", 0) == 0 and not section_state.get("faculty_map"):
             return
         section_name = _clean_text(section_state.get("section")) or _clean_text(section_state.get("section_hint")) or f"section_{total_tables}"
-        slots = _finalize_section_slots(section_state)
         if debug_jsonl_path:
             _append_jsonl(
                 debug_jsonl_path,
@@ -764,15 +791,19 @@ def iter_docx_section_slots(path: str, debug_jsonl_path: Optional[str] = None) -
                     "section": section_name,
                     "branch": _clean_text(section_state.get("branch")) or _section_branch_name(section_name, section_state.get("doc_base", "")),
                     "semester": section_state.get("semester"),
-                    "table_count": len(section_state["timetable_tables"]),
-                    "faculty_entry_count": len(section_state["faculty_entries"]),
-                    "slot_count": len(slots),
+                    "table_count": section_state.get("table_count", 0),
+                    "faculty_entry_count": len(section_state.get("faculty_map") or {}),
+                    "slot_count": section_state.get("slot_count", 0),
                     "timestamp": time.time(),
                 },
             )
-        total_slots += len(slots)
-        for slot in slots:
-            yield slot
+        logger.info(
+            "timetable section flush section=%s reason=%s tables=%d slots=%d",
+            section_name,
+            reason,
+            section_state.get("table_count", 0),
+            section_state.get("slot_count", 0),
+        )
         section_state = {
             "section": "",
             "section_hint": "",
@@ -780,9 +811,11 @@ def iter_docx_section_slots(path: str, debug_jsonl_path: Optional[str] = None) -
             "semester": None,
             "doc_base": base_name,
             "room": "",
-            "timetable_tables": [],
-            "faculty_entries": [],
+            "faculty_map": {},
+            "table_count": 0,
+            "slot_count": 0,
         }
+        gc.collect()
 
     try:
         for block_type, payload in _docx_iter_blocks(path):
@@ -792,13 +825,14 @@ def iter_docx_section_slots(path: str, debug_jsonl_path: Optional[str] = None) -
                     continue
                 section_name = _section_from_text(text)
                 if section_name:
-                    if section_state["timetable_tables"] or section_state["faculty_entries"]:
+                    if section_state.get("table_count", 0) > 0 or section_state.get("faculty_map"):
                         yield from flush_section("new_section")
                     section_state["section"] = section_name
                     section_state["section_hint"] = section_name
                     section_state["branch"] = _section_branch_name(section_name, section_state.get("doc_base", ""))
                     if section_state["semester"] is None:
                         section_state["semester"] = _semester_from_text(text)
+                    logger.info("timetable section start section=%s branch=%s semester=%s", section_name, section_state["branch"], section_state["semester"])
                     if debug_jsonl_path:
                         _append_jsonl(
                             debug_jsonl_path,
@@ -840,15 +874,34 @@ def iter_docx_section_slots(path: str, debug_jsonl_path: Optional[str] = None) -
                             if _normalize_key(sub_code) in {"sub code", "subject code"} or _normalize_key(subject_name) == "subject name":
                                 continue
                             entries.append({"sub_code": sub_code, "subject_name": subject_name, "faculty_name": faculty_name})
-                    section_state["faculty_entries"].extend(entries)
+                    _merge_faculty_entries(section_state["faculty_map"], entries)
+                    section_state["table_count"] += 1
                     if debug_jsonl_path:
                         _append_jsonl(debug_jsonl_path, {"type": "faculty_table", "section": section_state.get("section") or section_state.get("section_hint") or f"section_{total_tables}", "entries": len(entries), "timestamp": time.time()})
+                    entries = None
+                    table_rows = None
+                    gc.collect()
                     continue
 
-                if _is_timetable_table(table_rows) or not section_state["timetable_tables"]:
-                    section_state["timetable_tables"].append({"rows": table_rows})
+                if _is_timetable_table(table_rows) or section_state.get("table_count", 0) == 0:
+                    section_state["table_count"] += 1
+                    for slot in _iter_section_table_slots(table_rows, section_state, section_state.get("faculty_map") or {}):
+                        section_state["slot_count"] += 1
+                        total_slots += 1
+                        yield slot
+                    mem_estimate_kb = (len(table_rows) * 180 + len(section_state.get("faculty_map") or {}) * 80) / 1024.0
+                    logger.info(
+                        "timetable table processed section=%s rows=%d slots=%d tables=%d mem_estimate_kb=%.1f",
+                        section_state.get("section") or section_state.get("section_hint") or f"section_{total_tables}",
+                        len(table_rows),
+                        section_state.get("slot_count", 0),
+                        section_state.get("table_count", 0),
+                        mem_estimate_kb,
+                    )
                     if debug_jsonl_path:
                         _append_jsonl(debug_jsonl_path, {"type": "timetable_table", "section": section_state.get("section") or section_state.get("section_hint") or f"section_{total_tables}", "rows": len(table_rows), "timestamp": time.time()})
+                table_rows = None
+                gc.collect()
             except Exception:
                 parse_failures += 1
                 logger.exception("Failed to classify DOCX table index=%d", total_tables)
@@ -1258,6 +1311,8 @@ def get_faculty_schedule(db, teacher_id, now: Optional[datetime] = None):
 # --- DB import --------------------------------------------------------------
 
 def _write_preview_line(preview_path: str, preview_state: Dict[str, int], payload: Dict):
+    if not preview_path or PREVIEW_ROW_CAP <= 0:
+        return
     if preview_state["written"] >= PREVIEW_ROW_CAP:
         return
     try:
@@ -1293,11 +1348,13 @@ def import_slots_streaming(db, slots_iter: Iterable[Dict]):
         "failures": 0,
     }
 
-    preview_path = os.path.join(os.path.dirname(__file__), "uploads", "last_import_debug.jsonl")
-    os.makedirs(os.path.dirname(preview_path), exist_ok=True)
+    preview_path = None
     preview_state = {"written": 0}
-    # Use larger batch size for better performance and memory efficiency
-    batch_size = max(50, int(BATCH_INSERT_SIZE) * 3)
+    if PREVIEW_ROW_CAP > 0:
+        preview_path = os.path.join(os.path.dirname(__file__), "uploads", "last_import_debug.jsonl")
+        os.makedirs(os.path.dirname(preview_path), exist_ok=True)
+    # Commit every 5-10 rows for low-memory environments
+    batch_size = max(5, min(10, int(BATCH_INSERT_SIZE)))
     inserted_since_commit = 0
     batch_commits = 0
     start_ts = time.time()
@@ -1306,14 +1363,10 @@ def import_slots_streaming(db, slots_iter: Iterable[Dict]):
     branch_cache = {}
     subject_cache = {}
     teacher_cache = {}
-    seen_raw_keys = set()
-    seen_norm_keys = set()
-
     for row_index, slot_in in enumerate(slots_iter, start=1):
         mem_estimate = (
-            (len(seen_raw_keys) + len(seen_norm_keys)) * 96
-            + (len(branch_cache) + len(subject_cache) + len(teacher_cache)) * 80
-            + preview_state["written"] * 120
+            (len(branch_cache) + len(subject_cache) + len(teacher_cache)) * 80
+            + preview_state["written"] * 64
         )
         if mem_estimate > peak_mem_estimate_bytes:
             peak_mem_estimate_bytes = mem_estimate
@@ -1331,15 +1384,6 @@ def import_slots_streaming(db, slots_iter: Iterable[Dict]):
             "room": _clean_text(slot_in.get("room")),
         }
         raw_counters["processed"] += 1
-
-        raw_key = _dup_key(
-            row["branch"], row["section"], row["semester"], row["day"], row["start_time"], row["end_time"], row["subject_name"], row["faculty_name"], row["room"]
-        )
-        if raw_key in seen_raw_keys:
-            raw_counters["skipped_total"] += 1
-            raw_counters["skipped_duplicate"] += 1
-            continue
-        seen_raw_keys.add(raw_key)
 
         if not _valid_slot_row(row):
             raw_counters["skipped_total"] += 1
@@ -1408,64 +1452,60 @@ def import_slots_streaming(db, slots_iter: Iterable[Dict]):
                 "is_lab": row["is_lab"],
                 "room": row["room"],
             }
-            norm_key = _dup_key(
-                norm_row["branch_id"], norm_row["section"], norm_row["semester"], norm_row["day"], norm_row["start_time"], norm_row["end_time"], norm_row["subject_id"], norm_row["teacher_id"], norm_row["room"]
-            )
-            if norm_key in seen_norm_keys:
-                normalized_counters["skipped_total"] += 1
-                normalized_counters["skipped_duplicate"] += 1
-            else:
-                seen_norm_keys.add(norm_key)
-                if norm_row["subject_id"] is None or norm_row["teacher_id"] is None:
-                    if _row_exists(
-                        db,
-                        "timetable_entries",
-                        "COALESCE(CAST(branch_id AS TEXT), '') = COALESCE(CAST(%s AS TEXT), '') AND COALESCE(section, '') = COALESCE(%s, '') AND COALESCE(CAST(semester AS TEXT), '') = COALESCE(CAST(%s AS TEXT), '') AND COALESCE(day, '') = COALESCE(%s, '') AND COALESCE(start_time, '') = COALESCE(%s, '') AND COALESCE(end_time, '') = COALESCE(%s, '') AND COALESCE(CAST(subject_id AS TEXT), '') = COALESCE(CAST(%s AS TEXT), '') AND COALESCE(CAST(teacher_id AS TEXT), '') = COALESCE(CAST(%s AS TEXT), '') AND COALESCE(room, '') = COALESCE(%s, '')",
-                        (norm_row["branch_id"], norm_row["section"], norm_row["semester"], norm_row["day"], norm_row["start_time"], norm_row["end_time"], norm_row["subject_id"], norm_row["teacher_id"], norm_row["room"]),
-                    ):
-                        normalized_counters["skipped_total"] += 1
-                        normalized_counters["skipped_duplicate"] += 1
-                        continue
-                try:
-                    cur = _db_execute(
-                        db,
-                        _insert_ignore_sql(db, "timetable_entries", ["branch_id", "section", "semester", "day", "start_time", "end_time", "subject_id", "teacher_id", "is_lab", "room"]),
-                        (norm_row["branch_id"], norm_row["section"], norm_row["semester"], norm_row["day"], norm_row["start_time"], norm_row["end_time"], norm_row["subject_id"], norm_row["teacher_id"], norm_row["is_lab"], norm_row["room"]),
-                    )
-                    if hasattr(cur, "rowcount") and int(cur.rowcount or 0) == 0:
-                        normalized_counters["skipped_total"] += 1
-                        normalized_counters["skipped_duplicate"] += 1
-                    else:
-                        normalized_counters["inserted"] += 1
-                        inserted_since_commit += 1
-                except Exception as e:
-                    if "unique" in str(e).lower() or "duplicate" in str(e).lower():
-                        normalized_counters["skipped_total"] += 1
-                        normalized_counters["skipped_duplicate"] += 1
-                    else:
-                        normalized_counters["failures"] += 1
-                        _write_preview_line(preview_path, preview_state, {"index": row_index, "reason": "normalized_insert_exception", "row": norm_row})
-                        raise
+            if norm_row["subject_id"] is None or norm_row["teacher_id"] is None:
+                if _row_exists(
+                    db,
+                    "timetable_entries",
+                    "COALESCE(CAST(branch_id AS TEXT), '') = COALESCE(CAST(%s AS TEXT), '') AND COALESCE(section, '') = COALESCE(%s, '') AND COALESCE(CAST(semester AS TEXT), '') = COALESCE(CAST(%s AS TEXT), '') AND COALESCE(day, '') = COALESCE(%s, '') AND COALESCE(start_time, '') = COALESCE(%s, '') AND COALESCE(end_time, '') = COALESCE(%s, '') AND COALESCE(CAST(subject_id AS TEXT), '') = COALESCE(CAST(%s AS TEXT), '') AND COALESCE(CAST(teacher_id AS TEXT), '') = COALESCE(CAST(%s AS TEXT), '') AND COALESCE(room, '') = COALESCE(%s, '')",
+                    (norm_row["branch_id"], norm_row["section"], norm_row["semester"], norm_row["day"], norm_row["start_time"], norm_row["end_time"], norm_row["subject_id"], norm_row["teacher_id"], norm_row["room"]),
+                ):
+                    normalized_counters["skipped_total"] += 1
+                    normalized_counters["skipped_duplicate"] += 1
+                    continue
+            try:
+                cur = _db_execute(
+                    db,
+                    _insert_ignore_sql(db, "timetable_entries", ["branch_id", "section", "semester", "day", "start_time", "end_time", "subject_id", "teacher_id", "is_lab", "room"]),
+                    (norm_row["branch_id"], norm_row["section"], norm_row["semester"], norm_row["day"], norm_row["start_time"], norm_row["end_time"], norm_row["subject_id"], norm_row["teacher_id"], norm_row["is_lab"], norm_row["room"]),
+                )
+                if hasattr(cur, "rowcount") and int(cur.rowcount or 0) == 0:
+                    normalized_counters["skipped_total"] += 1
+                    normalized_counters["skipped_duplicate"] += 1
+                else:
+                    normalized_counters["inserted"] += 1
+                    inserted_since_commit += 1
+            except Exception as e:
+                if "unique" in str(e).lower() or "duplicate" in str(e).lower():
+                    normalized_counters["skipped_total"] += 1
+                    normalized_counters["skipped_duplicate"] += 1
+                else:
+                    normalized_counters["failures"] += 1
+                    _write_preview_line(preview_path, preview_state, {"index": row_index, "reason": "normalized_insert_exception", "row": norm_row})
+                    raise
 
         if inserted_since_commit >= batch_size:
             db.commit()
             batch_commits += 1
             inserted_since_commit = 0
-            seen_raw_keys.clear()
-            seen_norm_keys.clear()
-            # Aggressively clear caches to prevent OOM on large imports
-            if len(branch_cache) > 256 or len(subject_cache) > 256 or len(teacher_cache) > 256:
+            if len(branch_cache) > 64 or len(subject_cache) > 64 or len(teacher_cache) > 64:
                 logger.debug("Clearing timetable import caches (branch=%d, subject=%d, teacher=%d)", len(branch_cache), len(subject_cache), len(teacher_cache))
                 branch_cache.clear()
                 subject_cache.clear()
                 teacher_cache.clear()
+            logger.info(
+                "import batch commit section=%s processed=%d commits=%d mem_estimate_kb=%.1f",
+                row.get("section"),
+                row_index,
+                batch_commits,
+                mem_estimate / 1024.0,
+            )
             _write_preview_line(
                 preview_path,
                 preview_state,
                 {"type": "batch_commit", "processed": row_index, "raw_inserted": raw_counters["inserted"], "normalized_inserted": normalized_counters["inserted"], "timestamp": time.time()},
             )
 
-        if row_index % max(20, batch_size) == 0:
+        if row_index % max(10, batch_size) == 0:
             elapsed = time.time() - start_ts
             rate = row_index / elapsed if elapsed > 0 else 0
             logger.info(
@@ -1484,18 +1524,16 @@ def import_slots_streaming(db, slots_iter: Iterable[Dict]):
     if inserted_since_commit > 0:
         db.commit()
         batch_commits += 1
-    
+
     # Final cleanup to free memory
-    seen_raw_keys.clear()
-    seen_norm_keys.clear()
     branch_cache.clear()
     subject_cache.clear()
     teacher_cache.clear()
+    gc.collect()
 
     final_mem_estimate = (
-        (len(seen_raw_keys) + len(seen_norm_keys)) * 96
-        + (len(branch_cache) + len(subject_cache) + len(teacher_cache)) * 80
-        + preview_state["written"] * 120
+        (len(branch_cache) + len(subject_cache) + len(teacher_cache)) * 80
+        + preview_state["written"] * 64
     )
     if final_mem_estimate > peak_mem_estimate_bytes:
         peak_mem_estimate_bytes = final_mem_estimate
