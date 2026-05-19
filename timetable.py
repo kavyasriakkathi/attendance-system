@@ -32,6 +32,8 @@ logger = logging.getLogger("app.timetable")
 BATCH_INSERT_SIZE = int(os.environ.get("TIMETABLE_BATCH_SIZE", 5))
 PREVIEW_ROW_CAP = int(os.environ.get("TIMETABLE_PREVIEW_CAP", 0))
 SKIPPED_ROW_SAMPLE_CAP = int(os.environ.get("TIMETABLE_SKIPPED_SAMPLE_CAP", 5))
+TIMETABLE_MAX_TABLES = int(os.environ.get("TIMETABLE_MAX_TABLES", 20))
+TIMETABLE_SINGLE_SECTION_ONLY = os.environ.get("TIMETABLE_SINGLE_SECTION_ONLY", "true").strip().lower() in ("1", "true", "yes", "on")
 ENABLE_IMPORT_TRACEMALLOC = os.environ.get("TIMETABLE_ENABLE_TRACEMALLOC", "false").strip().lower() in ("1", "true", "yes", "on")
 
 
@@ -547,6 +549,35 @@ def _docx_iter_blocks(path: str):
                     stack.pop()
 
 
+def scan_docx_structure(path: str, max_tables: Optional[int] = None) -> Dict[str, object]:
+    section_names: List[str] = []
+    table_count = 0
+    faculty_tables = 0
+    timetable_tables = 0
+    for block_type, payload in _docx_iter_blocks(path):
+        if block_type == "paragraph":
+            text = _clean_text(payload)
+            section_name = _section_from_text(text)
+            if section_name and section_name not in section_names:
+                section_names.append(section_name)
+            continue
+        if block_type != "table":
+            continue
+        table_count += 1
+        if _is_faculty_table(payload):
+            faculty_tables += 1
+        if _is_timetable_table(payload):
+            timetable_tables += 1
+        if max_tables is not None and table_count >= max_tables:
+            break
+    return {
+        "section_names": section_names,
+        "table_count": table_count,
+        "faculty_tables": faculty_tables,
+        "timetable_tables": timetable_tables,
+    }
+
+
 def _section_from_text(text: str) -> str:
     text = _clean_text(text)
     if not text:
@@ -756,7 +787,12 @@ def _iter_section_table_slots(table_rows: List[Dict], section_state: Dict, facul
                     yield slot
 
 
-def iter_docx_section_slots(path: str, debug_jsonl_path: Optional[str] = None) -> Iterator[Dict]:
+def iter_docx_section_slots(
+    path: str,
+    debug_jsonl_path: Optional[str] = None,
+    single_section_only: bool = False,
+    max_tables: Optional[int] = None,
+) -> Iterator[Dict]:
     """Stream DOCX timetable rows section-by-section without materializing the full document."""
     if docx is None:
         raise RuntimeError("python-docx is not installed. Install with: pip install python-docx")
@@ -773,6 +809,7 @@ def iter_docx_section_slots(path: str, debug_jsonl_path: Optional[str] = None) -
         "table_count": 0,
         "slot_count": 0,
     }
+    primary_section = ""
     total_tables = 0
     total_slots = 0
     parse_failures = 0
@@ -825,6 +862,13 @@ def iter_docx_section_slots(path: str, debug_jsonl_path: Optional[str] = None) -
                     continue
                 section_name = _section_from_text(text)
                 if section_name:
+                    if single_section_only:
+                        if not primary_section:
+                            primary_section = section_name
+                        elif section_name != primary_section:
+                            raise ValueError(
+                                f"Multiple sections detected ({primary_section}, {section_name}). Upload one section per DOCX."
+                            )
                     if section_state.get("table_count", 0) > 0 or section_state.get("faculty_map"):
                         flush_section("new_section")
                     section_state["section"] = section_name
@@ -857,6 +901,10 @@ def iter_docx_section_slots(path: str, debug_jsonl_path: Optional[str] = None) -
 
             table_rows = payload or []
             total_tables += 1
+            if max_tables is not None and total_tables > max_tables:
+                raise ValueError(
+                    f"Too many tables detected ({total_tables}). Split the timetable into section-wise DOCX files."
+                )
             try:
                 if _is_faculty_table(table_rows):
                     entries = []
@@ -2094,7 +2142,33 @@ def register_routes(app, db_getter=None):
             try:
                 slots_iter = None
                 if ext in (".docx",) and docx is not None:
-                    slots_iter = _iter_docx_slots_with_fallback(dest)
+                    summary = scan_docx_structure(dest, max_tables=TIMETABLE_MAX_TABLES + 1)
+                    section_names = summary.get("section_names") or []
+                    if summary.get("table_count", 0) > TIMETABLE_MAX_TABLES:
+                        flash(
+                            f"This DOCX contains {summary.get('table_count')} tables. Upload one section per DOCX (CSE-A, CSE-B, etc.) for low-memory imports.",
+                            "error",
+                        )
+                        return redirect(url_for("timetable_manage"))
+                    if TIMETABLE_SINGLE_SECTION_ONLY and len(section_names) > 1:
+                        preview = ", ".join(section_names[:4])
+                        suffix = "..." if len(section_names) > 4 else ""
+                        flash(
+                            f"Multiple sections detected ({preview}{suffix}). Please upload one section per DOCX.",
+                            "error",
+                        )
+                        return redirect(url_for("timetable_manage"))
+                    if summary.get("timetable_tables", 0) == 0:
+                        flash("No timetable tables were detected in this DOCX.", "error")
+                        return redirect(url_for("timetable_manage"))
+                    if summary.get("faculty_tables", 0) == 0:
+                        flash("Faculty mapping table not detected. Ensure the DOCX includes the faculty table.", "error")
+                        return redirect(url_for("timetable_manage"))
+                    slots_iter = iter_docx_section_slots(
+                        dest,
+                        single_section_only=TIMETABLE_SINGLE_SECTION_ONLY,
+                        max_tables=TIMETABLE_MAX_TABLES,
+                    )
                 elif ext in (".pdf",) and pdfplumber is not None:
                     slots_iter = parse_pdf_to_slots(dest)
                 else:
