@@ -826,7 +826,7 @@ def iter_docx_section_slots(path: str, debug_jsonl_path: Optional[str] = None) -
                 section_name = _section_from_text(text)
                 if section_name:
                     if section_state.get("table_count", 0) > 0 or section_state.get("faculty_map"):
-                        yield from flush_section("new_section")
+                        flush_section("new_section")
                     section_state["section"] = section_name
                     section_state["section_hint"] = section_name
                     section_state["branch"] = _section_branch_name(section_name, section_state.get("doc_base", ""))
@@ -911,7 +911,7 @@ def iter_docx_section_slots(path: str, debug_jsonl_path: Optional[str] = None) -
         logger.exception("DOCX section iterator failed for %s", path)
         raise
 
-    yield from flush_section("eof")
+    flush_section("eof")
     logger.info("iter_docx_section_slots summary: tables=%d slots=%d failures=%d file=%s", total_tables, total_slots, parse_failures, os.path.basename(path))
 
 
