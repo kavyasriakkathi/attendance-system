@@ -1005,6 +1005,9 @@ _PDF_TIME_RANGE_RE = re.compile(r"(\d{1,2}[:\.]\d{2}\s*(?:AM|PM)?)\s*(?:-|to)\s*
 _PDF_TIME_RANGE_HOUR_RE = re.compile(r"(\d{1,2}\s*(?:AM|PM))\s*(?:-|to)\s*(\d{1,2}\s*(?:AM|PM))", re.IGNORECASE)
 _PDF_DECORATIVE_TOKENS = ("principal", "hod", "head of department", "department", "dean")
 _PDF_BREAK_TOKENS = ("short break", "lunch break", "break", "lunch")
+_PDF_SECTION_STRICT_RE = re.compile(r"\b(CSE|ECE|EEE|IT|MECH|CIVIL|AIML|DS)\s*-?\s*([A-Z])\b", re.IGNORECASE)
+_PDF_SECTION_CANDIDATE_RE = re.compile(r"\b[A-Z]{2,}[A-Z0-9]*\s*[-/]\s*[A-Z0-9]{1,4}\b")
+_PDF_SECTION_CONTEXT_TOKENS = ("class", "section", "branch", "dept", "department", "program", "programme", "course")
 
 
 def _normalize_day_name(token: str) -> str:
@@ -1044,15 +1047,73 @@ def _pdf_is_decorative_line(text: str) -> bool:
     return _row_has_token(text, *_PDF_DECORATIVE_TOKENS)
 
 
-def _pdf_collect_section_candidates(text: str) -> List[str]:
-    sections: List[str] = []
-    for line in (text or "").splitlines():
-        cleaned = _clean_text(line)
-        if not cleaned or _pdf_is_decorative_line(cleaned):
+def _pdf_section_from_line(text: str) -> str:
+    match = _PDF_SECTION_STRICT_RE.search(text or "")
+    if not match:
+        return ""
+    dept = match.group(1).upper()
+    sec = match.group(2).upper()
+    return f"{dept}-{sec}"
+
+
+def _pdf_should_consider_section_line(text: str) -> bool:
+    if _pdf_is_decorative_line(text) or _pdf_is_break(text):
+        return False
+    if _pdf_text_has_time(text):
+        return False
+    if _PDF_DAY_RE.search(text or ""):
+        return False
+    norm = _normalize_key(text)
+    if any(token in norm for token in ("day", "time", "break", "lunch")):
+        return False
+    return True
+
+
+def _pdf_line_has_section_context(text: str) -> bool:
+    norm = _normalize_key(text)
+    return any(token in norm for token in _PDF_SECTION_CONTEXT_TOKENS)
+
+
+def _pdf_add_rejected_candidate(candidate: str, report: Dict[str, object]) -> None:
+    rejected = report.get("rejected_section_candidates") or []
+    if candidate and candidate not in rejected:
+        rejected.append(candidate)
+    report["rejected_section_candidates"] = rejected[:PDF_DIAG_SAMPLE_CAP]
+
+
+def _pdf_collect_rejected_candidates(text: str, report: Dict[str, object]) -> None:
+    for match in _PDF_SECTION_CANDIDATE_RE.finditer(text or ""):
+        candidate = _clean_text(match.group(0))
+        if not candidate:
             continue
-        section = _section_from_text(cleaned)
-        if section and section not in sections:
-            sections.append(section)
+        if _PDF_SECTION_STRICT_RE.search(candidate):
+            continue
+        _pdf_add_rejected_candidate(candidate, report)
+
+
+def _pdf_collect_section_candidates(lines: Iterable[str], report: Dict[str, object], source: str, require_context: bool = False) -> List[str]:
+    sections: List[str] = []
+    for line in lines:
+        cleaned = _clean_text(line)
+        if not cleaned or not _pdf_should_consider_section_line(cleaned):
+            continue
+        if require_context and not _pdf_line_has_section_context(cleaned):
+            continue
+        section = _pdf_section_from_line(cleaned)
+        if section:
+            if section not in sections:
+                sections.append(section)
+            if not report.get("detected_section_source"):
+                norm = _normalize_key(cleaned)
+                if "class" in norm or "section" in norm:
+                    report["detected_section_source"] = "class_line"
+                else:
+                    report["detected_section_source"] = source
+                report["detected_section_source_line"] = cleaned
+        else:
+            candidate_match = _PDF_SECTION_CANDIDATE_RE.search(cleaned)
+            if candidate_match:
+                _pdf_add_rejected_candidate(candidate_match.group(0), report)
     return sections
 
 
@@ -1428,6 +1489,9 @@ def parse_pdf_to_slots(path: str, stats: Optional[Dict[str, object]] = None) -> 
     report.setdefault("timetable_tables", 0)
     report.setdefault("faculty_tables", 0)
     report.setdefault("detected_section", "")
+    report.setdefault("detected_section_source", "")
+    report.setdefault("detected_section_source_line", "")
+    report.setdefault("rejected_section_candidates", [])
     report.setdefault("detected_days", [])
     report.setdefault("detected_time_slots", [])
     report.setdefault("extracted_subjects_sample", [])
@@ -1437,9 +1501,6 @@ def parse_pdf_to_slots(path: str, stats: Optional[Dict[str, object]] = None) -> 
 
     base_name = os.path.splitext(os.path.basename(path))[0]
     section_candidates = []
-    base_section = _section_from_text(base_name)
-    if base_section:
-        section_candidates.append(base_section)
     semester_hint = None
 
     timetable_tables = []
@@ -1447,13 +1508,38 @@ def parse_pdf_to_slots(path: str, stats: Optional[Dict[str, object]] = None) -> 
 
     with pdfplumber.open(path) as pdf:
         for page_index, page in enumerate(pdf.pages):
-            page_text = page.extract_text() or ""
-            section_candidates.extend(_pdf_collect_section_candidates(page_text))
-            if semester_hint is None:
-                semester_hint = _semester_from_text(page_text)
-
             tables = _pdf_find_tables(page)
             report["tables_detected"] += len(tables)
+
+            header_limit = None
+            for info in tables:
+                bbox = info.get("bbox")
+                if bbox and len(bbox) >= 2:
+                    header_limit = bbox[1] if header_limit is None else min(header_limit, bbox[1])
+            if header_limit is None:
+                header_limit = page.height * 0.25
+
+            header_text = ""
+            try:
+                header_box = (0, 0, page.width, max(0, header_limit))
+                header_text = page.within_bbox(header_box).extract_text() or ""
+            except Exception:
+                header_text = ""
+
+            header_lines = [l for l in header_text.splitlines() if l.strip()]
+            section_candidates.extend(
+                _pdf_collect_section_candidates(header_lines, report, source="header_region")
+            )
+
+            page_text = page.extract_text() or ""
+            if not section_candidates:
+                page_lines = [l for l in page_text.splitlines() if l.strip()]
+                section_candidates.extend(
+                    _pdf_collect_section_candidates(page_lines, report, source="class_line", require_context=True)
+                )
+            _pdf_collect_rejected_candidates(page_text, report)
+            if semester_hint is None:
+                semester_hint = _semester_from_text(page_text)
             for info in tables:
                 rows = _pdf_table_extract_matrix(info["table"])
                 if not rows:
@@ -1473,6 +1559,10 @@ def parse_pdf_to_slots(path: str, stats: Optional[Dict[str, object]] = None) -> 
     for section in section_candidates:
         if section and section not in unique_sections:
             unique_sections.append(section)
+
+    if not unique_sections:
+        report["validation_errors"].append("Section name not detected in header (expected e.g. CSE-A).")
+        raise TimetablePDFValidationError("Section name not detected. Ensure the PDF header includes the section (e.g., CSE-A).")
 
     if TIMETABLE_SINGLE_SECTION_ONLY and len(unique_sections) > 1:
         preview = ", ".join(unique_sections[:4])
