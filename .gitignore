@@ -3,3 +3,6 @@ __pycache__/
 *.pyc
 attendance.db
 .env
+uploads/last_import_summary.json
+uploads/last_import_debug.jsonl
+uploads/last_import_debug.json
