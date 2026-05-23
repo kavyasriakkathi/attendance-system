@@ -35,6 +35,33 @@ SKIPPED_ROW_SAMPLE_CAP = int(os.environ.get("TIMETABLE_SKIPPED_SAMPLE_CAP", 5))
 TIMETABLE_MAX_TABLES = int(os.environ.get("TIMETABLE_MAX_TABLES", 20))
 TIMETABLE_SINGLE_SECTION_ONLY = os.environ.get("TIMETABLE_SINGLE_SECTION_ONLY", "true").strip().lower() in ("1", "true", "yes", "on")
 ENABLE_IMPORT_TRACEMALLOC = os.environ.get("TIMETABLE_ENABLE_TRACEMALLOC", "false").strip().lower() in ("1", "true", "yes", "on")
+PDF_DIAG_SAMPLE_CAP = int(os.environ.get("TIMETABLE_PDF_DIAG_SAMPLE_CAP", 12))
+PDF_TABLE_SETTINGS = (
+    {
+        "vertical_strategy": "lines",
+        "horizontal_strategy": "lines",
+        "intersection_tolerance": 5,
+        "snap_tolerance": 3,
+        "join_tolerance": 3,
+        "edge_min_length": 3,
+        "min_words_vertical": 1,
+        "min_words_horizontal": 1,
+    },
+    {
+        "vertical_strategy": "text",
+        "horizontal_strategy": "text",
+        "intersection_tolerance": 5,
+        "snap_tolerance": 3,
+        "join_tolerance": 3,
+        "edge_min_length": 3,
+        "min_words_vertical": 1,
+        "min_words_horizontal": 1,
+    },
+)
+
+
+class TimetablePDFValidationError(ValueError):
+    pass
 
 
 def _append_skipped_sample(skipped_rows: List[Dict], skipped_rows_omitted: int, payload: Dict) -> int:
@@ -963,104 +990,533 @@ def iter_docx_section_slots(
     logger.info("iter_docx_section_slots summary: tables=%d slots=%d failures=%d file=%s", total_tables, total_slots, parse_failures, os.path.basename(path))
 
 
-def parse_pdf_to_slots(path: str) -> Iterator[Dict]:
+_PDF_DAY_ALIASES = {
+    "mon": "Monday",
+    "tue": "Tuesday",
+    "wed": "Wednesday",
+    "thu": "Thursday",
+    "fri": "Friday",
+    "sat": "Saturday",
+    "sun": "Sunday",
+}
+
+_PDF_DAY_RE = re.compile(r"\b(mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?)\b", re.IGNORECASE)
+_PDF_TIME_RANGE_RE = re.compile(r"(\d{1,2}[:\.]\d{2}\s*(?:AM|PM)?)\s*(?:-|to)\s*(\d{1,2}[:\.]\d{2}\s*(?:AM|PM)?)", re.IGNORECASE)
+_PDF_TIME_RANGE_HOUR_RE = re.compile(r"(\d{1,2}\s*(?:AM|PM))\s*(?:-|to)\s*(\d{1,2}\s*(?:AM|PM))", re.IGNORECASE)
+_PDF_DECORATIVE_TOKENS = ("principal", "hod", "head of department", "department", "dean")
+_PDF_BREAK_TOKENS = ("short break", "lunch break", "break", "lunch")
+
+
+def _normalize_day_name(token: str) -> str:
+    key = _clean_text(token).lower()[:3]
+    return _PDF_DAY_ALIASES.get(key, token.title())
+
+
+def _extract_pdf_day(text: str) -> tuple[str, str]:
+    match = _PDF_DAY_RE.search(text or "")
+    if not match:
+        return "", ""
+    return _normalize_day_name(match.group(1)), match.group(0)
+
+
+def _extract_pdf_time_range(text: str) -> tuple[str, str, str]:
+    match = _PDF_TIME_RANGE_RE.search(text or "") or _PDF_TIME_RANGE_HOUR_RE.search(text or "")
+    if not match:
+        return "", "", ""
+    start = _format_time_str(match.group(1)) or ""
+    end = _format_time_str(match.group(2)) or ""
+    return start, end, match.group(0)
+
+
+def _pdf_text_has_time(text: str) -> bool:
+    return bool(_PDF_TIME_RANGE_RE.search(text or "") or _PDF_TIME_RANGE_HOUR_RE.search(text or ""))
+
+
+def _pdf_header_has_time(text: str) -> bool:
+    return bool(re.search(r"\d{1,2}[:\.]\d{2}", text or "") or re.search(r"\b\d{1,2}\s*(AM|PM)\b", text or "", flags=re.IGNORECASE))
+
+
+def _pdf_is_break(text: str) -> bool:
+    return _row_has_token(text, *_PDF_BREAK_TOKENS)
+
+
+def _pdf_is_decorative_line(text: str) -> bool:
+    return _row_has_token(text, *_PDF_DECORATIVE_TOKENS)
+
+
+def _pdf_collect_section_candidates(text: str) -> List[str]:
+    sections: List[str] = []
+    for line in (text or "").splitlines():
+        cleaned = _clean_text(line)
+        if not cleaned or _pdf_is_decorative_line(cleaned):
+            continue
+        section = _section_from_text(cleaned)
+        if section and section not in sections:
+            sections.append(section)
+    return sections
+
+
+def _pdf_bbox_key(bbox) -> tuple:
+    if not bbox or len(bbox) < 4:
+        return ()
+    return (int(round(bbox[0])), int(round(bbox[1])), int(round(bbox[2])), int(round(bbox[3])))
+
+
+def _pdf_find_tables(page) -> List[Dict]:
+    tables: List[Dict] = []
+    seen = set()
+    for settings in PDF_TABLE_SETTINGS:
+        try:
+            found = page.find_tables(table_settings=settings) or []
+        except Exception:
+            found = []
+        for table in found:
+            bbox = getattr(table, "bbox", None)
+            key = _pdf_bbox_key(bbox)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            tables.append({"table": table, "bbox": bbox, "key": key, "settings": settings})
+    tables.sort(key=lambda t: (t["bbox"][1], t["bbox"][0]) if t.get("bbox") else (0, 0))
+    return tables
+
+
+def _pdf_table_extract_matrix(table) -> List[List[str]]:
+    try:
+        raw = table.extract() or []
+    except Exception:
+        raw = []
+    if not raw:
+        return []
+    max_cols = max((len(r) for r in raw if r), default=0)
+    rows = []
+    for row in raw:
+        row = row or []
+        cleaned = [_clean_text(c) for c in row]
+        if max_cols and len(cleaned) < max_cols:
+            cleaned.extend([""] * (max_cols - len(cleaned)))
+        rows.append(cleaned)
+    return rows
+
+
+def _pdf_locate_timetable_header(rows: List[List[str]]) -> tuple[int, List[str]]:
+    for idx in range(min(3, len(rows))):
+        row = rows[idx] or []
+        if not row:
+            continue
+        has_day_header = any("day" in _normalize_key(c) for c in row if c)
+        time_hits = sum(1 for c in row if _pdf_header_has_time(c))
+        if time_hits >= 2 and (has_day_header or any(_PDF_DAY_RE.search(c or "") for c in row)):
+            return idx, row
+    return -1, []
+
+
+def _pdf_locate_faculty_header(rows: List[List[str]]) -> tuple[int, List[str]]:
+    for idx in range(min(3, len(rows))):
+        row = rows[idx] or []
+        header_key = _normalize_key(" ".join(row))
+        if "faculty" in header_key and ("sub code" in header_key or "subject code" in header_key or "subject name" in header_key):
+            return idx, row
+    return -1, []
+
+
+def _pdf_is_faculty_table_rows(rows: List[List[str]]) -> bool:
+    header_idx, header_cells = _pdf_locate_faculty_header(rows)
+    if header_idx < 0:
+        return False
+    header_key = _normalize_key(" ".join(header_cells))
+    return ("sub code" in header_key or "subject code" in header_key) and "faculty" in header_key
+
+
+def _pdf_parse_faculty_rows(rows: List[List[str]]) -> List[Dict]:
+    header_idx, header_cells = _pdf_locate_faculty_header(rows)
+    if header_idx < 0:
+        return []
+    header_key = [_normalize_key(c) for c in header_cells]
+    code_idx = None
+    name_idx = None
+    faculty_idx = None
+    for idx, key in enumerate(header_key):
+        if code_idx is None and ("sub code" in key or "subject code" in key):
+            code_idx = idx
+        elif name_idx is None and "subject name" in key:
+            name_idx = idx
+        elif faculty_idx is None and "faculty" in key:
+            faculty_idx = idx
+    entries: List[Dict] = []
+    for row in rows[header_idx + 1:]:
+        if not row or not any(_clean_text(c) for c in row):
+            continue
+        sub_code = _clean_text(row[code_idx]) if code_idx is not None and code_idx < len(row) else ""
+        subject_name = _clean_text(row[name_idx]) if name_idx is not None and name_idx < len(row) else ""
+        faculty_name = _clean_text(row[faculty_idx]) if faculty_idx is not None and faculty_idx < len(row) else ""
+        if not (sub_code or subject_name or faculty_name):
+            continue
+        if _normalize_key(sub_code) in {"sub code", "subject code"}:
+            continue
+        entries.append({"sub_code": sub_code, "subject_name": subject_name, "faculty_name": faculty_name})
+    return entries
+
+
+def _pdf_cell_bbox(cell) -> Optional[tuple]:
+    if cell is None:
+        return None
+    if isinstance(cell, dict):
+        if all(k in cell for k in ("x0", "top", "x1", "bottom")):
+            return (cell["x0"], cell["top"], cell["x1"], cell["bottom"])
+        if "bbox" in cell:
+            return cell.get("bbox")
+    if hasattr(cell, "bbox"):
+        return getattr(cell, "bbox")
+    return None
+
+
+def _pdf_cell_text(cell) -> str:
+    if cell is None:
+        return ""
+    if isinstance(cell, dict):
+        return _clean_text(cell.get("text", ""))
+    if hasattr(cell, "text"):
+        return _clean_text(getattr(cell, "text") or "")
+    return ""
+
+
+def _pdf_table_column_bounds(table, col_count: int) -> List[tuple]:
+    bounds = []
+    try:
+        cols = getattr(table, "columns", None)
+        if cols:
+            for col in cols:
+                bbox = _pdf_cell_bbox(col)
+                if bbox and len(bbox) >= 3:
+                    bounds.append((bbox[0], bbox[2]))
+    except Exception:
+        bounds = []
+    if bounds and len(bounds) >= col_count:
+        return bounds
+    return bounds
+
+
+def _pdf_col_span_for_bbox(bbox: tuple, col_bounds: List[tuple]) -> tuple[Optional[int], Optional[int]]:
+    x0 = bbox[0]
+    x1 = bbox[2]
+    indices = [i for i, (c0, c1) in enumerate(col_bounds) if c1 > x0 and c0 < x1]
+    if not indices:
+        return None, None
+    return min(indices), max(indices)
+
+
+def _pdf_table_row_spans(table, row_index: int, col_bounds: List[tuple]) -> Optional[List[Dict]]:
+    if not table or not col_bounds:
+        return None
+    try:
+        rows = getattr(table, "rows", None)
+        if not rows or row_index >= len(rows):
+            return None
+        row = rows[row_index]
+        cells = getattr(row, "cells", None)
+        if not cells:
+            return None
+        spans = []
+        for cell in cells:
+            text = _pdf_cell_text(cell)
+            if not text:
+                continue
+            bbox = _pdf_cell_bbox(cell)
+            if not bbox:
+                continue
+            start_col, end_col = _pdf_col_span_for_bbox(bbox, col_bounds)
+            if start_col is None or end_col is None:
+                continue
+            spans.append({"start_col": start_col, "end_col": end_col, "text": text})
+        if spans:
+            spans.sort(key=lambda s: (s["start_col"], s["end_col"]))
+            return spans
+    except Exception:
+        return None
+    return None
+
+
+def _pdf_row_spans_from_values(row_values: List[str], header_slots: List[Dict], day_col: int) -> List[Dict]:
+    spans: List[Dict] = []
+    current_text = ""
+    current_start = None
+    for idx, cell in enumerate(row_values):
+        if idx == day_col:
+            continue
+        if idx < len(header_slots) and header_slots[idx].get("is_break"):
+            if current_start is not None and current_text:
+                spans.append({"start_col": current_start, "end_col": idx - 1, "text": current_text})
+            current_text = ""
+            current_start = None
+            continue
+        text = _clean_text(cell)
+        if text:
+            if current_start is None:
+                current_text = text
+                current_start = idx
+            else:
+                if text == current_text and _row_has_token(text, "lab", "practical"):
+                    continue
+                spans.append({"start_col": current_start, "end_col": idx - 1, "text": current_text})
+                current_text = text
+                current_start = idx
+        else:
+            if current_start is not None and current_text and _row_has_token(current_text, "lab", "practical"):
+                continue
+            if current_start is not None and current_text:
+                spans.append({"start_col": current_start, "end_col": idx - 1, "text": current_text})
+            current_text = ""
+            current_start = None
+    if current_start is not None and current_text:
+        spans.append({"start_col": current_start, "end_col": len(row_values) - 1, "text": current_text})
+    return spans
+
+
+def _pdf_split_span_on_breaks(span: Dict, header_slots: List[Dict], day_col: int) -> List[tuple]:
+    segments = []
+    current = None
+    for col in range(span["start_col"], span["end_col"] + 1):
+        if col == day_col:
+            continue
+        if col < len(header_slots) and header_slots[col].get("is_break"):
+            if current:
+                segments.append((current[0], current[1]))
+            current = None
+            continue
+        if current is None:
+            current = [col, col]
+        else:
+            current[1] = col
+    if current:
+        segments.append((current[0], current[1]))
+    return segments
+
+
+def _pdf_find_day_col(header_cells: List[str], rows: List[List[str]], header_idx: int) -> Optional[int]:
+    for idx, cell in enumerate(header_cells):
+        if "day" in _normalize_key(cell):
+            return idx
+    day_counts = {}
+    for row in rows[header_idx + 1:]:
+        for idx, cell in enumerate(row):
+            day, _ = _extract_pdf_day(cell)
+            if day:
+                day_counts[idx] = day_counts.get(idx, 0) + 1
+    if not day_counts:
+        return None
+    return max(day_counts.items(), key=lambda kv: kv[1])[0]
+
+
+def _pdf_build_header_slots(header_cells: List[str]) -> List[Dict]:
+    slots = []
+    for idx, text in enumerate(header_cells):
+        start, end, _ = _extract_pdf_time_range(text)
+        slots.append({
+            "index": idx,
+            "label": _clean_text(text),
+            "start_time": start,
+            "end_time": end,
+            "is_break": _pdf_is_break(text),
+        })
+    return slots
+
+
+def _pdf_parse_timetable_table(
+    table_info: Dict,
+    section_name: str,
+    branch_name: str,
+    semester: Optional[int],
+    faculty_map: Dict[str, Dict],
+    report: Dict[str, object],
+) -> Iterator[Dict]:
+    rows = table_info.get("rows") or []
+    header_idx = table_info.get("header_idx", -1)
+    header_cells = table_info.get("header_cells") or []
+    if header_idx < 0 or not header_cells:
+        report["validation_errors"].append("Timetable header row not detected (Day/time headers missing).")
+        raise TimetablePDFValidationError("Timetable header row not detected. Ensure the grid has a Day column and time slot headers.")
+
+    day_col = _pdf_find_day_col(header_cells, rows, header_idx)
+    if day_col is None:
+        report["validation_errors"].append("Day column not detected in the timetable grid.")
+        raise TimetablePDFValidationError("Day column not detected in the timetable grid. Ensure the first column is labeled Day and lists MON/TUE/WED...")
+
+    header_slots = _pdf_build_header_slots(header_cells)
+    time_slots = [slot for slot in header_slots if slot["index"] != day_col and not slot.get("is_break") and (slot.get("start_time") or slot.get("end_time") or slot.get("label"))]
+    if not any(slot.get("start_time") or slot.get("end_time") for slot in time_slots):
+        report["validation_errors"].append("Time slot headers not detected in the timetable grid.")
+        raise TimetablePDFValidationError("Time slot headers not detected. Ensure the header row contains time ranges like 09:00-10:00.")
+
+    detected_days = set()
+    detected_subjects = report.get("extracted_subjects_sample") or []
+    detected_time_slots = report.get("detected_time_slots") or []
+    if not detected_time_slots:
+        for slot in time_slots:
+            start = slot.get("start_time") or ""
+            end = slot.get("end_time") or ""
+            label = f"{start}-{end}" if start and end else (slot.get("label") or "")
+            if label and label not in detected_time_slots:
+                detected_time_slots.append(label)
+    report["detected_time_slots"] = detected_time_slots[:PDF_DIAG_SAMPLE_CAP]
+
+    col_bounds = _pdf_table_column_bounds(table_info.get("table"), len(header_cells))
+    for row_index, row in enumerate(rows[header_idx + 1:], start=header_idx + 1):
+        if not row:
+            continue
+        if len(row) < len(header_cells):
+            row = row + [""] * (len(header_cells) - len(row))
+        day_raw = _clean_text(row[day_col]) if day_col < len(row) else ""
+        day, _ = _extract_pdf_day(day_raw)
+        if not day:
+            continue
+        detected_days.add(day)
+
+        spans = _pdf_table_row_spans(table_info.get("table"), row_index, col_bounds)
+        if spans is None:
+            spans = _pdf_row_spans_from_values(row, header_slots, day_col)
+
+        for span in spans:
+            text = _clean_text(span.get("text"))
+            if not text or _pdf_is_break(text):
+                continue
+            for seg_start, seg_end in _pdf_split_span_on_breaks(span, header_slots, day_col):
+                start_time, end_time = _expand_time_bounds(header_cells, seg_start, seg_end)
+                if not start_time:
+                    start_time = header_slots[seg_start].get("start_time") if seg_start < len(header_slots) else ""
+                if not end_time:
+                    end_time = header_slots[seg_end].get("end_time") if seg_end < len(header_slots) else ""
+                if not start_time and not end_time:
+                    continue
+                for subject_piece in _split_subjects(text):
+                    resolved = _resolve_subject(subject_piece, faculty_map)
+                    subject_name = _clean_text(resolved.get("subject_name") or subject_piece)
+                    faculty_name = _clean_text(resolved.get("faculty_name") or "")
+                    slot = {
+                        "branch": branch_name,
+                        "section": section_name,
+                        "semester": semester,
+                        "day": day,
+                        "start_time": start_time,
+                        "end_time": end_time,
+                        "subject_name": subject_name,
+                        "faculty_name": faculty_name,
+                        "is_lab": int(bool(_row_has_token(subject_piece, "lab", "practical") or _row_has_token(text, "lab", "practical"))),
+                        "room": "",
+                    }
+                    if subject_name and subject_name not in detected_subjects:
+                        detected_subjects.append(subject_name)
+                    yield slot
+
+    report["detected_days"] = sorted(detected_days)
+    report["extracted_subjects_sample"] = detected_subjects[:PDF_DIAG_SAMPLE_CAP]
+
+
+def _pdf_score_timetable_table(rows: List[List[str]], header_idx: int) -> int:
+    if header_idx < 0 or header_idx >= len(rows):
+        return 0
+    header_cells = rows[header_idx] or []
+    time_hits = sum(1 for c in header_cells if _pdf_header_has_time(c))
+    return time_hits * 10 + len(rows)
+
+
+def parse_pdf_to_slots(path: str, stats: Optional[Dict[str, object]] = None) -> Iterator[Dict]:
     if pdfplumber is None:
         raise RuntimeError("pdfplumber is not installed. Install with: pip install pdfplumber")
-    parsed_rows = 0
-    skipped_rows = 0
-    failed_rows = 0
+    report = stats if stats is not None else {}
+    report.setdefault("tables_detected", 0)
+    report.setdefault("timetable_tables", 0)
+    report.setdefault("faculty_tables", 0)
+    report.setdefault("detected_section", "")
+    report.setdefault("detected_days", [])
+    report.setdefault("detected_time_slots", [])
+    report.setdefault("extracted_subjects_sample", [])
+    report.setdefault("faculty_mappings_sample", [])
+    report.setdefault("faculty_mappings_count", 0)
+    report.setdefault("validation_errors", [])
 
-    def _normalize_pdf_row(row_map: Dict[str, str], raw_text: str, context_label: str) -> List[Dict]:
-        nonlocal parsed_rows, skipped_rows, failed_rows
-        emitted_slots = []
-        try:
-            normalized = _normalize_slot_row(row_map, row_text=raw_text)
-            subject_raw = normalized["subject_name"]
-            faculty_raw = normalized["faculty_name"]
-            skip_tokens = ("short break", "lunch break", "lib", "sports", "break")
-            if _row_has_token(subject_raw, *skip_tokens) or _row_has_token(faculty_raw, *skip_tokens) or _row_has_token(raw_text, *skip_tokens):
-                skipped_rows += 1
-                logger.info("parse_pdf_to_slots skipped break %s text=%s", context_label, raw_text)
-                return emitted_slots
-            if not _valid_slot_row(normalized):
-                skipped_rows += 1
-                logger.info("parse_pdf_to_slots skipped invalid %s normalized=%s text=%s", context_label, normalized, raw_text)
-                return emitted_slots
-            subjects = _split_subjects(subject_raw)
-            if not subjects:
-                skipped_rows += 1
-                logger.info("parse_pdf_to_slots skipped subjectless %s text=%s", context_label, raw_text)
-                return emitted_slots
-            for subject in subjects:
-                slot = dict(normalized)
-                slot["subject_name"] = _clean_text(subject)
-                slot["is_lab"] = int(bool(_row_has_token(subject, "lab", "practical") or normalized["is_lab"]))
-                if not _valid_slot_row(slot):
-                    skipped_rows += 1
-                    logger.info("parse_pdf_to_slots skipped normalized subject row %s slot=%s text=%s", context_label, slot, raw_text)
+    base_name = os.path.splitext(os.path.basename(path))[0]
+    section_candidates = []
+    base_section = _section_from_text(base_name)
+    if base_section:
+        section_candidates.append(base_section)
+    semester_hint = None
+
+    timetable_tables = []
+    faculty_tables = []
+
+    with pdfplumber.open(path) as pdf:
+        for page_index, page in enumerate(pdf.pages):
+            page_text = page.extract_text() or ""
+            section_candidates.extend(_pdf_collect_section_candidates(page_text))
+            if semester_hint is None:
+                semester_hint = _semester_from_text(page_text)
+
+            tables = _pdf_find_tables(page)
+            report["tables_detected"] += len(tables)
+            for info in tables:
+                rows = _pdf_table_extract_matrix(info["table"])
+                if not rows:
                     continue
-                parsed_rows += 1
-                emitted_slots.append(slot)
-                logger.info("parse_pdf_to_slots parsed %s slot=%s", context_label, slot)
-        except Exception:
-            failed_rows += 1
-            logger.exception("parse_pdf_to_slots failed %s raw=%s", context_label, raw_text)
-        return emitted_slots
+                info["rows"] = rows
+                header_idx, header_cells = _pdf_locate_timetable_header(rows)
+                info["header_idx"] = header_idx
+                info["header_cells"] = header_cells
+                if _pdf_is_faculty_table_rows(rows):
+                    faculty_tables.append(info)
+                    continue
+                if header_idx >= 0:
+                    timetable_tables.append(info)
+                    continue
 
-    # Prefer structured extraction from tables embedded in PDFs
-    try:
-        if pdfplumber is not None:
-            with pdfplumber.open(path) as pdf:
-                for page_index, page in enumerate(pdf.pages):
-                    try:
-                        tables = page.extract_tables() or []
-                    except Exception:
-                        tables = []
-                    for table_index, table in enumerate(tables):
-                        if not table:
-                            continue
-                        headers = [_normalize_key(cell) for cell in table[0]]
-                        logger.info("parse_pdf_to_slots page=%s table=%s rows=%s headers=%s", page_index, table_index, len(table), headers)
-                        for row_index, values in enumerate(table[1:], start=1):
-                            raw_values = [_clean_text(v) for v in values]
-                            row_text = " | ".join(raw_values)
-                            row_map = {headers[i]: raw_values[i] for i in range(min(len(headers), len(raw_values))) if headers[i]}
-                            for slot in _normalize_pdf_row(row_map, row_text, f"page={page_index} table={table_index} row={row_index}"):
-                                yield slot
-    except Exception:
-        logger.exception("parse_pdf_to_slots table extraction failed")
+    unique_sections = []
+    for section in section_candidates:
+        if section and section not in unique_sections:
+            unique_sections.append(section)
 
-    # Fallback to plain-text parsing, page by page, to avoid building a giant in-memory string.
-    try:
-        with pdfplumber.open(path) as pdf:
-            for page_index, page in enumerate(pdf.pages):
-                page_text = page.extract_text() or ""
-                for line_index, ln in enumerate((l.strip() for l in page_text.splitlines() if l.strip()), start=1):
-                    try:
-                        parts = [p.strip() for p in re.split(r"\s*[-|]\s*", ln) if p.strip()]
-                        if len(parts) >= 3:
-                            day = parts[0]
-                            time_part = parts[1]
-                            subj_raw = parts[2]
-                            fac = parts[3] if len(parts) > 3 else ""
-                            row_map = {
-                                "day": day,
-                                "time": time_part,
-                                "subject": subj_raw,
-                                "faculty": fac,
-                            }
-                            for slot in _normalize_pdf_row(row_map, ln, f"page={page_index} line={line_index}"):
-                                yield slot
-                        else:
-                            skipped_rows += 1
-                            logger.info("parse_pdf_to_slots skipped unstructured line=%s", ln)
-                    except Exception:
-                        failed_rows += 1
-                        logger.exception("parse_pdf_to_slots line parse failed: %s", ln)
-                        continue
-    except Exception:
-        logger.exception("parse_pdf_to_slots text extraction failed")
-    logger.info("parse_pdf_to_slots summary: parsed_rows=%d skipped_rows=%d failed_rows=%d", parsed_rows, skipped_rows, failed_rows)
+    if TIMETABLE_SINGLE_SECTION_ONLY and len(unique_sections) > 1:
+        preview = ", ".join(unique_sections[:4])
+        suffix = "..." if len(unique_sections) > 4 else ""
+        report["validation_errors"].append(
+            f"Multiple sections detected ({preview}{suffix})."
+        )
+        raise TimetablePDFValidationError(
+            f"Multiple sections detected in PDF ({preview}{suffix}). Please upload one section per PDF."
+        )
+
+    section_name = unique_sections[0] if unique_sections else (base_section or base_name)
+    branch_name = _section_branch_name(section_name, base_name)
+    report["detected_section"] = section_name
+
+    if not timetable_tables:
+        report["validation_errors"].append("Timetable grid not detected (expected Day column and time slot headers).")
+        raise TimetablePDFValidationError("Timetable grid not detected. Ensure the PDF has a timetable table with Day and time-slot headers.")
+    if not faculty_tables:
+        report["validation_errors"].append("Faculty mapping table not detected (expected Subject Code/Name/Faculty columns).")
+        raise TimetablePDFValidationError("Faculty mapping table not detected. Ensure the PDF includes the Subject Code / Subject Name / Faculty Name table below the grid.")
+
+    report["timetable_tables"] = len(timetable_tables)
+    report["faculty_tables"] = len(faculty_tables)
+
+    faculty_entries: List[Dict] = []
+    for table_info in faculty_tables:
+        entries = _pdf_parse_faculty_rows(table_info.get("rows") or [])
+        faculty_entries.extend(entries)
+    report["faculty_mappings_count"] = len(faculty_entries)
+    if faculty_tables and not faculty_entries:
+        report["validation_errors"].append("Faculty table detected but no rows parsed (check Subject Code/Name/Faculty columns).")
+        raise TimetablePDFValidationError("Faculty mapping table detected but rows could not be parsed. Ensure the columns are Subject Code, Subject Name, and Faculty Name.")
+    if faculty_entries:
+        report["faculty_mappings_sample"] = faculty_entries[:PDF_DIAG_SAMPLE_CAP]
+
+    faculty_map = _faculty_lookup(faculty_entries)
+    best_table = max(
+        timetable_tables,
+        key=lambda t: _pdf_score_timetable_table(t.get("rows") or [], t.get("header_idx", -1)),
+    )
+
+    for slot in _pdf_parse_timetable_table(best_table, section_name, branch_name, semester_hint, faculty_map, report):
+        yield slot
 
 
 def _row_exists(db, table: str, where_clause: str, params: tuple) -> bool:
@@ -2141,6 +2597,7 @@ def register_routes(app, db_getter=None):
             ext = os.path.splitext(filename)[1].lower()
             try:
                 slots_iter = None
+                pdf_stats = None
                 if ext in (".docx",) and docx is not None:
                     summary = scan_docx_structure(dest, max_tables=TIMETABLE_MAX_TABLES + 1)
                     section_names = summary.get("section_names") or []
@@ -2170,7 +2627,8 @@ def register_routes(app, db_getter=None):
                         max_tables=TIMETABLE_MAX_TABLES,
                     )
                 elif ext in (".pdf",) and pdfplumber is not None:
-                    slots_iter = parse_pdf_to_slots(dest)
+                    pdf_stats = {}
+                    slots_iter = parse_pdf_to_slots(dest, stats=pdf_stats)
                 else:
                     flash("Unsupported file type or missing parser dependencies.", "error")
                     return redirect(url_for("timetable_manage"))
@@ -2181,10 +2639,20 @@ def register_routes(app, db_getter=None):
                 i_c = inserted_info.get("counters", {}) if isinstance(inserted_info, dict) else {}
                 if int(i_c.get("processed", 0) or 0) == 0:
                     logger.warning("Timetable import parsed zero rows from file=%s ext=%s", filename, ext)
-                    flash(
-                        "No timetable rows were parsed from the uploaded file. Check that the DOCX/PDF contains a readable table with branch, section, day, time, and subject columns.",
-                        "error",
-                    )
+                    if ext == ".pdf":
+                        if pdf_stats and pdf_stats.get("validation_errors"):
+                            detail = "; ".join(pdf_stats.get("validation_errors")[:3])
+                            flash(f"PDF validation failed: {detail}", "error")
+                        else:
+                            flash(
+                                "No timetable rows were parsed from the PDF. Ensure the PDF contains a timetable grid with a Day column, time slots, and a faculty mapping table below it.",
+                                "error",
+                            )
+                    else:
+                        flash(
+                            "No timetable rows were parsed from the uploaded file. Check that the DOCX contains a readable table with branch, section, day, time, and subject columns.",
+                            "error",
+                        )
                     return redirect(url_for("timetable_manage"))
 
                 # Persist a temporary preview of skipped rows for admin review
@@ -2196,6 +2664,8 @@ def register_routes(app, db_getter=None):
                     "preview_path": import_info.get("preview_path"),
                     "preview_written": import_info.get("preview_written", 0),
                 }
+                if pdf_stats:
+                    preview["pdf_stats"] = pdf_stats
                 try:
                     preview_path = os.path.join(os.path.dirname(__file__), "uploads", "last_import_debug.json")
                     with open(preview_path, "w", encoding="utf-8") as f:
@@ -2209,6 +2679,17 @@ def register_routes(app, db_getter=None):
                     f"Imported slots: processed={i_c.get('processed', 0)} inserted={i_c.get('inserted', 0)} skipped={i_c.get('skipped_total', 0)}. Normalized: processed={n_c.get('processed', 0)} inserted={n_c.get('inserted', 0)} skipped={n_c.get('skipped_total', 0)}. Batch commits={import_info.get('batch_commits', 0)}.",
                     "success",
                 )
+            except TimetablePDFValidationError as e:
+                logger.warning("PDF validation failed: %s", str(e))
+                flash(str(e), "error")
+                if pdf_stats:
+                    try:
+                        preview_path = os.path.join(os.path.dirname(__file__), "uploads", "last_import_debug.json")
+                        with open(preview_path, "w", encoding="utf-8") as f:
+                            import json
+                            json.dump({"pdf_stats": pdf_stats}, f, indent=2, default=str)
+                    except Exception:
+                        logger.exception("Failed to write PDF validation preview")
             except Exception as e:
                 logger.exception("Failed to import timetable")
                 flash(f"Failed to import timetable: {e}", "error")

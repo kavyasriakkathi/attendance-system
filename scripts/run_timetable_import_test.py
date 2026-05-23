@@ -16,9 +16,20 @@ import timetable
 import json as _json
 setattr(timetable, 'json', _json)
 
-DOCX = os.path.join(os.path.dirname(PR), 'uploads', 'timetable_upload.docx')
-if not os.path.exists(DOCX):
-    DOCX = os.path.join(PR, 'uploads', 'timetable_upload.docx')
+UPLOADS_DIR = os.path.join(os.path.dirname(PR), 'uploads')
+if not os.path.exists(UPLOADS_DIR):
+    UPLOADS_DIR = os.path.join(PR, 'uploads')
+
+DOCX = os.path.join(UPLOADS_DIR, 'timetable_upload.docx')
+PDF = os.path.join(UPLOADS_DIR, 'CSE-A.pdf')
+if not os.path.exists(PDF):
+    try:
+        for name in os.listdir(UPLOADS_DIR):
+            if name.lower().endswith('.pdf'):
+                PDF = os.path.join(UPLOADS_DIR, name)
+                break
+    except Exception:
+        PDF = ''
 
 out = {
     'parsed_slots': 0,
@@ -45,7 +56,22 @@ try:
     slots = []
     faculty_issues = []
     try:
-        if os.path.exists(DOCX):
+        if PDF and os.path.exists(PDF):
+            pdf_stats = {}
+            def _slot_source():
+                for slot in timetable.parse_pdf_to_slots(PDF, stats=pdf_stats):
+                    slots.append(slot)
+                    if not (slot.get('faculty_name') and str(slot.get('faculty_name')).strip()):
+                        faculty_issues.append(slot)
+                    yield slot
+
+            import_info = timetable.import_slots_streaming(db, _slot_source())
+            out['streamed_slots'] = int(import_info.get('raw_insert', {}).get('counters', {}).get('processed', 0))
+            out['parsed_slots'] = len(slots)
+            out['source_file'] = PDF
+            out['source_type'] = 'pdf'
+            out['pdf_stats'] = pdf_stats
+        elif os.path.exists(DOCX):
             def _slot_source():
                 for slot in timetable.iter_docx_section_slots(DOCX, debug_jsonl_path=os.path.join(os.path.dirname(__file__), '..', 'uploads', 'last_import_debug.jsonl')):
                     slots.append(slot)
@@ -56,6 +82,8 @@ try:
             import_info = timetable.import_slots_streaming(db, _slot_source())
             out['streamed_slots'] = int(import_info.get('raw_insert', {}).get('counters', {}).get('processed', 0))
             out['parsed_slots'] = len(slots)
+            out['source_file'] = DOCX
+            out['source_type'] = 'docx'
         else:
             raise FileNotFoundError(DOCX)
     except Exception as e:
