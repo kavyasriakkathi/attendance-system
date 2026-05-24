@@ -1919,6 +1919,7 @@ def get_upcoming_classes(db, branch: str = "", section: str = "", limit: int = 3
                 (branch_id, section or "", weekday, cur_time, limit),
             ).fetchall()
             entries = [_row_to_dict(r) for r in rows]
+            logger.info("upcoming normalized query result count=%d branch=%s section=%s day=%s", len(entries), branch, section, weekday)
     except Exception:
         entries = []
 
@@ -1929,10 +1930,52 @@ def get_upcoming_classes(db, branch: str = "", section: str = "", limit: int = 3
                 (branch or "", section or "", weekday, cur_time, limit),
             ).fetchall()
             entries = [_row_to_dict(r) for r in rows]
+            logger.info("upcoming legacy query result count=%d branch=%s section=%s day=%s", len(entries), branch, section, weekday)
         except Exception:
             entries = []
 
     return entries
+
+
+def _infer_dashboard_scope(db) -> tuple[str, str]:
+    """Choose a default branch/section for dashboard queries when session scope is absent."""
+    try:
+        row = _db_execute(
+            db,
+            """
+            SELECT COALESCE(b.name, '') AS branch_name, COALESCE(te.section, '') AS section_name, COUNT(1) AS c
+            FROM timetable_entries te
+            LEFT JOIN branches b ON te.branch_id = b.id
+            GROUP BY COALESCE(b.name, ''), COALESCE(te.section, '')
+            ORDER BY c DESC
+            LIMIT 1
+            """,
+        ).fetchone()
+        if row:
+            branch_name = _clean_text(row[0] if not hasattr(row, "keys") else row["branch_name"])
+            section_name = _clean_text(row[1] if not hasattr(row, "keys") else row["section_name"])
+            if branch_name or section_name:
+                return branch_name, section_name
+    except Exception:
+        pass
+    try:
+        row = _db_execute(
+            db,
+            """
+            SELECT COALESCE(branch, '') AS branch_name, COALESCE(section, '') AS section_name, COUNT(1) AS c
+            FROM timetable_slots
+            GROUP BY COALESCE(branch, ''), COALESCE(section, '')
+            ORDER BY c DESC
+            LIMIT 1
+            """,
+        ).fetchone()
+        if row:
+            branch_name = _clean_text(row[0] if not hasattr(row, "keys") else row["branch_name"])
+            section_name = _clean_text(row[1] if not hasattr(row, "keys") else row["section_name"])
+            return branch_name, section_name
+    except Exception:
+        pass
+    return "", ""
 
 
 def get_current_active_class(db, branch: str = "", section: str = "", now: Optional[datetime] = None):
@@ -2701,6 +2744,7 @@ def get_current_slot(db, branch: str, section: str, now: Optional[datetime] = No
             "SELECT te.*, s.name AS subject_name, t.name AS teacher_name FROM timetable_entries te LEFT JOIN subjects s ON te.subject_id = s.id LEFT JOIN teachers t ON te.teacher_id = t.id WHERE te.branch_id = %s AND LOWER(TRIM(COALESCE(te.section, ''))) = LOWER(TRIM(%s)) AND LOWER(TRIM(COALESCE(te.day, ''))) = LOWER(TRIM(%s)) AND te.start_time <= %s AND te.end_time >= %s ORDER BY te.start_time LIMIT 1",
             (branch_id, section or "", weekday, cur_time, cur_time),
         ).fetchall()
+        logger.info("active timetable query result count=%d source=normalized branch=%s section=%s day=%s", len(rows), branch, section, weekday)
         if rows:
             logger.info("get_current_slot matched normalized timetable_entries row_id=%s subject=%s teacher=%s", rows[0]["id"] if hasattr(rows[0], "keys") and "id" in rows[0].keys() else None, rows[0]["subject_name"] if hasattr(rows[0], "keys") and "subject_name" in rows[0].keys() else None, rows[0]["teacher_name"] if hasattr(rows[0], "keys") and "teacher_name" in rows[0].keys() else None)
             return rows[0]
@@ -2710,6 +2754,7 @@ def get_current_slot(db, branch: str, section: str, now: Optional[datetime] = No
         "SELECT * FROM timetable_slots WHERE LOWER(TRIM(branch)) = LOWER(TRIM(%s)) AND LOWER(TRIM(COALESCE(section, ''))) = LOWER(TRIM(%s)) AND LOWER(TRIM(day)) = LOWER(TRIM(%s)) AND start_time <= %s AND end_time >= %s ORDER BY start_time LIMIT 1",
         (branch, section, weekday, cur_time, cur_time),
     ).fetchall()
+    logger.info("active timetable query result count=%d source=legacy branch=%s section=%s day=%s", len(rows), branch, section, weekday)
     if rows:
         logger.info("get_current_slot matched legacy timetable_slots row subject=%s faculty=%s", rows[0]["subject_name"] if hasattr(rows[0], "keys") and "subject_name" in rows[0].keys() else None, rows[0]["faculty_name"] if hasattr(rows[0], "keys") and "faculty_name" in rows[0].keys() else None)
         return rows[0]
@@ -2726,8 +2771,10 @@ def register_routes(app, db_getter=None):
     def timetable_home():
         db = None
         rows_count = 0
+        normalized_count = 0
         table_ready = False
         upcoming_classes = []
+        active_slot = None
         try:
             if db_getter is None:
                 raise RuntimeError("Database getter is not configured")
@@ -2735,9 +2782,24 @@ def register_routes(app, db_getter=None):
             ensure_timetable_tables(db)
             row = _db_execute(db, "SELECT COUNT(1) AS c FROM timetable_slots").fetchone()
             rows_count = int(row["c"] if row and row["c"] is not None else 0)
+            nrow = _db_execute(db, "SELECT COUNT(1) AS c FROM timetable_entries").fetchone()
+            normalized_count = int(nrow["c"] if nrow and nrow["c"] is not None else 0)
             table_ready = True
-            active_slot = get_current_active_class(db, session.get("teacher_branch_name") or session.get("teacher_branch") or "", session.get("teacher_section") or "")
-            upcoming_classes = get_upcoming_classes(db, session.get("teacher_branch_name") or session.get("teacher_branch") or "", session.get("teacher_section") or "", limit=4)
+            scoped_branch = session.get("teacher_branch_name") or session.get("teacher_branch") or ""
+            scoped_section = session.get("teacher_section") or ""
+            if not scoped_branch and not scoped_section:
+                scoped_branch, scoped_section = _infer_dashboard_scope(db)
+            active_slot = get_current_active_class(db, scoped_branch, scoped_section)
+            upcoming_classes = get_upcoming_classes(db, scoped_branch, scoped_section, limit=4)
+            logger.info(
+                "timetable_home diagnostics scope_branch=%s scope_section=%s slots=%d entries=%d active=%s upcoming=%d",
+                scoped_branch,
+                scoped_section,
+                rows_count,
+                normalized_count,
+                bool(active_slot),
+                len(upcoming_classes),
+            )
         except Exception as e:
             logger.exception("Failed to render timetable status page")
             return render_template_string(
@@ -2765,6 +2827,7 @@ def register_routes(app, db_getter=None):
             "timetable_dashboard.html",
             table_ready=table_ready,
             rows_count=rows_count,
+            normalized_count=normalized_count,
             active_slot=active_slot,
             upcoming_classes=upcoming_classes,
         )
@@ -2890,6 +2953,14 @@ def register_routes(app, db_getter=None):
                     logger.exception("Failed to write import debug preview")
 
                 n_c = normalized_info.get("counters", {}) if isinstance(normalized_info, dict) else {}
+                logger.info(
+                    "timetable import diagnostics raw_inserted=%s raw_skipped=%s normalized_inserted=%s normalized_skipped=%s normalized_skip_reasons=%s",
+                    i_c.get("inserted", 0),
+                    i_c.get("skipped_total", 0),
+                    n_c.get("inserted", 0),
+                    n_c.get("skipped_total", 0),
+                    n_c.get("skip_reasons", {}),
+                )
                 flash(
                     f"Imported slots: processed={i_c.get('processed', 0)} inserted={i_c.get('inserted', 0)} skipped={i_c.get('skipped_total', 0)}. Normalized: processed={n_c.get('processed', 0)} inserted={n_c.get('inserted', 0)} skipped={n_c.get('skipped_total', 0)}. Batch commits={import_info.get('batch_commits', 0)}.",
                     "success",
