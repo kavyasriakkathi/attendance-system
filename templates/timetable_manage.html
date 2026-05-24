@@ -6,6 +6,10 @@
             <p style="margin:0 0 6px 0; text-transform:uppercase; letter-spacing:0.7px; color:var(--text-secondary); font-weight:700; font-size:0.8rem;">Timetable</p>
             <h1 style="margin:0 0 8px 0;">Timetable Management</h1>
             <p style="margin:0; color:var(--text-secondary);">Upload a DOCX or PDF timetable to import slots and normalized timetable entries.</p>
+            <div style="margin-top:8px; color:var(--text-secondary); font-size:0.95rem;">
+                <strong>Raw Slots Count:</strong> {{ raw_count or 0 }} &nbsp; • &nbsp;
+                <strong>Normalized Entries Count:</strong> {{ normalized_count or 0 }}
+            </div>
         </div>
         <div style="display:flex; gap:10px; flex-wrap:wrap;">
             <a class="button" href="{{ url_for('timetable_home') }}"><i class="fa-solid fa-gauge-high"></i> Timetable Dashboard</a>
@@ -48,7 +52,11 @@
     <div class="grid" style="grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 20px;">
         <div>
             <h2 style="margin-top:0;">Imported slots</h2>
-            <p style="margin:0 0 10px 0; color:var(--text-secondary); font-size:0.92rem;">Showing {{ 'normalized timetable entries' if rows_source == 'normalized' else 'legacy timetable slots' }}.</p>
+            {% if rows_source == 'normalized' %}
+            <p style="margin:0 0 10px 0; color:var(--text-secondary); font-size:0.92rem;">Showing normalized timetable entries.</p>
+            {% else %}
+            <p style="margin:0 0 10px 0; color:var(--text-secondary); font-size:0.92rem;">Showing legacy timetable slots.</p>
+            {% endif %}
             <div class="table-responsive">
                 <table style="width:100%; border-collapse:collapse;">
                     <thead>
@@ -57,18 +65,22 @@
                         </tr>
                     </thead>
                     <tbody>
-                        {% for r in rows %}
-                        <tr>
-                            <td>{{ r['day'] or '' }}</td>
-                            <td>{{ (r['start_time'] or '') + (' - ' + r['end_time'] if r['end_time'] else '') }}</td>
-                            <td>{{ r['branch'] or '' }}</td>
-                            <td>{{ r['section'] or '' }}</td>
-                            <td>{{ r['semester'] or '' }}</td>
-                            <td>{{ r['subject_name'] or '' }}</td>
-                            <td>{{ r['faculty_name'] or '' }}</td>
-                            <td>{{ r['room'] or '' }}</td>
-                        </tr>
-                        {% endfor %}
+                        {% if rows %}
+                            {% for r in rows %}
+                            <tr>
+                                <td>{{ r['day'] or '' }}</td>
+                                <td>{{ (r['start_time'] or '') + (' - ' + r['end_time'] if r.get('end_time') else '') }}</td>
+                                <td>{{ r['branch'] or '' }}</td>
+                                <td>{{ r['section'] or '' }}</td>
+                                <td>{{ r['semester'] or '' }}</td>
+                                <td>{{ r['subject_name'] or '' }}</td>
+                                <td>{{ r['faculty_name'] or '' }}</td>
+                                <td>{{ r['room'] or '' }}</td>
+                            </tr>
+                            {% endfor %}
+                        {% else %}
+                            <tr><td colspan="8" style="color:var(--text-secondary);">No imported slots to display.</td></tr>
+                        {% endif %}
                     </tbody>
                 </table>
             </div>
@@ -83,17 +95,21 @@
                         </tr>
                     </thead>
                     <tbody>
-                        {% for e in entries %}
-                        <tr>
-                            <td>{{ e['day'] or '' }}</td>
-                            <td>{{ (e['start_time'] or '') + (' - ' + e['end_time'] if e['end_time'] else '') }}</td>
-                            <td>{{ e['branch_name'] or e['branch_id'] or '' }}</td>
-                            <td>{{ e['section'] or '' }}</td>
-                            <td>{{ e['subject_name'] or e['subject_id'] or '' }}</td>
-                            <td>{{ e['teacher_name'] or e['teacher_id'] or '' }}</td>
-                            <td>{{ 'Yes' if e['is_lab'] else 'No' }}</td>
-                        </tr>
-                        {% endfor %}
+                        {% if entries %}
+                            {% for e in entries %}
+                            <tr>
+                                <td>{{ e['day'] or '' }}</td>
+                                <td>{{ (e['start_time'] or '') + (' - ' + e.get('end_time') if e.get('end_time') else '') }}</td>
+                                <td>{{ e['branch_name'] or e['branch_id'] or '' }}</td>
+                                <td>{{ e['section'] or '' }}</td>
+                                <td>{{ e['subject_name'] or e['subject_id'] or '' }}</td>
+                                <td>{{ e['teacher_name'] or e['teacher_id'] or '' }}</td>
+                                <td>{{ 'Yes' if e['is_lab'] else 'No' }}</td>
+                            </tr>
+                            {% endfor %}
+                        {% else %}
+                            <tr><td colspan="7" style="color:var(--text-secondary);">No normalized entries to display.</td></tr>
+                        {% endif %}
                     </tbody>
                 </table>
             </div>

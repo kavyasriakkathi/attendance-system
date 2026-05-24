@@ -3159,7 +3159,41 @@ def register_routes(app, db_getter=None):
             entries = _db_execute(db, "SELECT te.*, s.name AS subject_name, t.name AS teacher_name, b.name AS branch_name FROM timetable_entries te LEFT JOIN subjects s ON te.subject_id = s.id LEFT JOIN teachers t ON te.teacher_id = t.id LEFT JOIN branches b ON te.branch_id = b.id ORDER BY te.day, te.start_time").fetchall()
         except Exception:
             entries = []
-        return render_template("timetable_manage.html", rows=rows, entries=entries, skipped_preview=skipped_preview, rows_source=rows_source)
+
+        # Debug counts
+        try:
+            raw_count_row = _db_execute(db, "SELECT COUNT(*) AS c FROM timetable_slots").fetchone()
+            raw_count = int(raw_count_row[0] if raw_count_row is not None else 0)
+        except Exception:
+            raw_count = 0
+        try:
+            norm_count_row = _db_execute(db, "SELECT COUNT(*) AS c FROM timetable_entries").fetchone()
+            normalized_count = int(norm_count_row[0] if norm_count_row is not None else 0)
+        except Exception:
+            normalized_count = 0
+
+        # Ensure the manage page displays rows even when raw slots are empty by
+        # mapping normalized `entries` into the `rows` structure used by the
+        # primary table. This prevents empty placeholders when normalized data exists.
+        if not rows and entries:
+            mapped = []
+            for e in entries:
+                mapped.append({
+                    'day': e.get('day') if hasattr(e, 'keys') else e[4],
+                    'start_time': e.get('start_time') if hasattr(e, 'keys') else e[5],
+                    'end_time': e.get('end_time') if hasattr(e, 'keys') else e[6],
+                    'branch': e.get('branch_name') or (e.get('branch_id') if hasattr(e, 'keys') else ''),
+                    'section': e.get('section') if hasattr(e, 'keys') else e[2],
+                    'semester': e.get('semester') if hasattr(e, 'keys') else e[3],
+                    'subject_name': e.get('subject_name') or (e.get('subject_id') if hasattr(e, 'keys') else ''),
+                    'faculty_name': e.get('teacher_name') or (e.get('teacher_id') if hasattr(e, 'keys') else ''),
+                    'room': e.get('room') if hasattr(e, 'keys') else e[10],
+                    'is_lab': e.get('is_lab') if hasattr(e, 'keys') else e[9],
+                })
+            rows = mapped
+            rows_source = 'normalized'
+
+        return render_template("timetable_manage.html", rows=rows, entries=entries, skipped_preview=skipped_preview, rows_source=rows_source, raw_count=raw_count, normalized_count=normalized_count)
 
     @app.route("/timetable/active")
     def timetable_active():
