@@ -1005,8 +1005,8 @@ _PDF_TIME_RANGE_RE = re.compile(r"(\d{1,2}[:\.]\d{2}\s*(?:AM|PM)?)\s*(?:-|to)\s*
 _PDF_TIME_RANGE_HOUR_RE = re.compile(r"(\d{1,2}\s*(?:AM|PM))\s*(?:-|to)\s*(\d{1,2}\s*(?:AM|PM))", re.IGNORECASE)
 _PDF_DECORATIVE_TOKENS = ("principal", "hod", "head of department", "department", "dean")
 _PDF_BREAK_TOKENS = ("short break", "lunch break", "break", "lunch")
-_PDF_SECTION_STRICT_RE = re.compile(r"\b(CSE|ECE|EEE|IT|MECH|CIVIL|AIML|DS)\s*-?\s*([A-Z])\b", re.IGNORECASE)
-_PDF_SECTION_CANDIDATE_RE = re.compile(r"\b[A-Z]{2,}[A-Z0-9]*\s*[-/]\s*[A-Z0-9]{1,4}\b")
+_PDF_SECTION_STRICT_RE = re.compile(r"\b(CSM|CSE|ECE|EEE|IT|MECH|CIVIL|AIML|DS)\s*[-_/ ]\s*([A-Z0-9]{1,4})\b", re.IGNORECASE)
+_PDF_SECTION_CANDIDATE_RE = re.compile(r"\b(CSM|CSE|ECE|EEE|IT|MECH|CIVIL|AIML|DS)\s*[-_/ ]\s*([A-Z0-9]{1,4})\b", re.IGNORECASE)
 _PDF_SECTION_CONTEXT_TOKENS = ("class", "section", "branch", "dept", "department", "program", "programme", "course")
 
 
@@ -1048,12 +1048,69 @@ def _pdf_is_decorative_line(text: str) -> bool:
 
 
 def _pdf_section_from_line(text: str) -> str:
-    match = _PDF_SECTION_STRICT_RE.search(text or "")
-    if not match:
+    raw, normalized = _pdf_extract_section_candidate(text)
+    return normalized
+
+
+def _pdf_normalize_section_value(dept: str, section: str) -> str:
+    dept = re.sub(r"[\s_]+", "-", _clean_text(dept).upper())
+    section = re.sub(r"[\s_]+", "-", _clean_text(section).upper())
+    dept = re.sub(r"-+", "-", dept).strip("-")
+    section = re.sub(r"-+", "-", section).strip("-")
+    if not dept or not section:
         return ""
-    dept = match.group(1).upper()
-    sec = match.group(2).upper()
-    return f"{dept}-{sec}"
+    return f"{dept}-{section}"
+
+
+def _pdf_record_section_attempt(report: Dict[str, object], source: str, raw_text: str, normalized: str, accepted: bool, reason: str = "") -> None:
+    attempts = report.get("section_detection_attempts") or []
+    payload = {
+        "source": source,
+        "raw": _clean_text(raw_text),
+        "normalized": _clean_text(normalized),
+        "accepted": bool(accepted),
+    }
+    if reason:
+        payload["reason"] = reason
+    if len(attempts) < PDF_DIAG_SAMPLE_CAP:
+        attempts.append(payload)
+    report["section_detection_attempts"] = attempts[:PDF_DIAG_SAMPLE_CAP]
+    logger.debug(
+        "PDF section detection attempt source=%s raw=%r normalized=%s accepted=%s reason=%s",
+        source,
+        payload["raw"],
+        payload["normalized"],
+        accepted,
+        reason,
+    )
+
+
+def _pdf_excerpt(text: str, limit: int = 240) -> str:
+    cleaned = re.sub(r"\s+", " ", _clean_text(text)).strip()
+    if len(cleaned) <= limit:
+        return cleaned
+    return cleaned[: max(0, limit - 3)].rstrip() + "..."
+
+
+def _pdf_extract_section_candidate(text: str, require_context: bool = False) -> tuple[str, str]:
+    cleaned = _clean_text(text)
+    if not cleaned:
+        return "", ""
+    if _pdf_is_decorative_line(cleaned) or _pdf_is_break(cleaned):
+        return "", ""
+    if _pdf_text_has_time(cleaned) or _PDF_DAY_RE.search(cleaned):
+        return "", ""
+    if require_context and not _pdf_line_has_section_context(cleaned):
+        return "", ""
+
+    match = _PDF_SECTION_STRICT_RE.search(cleaned)
+    if not match:
+        return "", ""
+    raw = _clean_text(match.group(0))
+    normalized = _pdf_normalize_section_value(match.group(1), match.group(2))
+    if not normalized:
+        return raw, ""
+    return raw, normalized
 
 
 def _pdf_should_consider_section_line(text: str) -> bool:
@@ -1093,27 +1150,39 @@ def _pdf_collect_rejected_candidates(text: str, report: Dict[str, object]) -> No
 
 def _pdf_collect_section_candidates(lines: Iterable[str], report: Dict[str, object], source: str, require_context: bool = False) -> List[str]:
     sections: List[str] = []
+    source_label = source
+    if source.startswith("title_"):
+        source_label = "timetable_title"
+    elif source.startswith("nearby_label_"):
+        source_label = "nearby_label"
+    elif source.startswith("faculty_table_"):
+        source_label = "faculty_table"
+    elif source.startswith("table_rows_"):
+        source_label = "table_rows"
     for line in lines:
         cleaned = _clean_text(line)
         if not cleaned or not _pdf_should_consider_section_line(cleaned):
             continue
         if require_context and not _pdf_line_has_section_context(cleaned):
             continue
-        section = _pdf_section_from_line(cleaned)
+        raw, section = _pdf_extract_section_candidate(cleaned, require_context=require_context)
         if section:
+            if not report.get("detected_section_raw"):
+                report["detected_section_raw"] = raw
+                report["detected_section_normalized"] = section
+            _pdf_record_section_attempt(report, source, raw, section, True)
             if section not in sections:
                 sections.append(section)
             if not report.get("detected_section_source"):
-                norm = _normalize_key(cleaned)
-                if "class" in norm or "section" in norm:
-                    report["detected_section_source"] = "class_line"
-                else:
-                    report["detected_section_source"] = source
+                report["detected_section_source"] = source_label
                 report["detected_section_source_line"] = cleaned
         else:
             candidate_match = _PDF_SECTION_CANDIDATE_RE.search(cleaned)
             if candidate_match:
                 _pdf_add_rejected_candidate(candidate_match.group(0), report)
+                _pdf_record_section_attempt(report, source, candidate_match.group(0), "", False, "regex_mismatch")
+            elif require_context and _pdf_line_has_section_context(cleaned):
+                _pdf_record_section_attempt(report, source, cleaned, "", False, "context_without_section")
     return sections
 
 
@@ -1489,9 +1558,15 @@ def parse_pdf_to_slots(path: str, stats: Optional[Dict[str, object]] = None) -> 
     report.setdefault("timetable_tables", 0)
     report.setdefault("faculty_tables", 0)
     report.setdefault("detected_section", "")
+    report.setdefault("detected_section_raw", "")
+    report.setdefault("detected_section_normalized", "")
     report.setdefault("detected_section_source", "")
     report.setdefault("detected_section_source_line", "")
     report.setdefault("rejected_section_candidates", [])
+    report.setdefault("section_detection_attempts", [])
+    report.setdefault("header_text_samples", [])
+    report.setdefault("title_text_samples", [])
+    report.setdefault("faculty_text_samples", [])
     report.setdefault("detected_days", [])
     report.setdefault("detected_time_slots", [])
     report.setdefault("extracted_subjects_sample", [])
@@ -1530,12 +1605,35 @@ def parse_pdf_to_slots(path: str, stats: Optional[Dict[str, object]] = None) -> 
             section_candidates.extend(
                 _pdf_collect_section_candidates(header_lines, report, source="header_region")
             )
+            if header_text:
+                header_samples = report.get("header_text_samples") or []
+                excerpt = _pdf_excerpt(header_text)
+                if excerpt and excerpt not in header_samples:
+                    header_samples.append(excerpt)
+                report["header_text_samples"] = header_samples[:PDF_DIAG_SAMPLE_CAP]
 
             page_text = page.extract_text() or ""
+            page_lines = [l for l in page_text.splitlines() if l.strip()]
+            title_lines = page_lines[: min(8, len(page_lines))]
+            section_candidates.extend(
+                _pdf_collect_section_candidates(title_lines, report, source=f"title_page_{page_index + 1}")
+            )
+            if title_lines:
+                title_samples = report.get("title_text_samples") or []
+                for title_line in title_lines[:3]:
+                    excerpt = _pdf_excerpt(title_line)
+                    if excerpt and excerpt not in title_samples:
+                        title_samples.append(excerpt)
+                report["title_text_samples"] = title_samples[:PDF_DIAG_SAMPLE_CAP]
+
+            section_candidates.extend(
+                _pdf_collect_section_candidates(page_lines, report, source=f"nearby_label_page_{page_index + 1}", require_context=True)
+            )
+
+            table_text_samples = report.get("faculty_text_samples") or []
             if not section_candidates:
-                page_lines = [l for l in page_text.splitlines() if l.strip()]
                 section_candidates.extend(
-                    _pdf_collect_section_candidates(page_lines, report, source="class_line", require_context=True)
+                    _pdf_collect_section_candidates(page_lines, report, source=f"page_body_fallback_page_{page_index + 1}")
                 )
             _pdf_collect_rejected_candidates(page_text, report)
             if semester_hint is None:
@@ -1545,13 +1643,33 @@ def parse_pdf_to_slots(path: str, stats: Optional[Dict[str, object]] = None) -> 
                 if not rows:
                     continue
                 info["rows"] = rows
+                row_samples = []
+                for row in rows[:3]:
+                    row_text = _pdf_excerpt(" ".join(cell for cell in row if cell))
+                    if row_text:
+                        row_samples.append(row_text)
+                        if row_text not in table_text_samples:
+                            table_text_samples.append(row_text)
+                if row_samples:
+                    report["faculty_text_samples"] = table_text_samples[:PDF_DIAG_SAMPLE_CAP]
+                    section_candidates.extend(
+                        _pdf_collect_section_candidates(row_samples, report, source=f"table_rows_page_{page_index + 1}")
+                    )
                 header_idx, header_cells = _pdf_locate_timetable_header(rows)
                 info["header_idx"] = header_idx
                 info["header_cells"] = header_cells
                 if _pdf_is_faculty_table_rows(rows):
+                    if row_samples:
+                        section_candidates.extend(
+                            _pdf_collect_section_candidates(row_samples, report, source=f"faculty_table_page_{page_index + 1}")
+                        )
                     faculty_tables.append(info)
                     continue
                 if header_idx >= 0:
+                    if row_samples:
+                        section_candidates.extend(
+                            _pdf_collect_section_candidates(row_samples, report, source=f"timetable_table_page_{page_index + 1}")
+                        )
                     timetable_tables.append(info)
                     continue
 
@@ -1562,6 +1680,8 @@ def parse_pdf_to_slots(path: str, stats: Optional[Dict[str, object]] = None) -> 
 
     if not unique_sections:
         report["validation_errors"].append("Section name not detected in header (expected e.g. CSE-A).")
+        if report.get("header_text_samples"):
+            report["validation_errors"].append(f"Header text excerpt: {report['header_text_samples'][0]}")
         raise TimetablePDFValidationError("Section name not detected. Ensure the PDF header includes the section (e.g., CSE-A).")
 
     if TIMETABLE_SINGLE_SECTION_ONLY and len(unique_sections) > 1:
@@ -1577,6 +1697,13 @@ def parse_pdf_to_slots(path: str, stats: Optional[Dict[str, object]] = None) -> 
     section_name = unique_sections[0] if unique_sections else (base_section or base_name)
     branch_name = _section_branch_name(section_name, base_name)
     report["detected_section"] = section_name
+    logger.debug(
+        "PDF section resolved raw=%s normalized=%s source=%s attempts=%d",
+        report.get("detected_section_raw") or "",
+        report.get("detected_section_normalized") or section_name,
+        report.get("detected_section_source") or "",
+        len(report.get("section_detection_attempts") or []),
+    )
 
     if not timetable_tables:
         report["validation_errors"].append("Timetable grid not detected (expected Day column and time slot headers).")
