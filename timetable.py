@@ -1096,6 +1096,7 @@ def _pdf_extract_section_candidate(text: str, require_context: bool = False) -> 
     cleaned = _clean_text(text)
     if not cleaned:
         return "", ""
+    cleaned = re.sub(r"[‐‑‒–—―]", "-", cleaned)
     if _pdf_is_decorative_line(cleaned) or _pdf_is_break(cleaned):
         return "", ""
     if _pdf_text_has_time(cleaned) or _PDF_DAY_RE.search(cleaned):
@@ -1618,7 +1619,7 @@ def parse_pdf_to_slots(path: str, stats: Optional[Dict[str, object]] = None) -> 
 
             page_text = page.extract_text() or ""
             page_lines = [l for l in page_text.splitlines() if l.strip()]
-            title_lines = page_lines[: min(8, len(page_lines))]
+            title_lines = page_lines[: min(20, len(page_lines))]
             if title_lines:
                 section_candidates.extend(
                     _pdf_collect_section_candidates(["\n".join(title_lines)], report, source=f"title_block_page_{page_index + 1}")
