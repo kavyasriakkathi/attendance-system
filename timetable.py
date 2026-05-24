@@ -1602,6 +1602,10 @@ def parse_pdf_to_slots(path: str, stats: Optional[Dict[str, object]] = None) -> 
                 header_text = ""
 
             header_lines = [l for l in header_text.splitlines() if l.strip()]
+            if header_text:
+                section_candidates.extend(
+                    _pdf_collect_section_candidates([header_text], report, source=f"header_block_page_{page_index + 1}")
+                )
             section_candidates.extend(
                 _pdf_collect_section_candidates(header_lines, report, source="header_region")
             )
@@ -1615,6 +1619,10 @@ def parse_pdf_to_slots(path: str, stats: Optional[Dict[str, object]] = None) -> 
             page_text = page.extract_text() or ""
             page_lines = [l for l in page_text.splitlines() if l.strip()]
             title_lines = page_lines[: min(8, len(page_lines))]
+            if title_lines:
+                section_candidates.extend(
+                    _pdf_collect_section_candidates(["\n".join(title_lines)], report, source=f"title_block_page_{page_index + 1}")
+                )
             section_candidates.extend(
                 _pdf_collect_section_candidates(title_lines, report, source=f"title_page_{page_index + 1}")
             )
