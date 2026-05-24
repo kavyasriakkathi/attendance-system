@@ -2850,7 +2850,6 @@ def register_routes(app, db_getter=None):
             if request.form.get("action") == "delete_timetable":
                 try:
                     db = get_db()
-                    _db_execute(db, "DELETE FROM timetable_entries")
                     _db_execute(db, "DELETE FROM timetable_slots")
                     try:
                         db.commit()
@@ -2983,6 +2982,34 @@ def register_routes(app, db_getter=None):
 
         # GET: show simple management UI
         rows = _db_execute(db, "SELECT * FROM timetable_slots ORDER BY day, start_time").fetchall()
+        rows_source = "raw"
+        if not rows:
+            try:
+                rows = _db_execute(
+                    db,
+                    """
+                    SELECT
+                        te.day,
+                        te.start_time,
+                        te.end_time,
+                        COALESCE(b.name, CAST(te.branch_id AS TEXT), '') AS branch,
+                        te.section,
+                        te.semester,
+                        COALESCE(s.name, CAST(te.subject_id AS TEXT), '') AS subject_name,
+                        COALESCE(t.name, CAST(te.teacher_id AS TEXT), '') AS faculty_name,
+                        te.room,
+                        te.is_lab
+                    FROM timetable_entries te
+                    LEFT JOIN branches b ON te.branch_id = b.id
+                    LEFT JOIN subjects s ON te.subject_id = s.id
+                    LEFT JOIN teachers t ON te.teacher_id = t.id
+                    ORDER BY te.day, te.start_time
+                    """,
+                ).fetchall()
+                rows_source = "normalized"
+            except Exception:
+                logger.exception("Failed to load normalized timetable entries for manage page")
+                rows = []
         skipped_preview = None
         try:
             preview_path = os.path.join(os.path.dirname(__file__), "uploads", "last_import_debug.json")
@@ -2996,7 +3023,7 @@ def register_routes(app, db_getter=None):
             entries = _db_execute(db, "SELECT te.*, s.name AS subject_name, t.name AS teacher_name, b.name AS branch_name FROM timetable_entries te LEFT JOIN subjects s ON te.subject_id = s.id LEFT JOIN teachers t ON te.teacher_id = t.id LEFT JOIN branches b ON te.branch_id = b.id ORDER BY te.day, te.start_time").fetchall()
         except Exception:
             entries = []
-        return render_template("timetable_manage.html", rows=rows, entries=entries, skipped_preview=skipped_preview)
+        return render_template("timetable_manage.html", rows=rows, entries=entries, skipped_preview=skipped_preview, rows_source=rows_source)
 
     @app.route("/timetable/active")
     def timetable_active():

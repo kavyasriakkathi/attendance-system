@@ -48,6 +48,7 @@
     <div class="grid" style="grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 20px;">
         <div>
             <h2 style="margin-top:0;">Imported slots</h2>
+            <p style="margin:0 0 10px 0; color:var(--text-secondary); font-size:0.92rem;">Showing {{ 'normalized timetable entries' if rows_source == 'normalized' else 'legacy timetable slots' }}.</p>
             <div class="table-responsive">
                 <table style="width:100%; border-collapse:collapse;">
                     <thead>
