@@ -37,9 +37,6 @@ def clear_timetable() -> int:
             summary["protected_tables"][table] = _count(db, table)
 
         try:
-            cur_entries = db.execute("DELETE FROM timetable_entries")
-            deleted_entries = int(getattr(cur_entries, "rowcount", 0) or 0)
-
             cur_slots = db.execute("DELETE FROM timetable_slots")
             deleted_slots = int(getattr(cur_slots, "rowcount", 0) or 0)
 
@@ -49,7 +46,7 @@ def clear_timetable() -> int:
             print(json.dumps({"ok": False, "error": str(exc)}, indent=2))
             return 1
 
-        summary["deleted"]["timetable_entries"] = deleted_entries
+        summary["deleted"]["timetable_entries"] = 0
         summary["deleted"]["timetable_slots"] = deleted_slots
         summary["after"]["timetable_entries"] = _count(db, "timetable_entries")
         summary["after"]["timetable_slots"] = _count(db, "timetable_slots")
