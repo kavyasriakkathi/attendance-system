@@ -13,6 +13,7 @@ from urllib.parse import urlparse
 import requests
 from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 from dotenv import load_dotenv
+import sys
 
 from flask import Flask, abort, redirect, render_template, request, session, url_for, flash, jsonify, send_file, make_response
 from functools import wraps
@@ -48,6 +49,17 @@ socketio = SocketIO(
     ping_interval=25,
     ping_timeout=60,
 )
+# Configure root logger to emit to stdout (Render captures stdout/stderr)
+try:
+    handler = logging.StreamHandler(stream=sys.stdout)
+    handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
+    root_logger = logging.getLogger()
+    # Replace handlers to avoid duplicate logs in some environments
+    root_logger.handlers = [handler]
+    root_logger.setLevel(logging.INFO)
+except Exception:
+    # If logging config fails, continue without crashing the app
+    pass
 # Email sending is handled by the `send_email` helper defined later in the file.
 
 
