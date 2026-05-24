@@ -1815,6 +1815,95 @@ def _resolve_or_create_branch_id(db, branch_name: str, branch_cache: Optional[Di
     return branch_id
 
 
+def _normalize_subject_name(value: str) -> str:
+    text = _clean_text(value).lower()
+    text = text.replace("&", " and ")
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _normalize_teacher_name(value: str) -> str:
+    text = _clean_text(value).lower()
+    # Ignore punctuation/whitespace variants like "Dr. A. Kumar" vs "dr a kumar".
+    return re.sub(r"[^a-z0-9]", "", text)
+
+
+def _subject_lookup_variants(subject_name: str) -> List[str]:
+    raw = _clean_text(subject_name)
+    if not raw:
+        return []
+    variants = []
+
+    def _add(v: str):
+        v = _normalize_subject_name(v)
+        if v and v not in variants:
+            variants.append(v)
+
+    _add(raw)
+    _add(raw.replace("LAB", "").replace("lab", ""))
+    for part in re.split(r"[/,&]", raw):
+        _add(part)
+        _add(part.replace("LAB", "").replace("lab", ""))
+    acronym = _subject_acronym(raw)
+    if acronym:
+        _add(acronym)
+    return variants
+
+
+def _build_subject_lookup_index(db) -> Dict[str, int]:
+    index: Dict[str, int] = {}
+    try:
+        rows = _db_execute(db, "SELECT id, name FROM subjects").fetchall()
+    except Exception:
+        return index
+    for row in rows:
+        subject_id = row[0] if not hasattr(row, "keys") else row["id"]
+        subject_name = row[1] if not hasattr(row, "keys") else row["name"]
+        for variant in _subject_lookup_variants(subject_name):
+            if variant not in index:
+                index[variant] = int(subject_id)
+    return index
+
+
+def _resolve_subject_id(subject_name: str, subject_cache: Dict[str, Optional[int]], subject_index: Dict[str, int]) -> Optional[int]:
+    cache_key = _normalize_subject_name(subject_name)
+    if cache_key in subject_cache:
+        return subject_cache[cache_key]
+    for variant in _subject_lookup_variants(subject_name):
+        subject_id = subject_index.get(variant)
+        if subject_id is not None:
+            subject_cache[cache_key] = subject_id
+            return subject_id
+    subject_cache[cache_key] = None
+    return None
+
+
+def _build_teacher_lookup_index(db) -> Dict[str, int]:
+    index: Dict[str, int] = {}
+    try:
+        rows = _db_execute(db, "SELECT id, name FROM teachers").fetchall()
+    except Exception:
+        return index
+    for row in rows:
+        teacher_id = row[0] if not hasattr(row, "keys") else row["id"]
+        teacher_name = row[1] if not hasattr(row, "keys") else row["name"]
+        norm_name = _normalize_teacher_name(teacher_name)
+        if norm_name and norm_name not in index:
+            index[norm_name] = int(teacher_id)
+    return index
+
+
+def _resolve_teacher_id(teacher_name: str, teacher_cache: Dict[str, Optional[int]], teacher_index: Dict[str, int]) -> Optional[int]:
+    cache_key = _normalize_teacher_name(teacher_name)
+    if not cache_key:
+        return None
+    if cache_key in teacher_cache:
+        return teacher_cache[cache_key]
+    teacher_id = teacher_index.get(cache_key)
+    teacher_cache[cache_key] = teacher_id
+    return teacher_id
+
+
 def get_upcoming_classes(db, branch: str = "", section: str = "", limit: int = 3, now: Optional[datetime] = None):
     """Return upcoming classes for the current day using normalized data first."""
     current = _current_local_datetime(now)
@@ -1940,7 +2029,13 @@ def import_slots_streaming(db, slots_iter: Iterable[Dict]):
         "missing_subjects": 0,
         "missing_teachers": 0,
         "failures": 0,
+        "skip_reasons": {},
     }
+    normalized_diagnostics = {
+        "unresolved_subject_rows": [],
+        "unresolved_teacher_rows": [],
+    }
+    unresolved_sample_cap = 40
 
     preview_path = None
     preview_state = {"written": 0}
@@ -1957,6 +2052,9 @@ def import_slots_streaming(db, slots_iter: Iterable[Dict]):
     branch_cache = {}
     subject_cache = {}
     teacher_cache = {}
+    seen_norm_keys = set()
+    subject_index = _build_subject_lookup_index(db)
+    teacher_index = _build_teacher_lookup_index(db)
     for row_index, slot_in in enumerate(slots_iter, start=1):
         mem_estimate = (
             (len(branch_cache) + len(subject_cache) + len(teacher_cache)) * 80
@@ -2016,23 +2114,37 @@ def import_slots_streaming(db, slots_iter: Iterable[Dict]):
             normalized_counters["skipped_branch"] += 1
             _write_preview_line(preview_path, preview_state, {"index": row_index, "reason": "missing_branch", "row": row})
         else:
-            subj_key = row["subject_name"].strip().lower()
-            if subj_key not in subject_cache:
-                s_row = _db_execute(db, "SELECT id FROM subjects WHERE LOWER(TRIM(name))=LOWER(TRIM(%s)) LIMIT 1", (row["subject_name"],)).fetchone()
-                subject_cache[subj_key] = s_row[0] if s_row and not hasattr(s_row, "keys") else (s_row["id"] if s_row else None)
-            subject_id = subject_cache.get(subj_key)
+            subject_id = _resolve_subject_id(row["subject_name"], subject_cache, subject_index)
             if subject_id is None:
                 normalized_counters["missing_subjects"] += 1
+                if len(normalized_diagnostics["unresolved_subject_rows"]) < unresolved_sample_cap:
+                    normalized_diagnostics["unresolved_subject_rows"].append(
+                        {
+                            "index": row_index,
+                            "section": row["section"],
+                            "day": row["day"],
+                            "start_time": row["start_time"],
+                            "subject_name": row["subject_name"],
+                            "subject_variants": _subject_lookup_variants(row["subject_name"]),
+                        }
+                    )
+                _write_preview_line(preview_path, preview_state, {"index": row_index, "reason": "missing_subject_id", "row": row})
 
-            teacher_id = None
-            if row["faculty_name"]:
-                t_key = row["faculty_name"].strip().lower()
-                if t_key not in teacher_cache:
-                    t_row = _db_execute(db, "SELECT id FROM teachers WHERE LOWER(TRIM(name))=LOWER(TRIM(%s)) LIMIT 1", (row["faculty_name"],)).fetchone()
-                    teacher_cache[t_key] = t_row[0] if t_row and not hasattr(t_row, "keys") else (t_row["id"] if t_row else None)
-                teacher_id = teacher_cache.get(t_key)
-                if teacher_id is None:
-                    normalized_counters["missing_teachers"] += 1
+            teacher_id = _resolve_teacher_id(row["faculty_name"], teacher_cache, teacher_index)
+            if row["faculty_name"] and teacher_id is None:
+                normalized_counters["missing_teachers"] += 1
+                if len(normalized_diagnostics["unresolved_teacher_rows"]) < unresolved_sample_cap:
+                    normalized_diagnostics["unresolved_teacher_rows"].append(
+                        {
+                            "index": row_index,
+                            "section": row["section"],
+                            "day": row["day"],
+                            "start_time": row["start_time"],
+                            "faculty_name": row["faculty_name"],
+                            "teacher_normalized": _normalize_teacher_name(row["faculty_name"]),
+                        }
+                    )
+                _write_preview_line(preview_path, preview_state, {"index": row_index, "reason": "missing_teacher_id", "row": row})
 
             norm_row = {
                 "branch_id": branch_id,
@@ -2046,16 +2158,25 @@ def import_slots_streaming(db, slots_iter: Iterable[Dict]):
                 "is_lab": row["is_lab"],
                 "room": row["room"],
             }
-            if norm_row["subject_id"] is None or norm_row["teacher_id"] is None:
-                if _row_exists(
-                    db,
-                    "timetable_entries",
-                    "COALESCE(CAST(branch_id AS TEXT), '') = COALESCE(CAST(%s AS TEXT), '') AND COALESCE(section, '') = COALESCE(%s, '') AND COALESCE(CAST(semester AS TEXT), '') = COALESCE(CAST(%s AS TEXT), '') AND COALESCE(day, '') = COALESCE(%s, '') AND COALESCE(start_time, '') = COALESCE(%s, '') AND COALESCE(end_time, '') = COALESCE(%s, '') AND COALESCE(CAST(subject_id AS TEXT), '') = COALESCE(CAST(%s AS TEXT), '') AND COALESCE(CAST(teacher_id AS TEXT), '') = COALESCE(CAST(%s AS TEXT), '') AND COALESCE(room, '') = COALESCE(%s, '')",
-                    (norm_row["branch_id"], norm_row["section"], norm_row["semester"], norm_row["day"], norm_row["start_time"], norm_row["end_time"], norm_row["subject_id"], norm_row["teacher_id"], norm_row["room"]),
-                ):
-                    normalized_counters["skipped_total"] += 1
-                    normalized_counters["skipped_duplicate"] += 1
-                    continue
+            # Keep unresolved-ID rows distinct by folding normalized subject/faculty text
+            # into the in-memory dedupe key while preserving canonical IDs when available.
+            norm_key = _dup_key(
+                norm_row["section"],
+                norm_row["day"],
+                norm_row["start_time"],
+                norm_row["end_time"],
+                norm_row["subject_id"] if norm_row["subject_id"] is not None else f"sub:{_normalize_subject_name(row['subject_name'])}",
+                norm_row["teacher_id"] if norm_row["teacher_id"] is not None else f"teach:{_normalize_teacher_name(row['faculty_name'])}",
+                norm_row["branch_id"],
+                norm_row["room"],
+            )
+            if norm_key in seen_norm_keys:
+                normalized_counters["skipped_total"] += 1
+                normalized_counters["skipped_duplicate"] += 1
+                normalized_counters["skip_reasons"]["in_memory_norm_key"] = normalized_counters["skip_reasons"].get("in_memory_norm_key", 0) + 1
+                _write_preview_line(preview_path, preview_state, {"index": row_index, "reason": "normalized_in_memory_duplicate", "row": norm_row})
+                continue
+            seen_norm_keys.add(norm_key)
             try:
                 cur = _db_execute(
                     db,
@@ -2065,6 +2186,8 @@ def import_slots_streaming(db, slots_iter: Iterable[Dict]):
                 if hasattr(cur, "rowcount") and int(cur.rowcount or 0) == 0:
                     normalized_counters["skipped_total"] += 1
                     normalized_counters["skipped_duplicate"] += 1
+                    normalized_counters["skip_reasons"]["db_conflict_or_ignore"] = normalized_counters["skip_reasons"].get("db_conflict_or_ignore", 0) + 1
+                    _write_preview_line(preview_path, preview_state, {"index": row_index, "reason": "normalized_db_duplicate", "row": norm_row})
                 else:
                     normalized_counters["inserted"] += 1
                     inserted_since_commit += 1
@@ -2072,6 +2195,7 @@ def import_slots_streaming(db, slots_iter: Iterable[Dict]):
                 if "unique" in str(e).lower() or "duplicate" in str(e).lower():
                     normalized_counters["skipped_total"] += 1
                     normalized_counters["skipped_duplicate"] += 1
+                    normalized_counters["skip_reasons"]["db_unique_exception"] = normalized_counters["skip_reasons"].get("db_unique_exception", 0) + 1
                 else:
                     normalized_counters["failures"] += 1
                     _write_preview_line(preview_path, preview_state, {"index": row_index, "reason": "normalized_insert_exception", "row": norm_row})
@@ -2123,6 +2247,7 @@ def import_slots_streaming(db, slots_iter: Iterable[Dict]):
     branch_cache.clear()
     subject_cache.clear()
     teacher_cache.clear()
+    seen_norm_keys.clear()
     gc.collect()
 
     final_mem_estimate = (
@@ -2135,7 +2260,7 @@ def import_slots_streaming(db, slots_iter: Iterable[Dict]):
     elapsed_seconds = time.time() - start_ts
     return {
         "raw_insert": {"counters": raw_counters},
-        "normalized_insert": {"counters": normalized_counters},
+        "normalized_insert": {"counters": normalized_counters, "diagnostics": normalized_diagnostics},
         "preview_path": preview_path if preview_state["written"] else None,
         "preview_written": preview_state["written"],
         "batch_commits": batch_commits,
