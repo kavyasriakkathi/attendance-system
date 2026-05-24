@@ -3117,35 +3117,51 @@ def register_routes(app, db_getter=None):
             return redirect(url_for("timetable_manage"))
 
         # GET: show simple management UI
-        rows = _db_execute(db, "SELECT * FROM timetable_slots ORDER BY day, start_time").fetchall()
+        # Prefer showing normalized `timetable_entries` first; fall back to
+        # legacy `timetable_slots` only when no normalized entries are present.
+        rows = []
         rows_source = "raw"
-        if not rows:
+        try:
+            entries = _db_execute(db, "SELECT te.*, s.name AS subject_name, t.name AS teacher_name, b.name AS branch_name FROM timetable_entries te LEFT JOIN subjects s ON te.subject_id = s.id LEFT JOIN teachers t ON te.teacher_id = t.id LEFT JOIN branches b ON te.branch_id = b.id ORDER BY te.day, te.start_time").fetchall()
+        except Exception:
+            logger.exception("Failed to load normalized timetable entries for manage page")
+            entries = []
+
+        # If normalized entries exist, map them into the `rows` shape used by
+        # the template. Otherwise, read legacy timetable_slots.
+        if entries:
+            mapped = []
+            for e in entries:
+                # e may be sqlite Row or mapping-like
+                def g(k, idx=None):
+                    try:
+                        return e.get(k) if hasattr(e, 'get') else e[idx]
+                    except Exception:
+                        return None
+
+                mapped.append({
+                    'day': g('day', 4) or '',
+                    'start_time': g('start_time', 5) or '',
+                    'end_time': g('end_time', 6) or '',
+                    'branch': g('branch_name') or (g('branch_id') or ''),
+                    'section': g('section', 2) or '',
+                    'semester': g('semester', 3) or '',
+                    'subject_name': g('subject_name') or (g('subject_id') or ''),
+                    'faculty_name': g('teacher_name') or (g('teacher_id') or ''),
+                    'room': g('room', 10) or '',
+                    'is_lab': g('is_lab', 9) or 0,
+                })
+            rows = mapped
+            rows_source = 'normalized'
+        else:
             try:
-                rows = _db_execute(
-                    db,
-                    """
-                    SELECT
-                        te.day,
-                        te.start_time,
-                        te.end_time,
-                        COALESCE(b.name, CAST(te.branch_id AS TEXT), '') AS branch,
-                        te.section,
-                        te.semester,
-                        COALESCE(s.name, CAST(te.subject_id AS TEXT), '') AS subject_name,
-                        COALESCE(t.name, CAST(te.teacher_id AS TEXT), '') AS faculty_name,
-                        te.room,
-                        te.is_lab
-                    FROM timetable_entries te
-                    LEFT JOIN branches b ON te.branch_id = b.id
-                    LEFT JOIN subjects s ON te.subject_id = s.id
-                    LEFT JOIN teachers t ON te.teacher_id = t.id
-                    ORDER BY te.day, te.start_time
-                    """,
-                ).fetchall()
-                rows_source = "normalized"
+                rows = _db_execute(db, "SELECT * FROM timetable_slots ORDER BY day, start_time").fetchall()
+                rows_source = 'raw'
             except Exception:
-                logger.exception("Failed to load normalized timetable entries for manage page")
+                logger.exception("Failed to load legacy timetable_slots for manage page")
                 rows = []
+
+        # Debug preview of last import
         skipped_preview = None
         try:
             preview_path = os.path.join(os.path.dirname(__file__), "uploads", "last_import_debug.json")
@@ -3154,12 +3170,6 @@ def register_routes(app, db_getter=None):
                     skipped_preview = f.read()
         except Exception:
             logger.exception("Failed to load skipped preview")
-        # show normalized preview when available
-        try:
-            entries = _db_execute(db, "SELECT te.*, s.name AS subject_name, t.name AS teacher_name, b.name AS branch_name FROM timetable_entries te LEFT JOIN subjects s ON te.subject_id = s.id LEFT JOIN teachers t ON te.teacher_id = t.id LEFT JOIN branches b ON te.branch_id = b.id ORDER BY te.day, te.start_time").fetchall()
-        except Exception:
-            entries = []
-
         # Debug counts
         try:
             raw_count_row = _db_execute(db, "SELECT COUNT(*) AS c FROM timetable_slots").fetchone()
@@ -3172,26 +3182,7 @@ def register_routes(app, db_getter=None):
         except Exception:
             normalized_count = 0
 
-        # Ensure the manage page displays rows even when raw slots are empty by
-        # mapping normalized `entries` into the `rows` structure used by the
-        # primary table. This prevents empty placeholders when normalized data exists.
-        if not rows and entries:
-            mapped = []
-            for e in entries:
-                mapped.append({
-                    'day': e.get('day') if hasattr(e, 'keys') else e[4],
-                    'start_time': e.get('start_time') if hasattr(e, 'keys') else e[5],
-                    'end_time': e.get('end_time') if hasattr(e, 'keys') else e[6],
-                    'branch': e.get('branch_name') or (e.get('branch_id') if hasattr(e, 'keys') else ''),
-                    'section': e.get('section') if hasattr(e, 'keys') else e[2],
-                    'semester': e.get('semester') if hasattr(e, 'keys') else e[3],
-                    'subject_name': e.get('subject_name') or (e.get('subject_id') if hasattr(e, 'keys') else ''),
-                    'faculty_name': e.get('teacher_name') or (e.get('teacher_id') if hasattr(e, 'keys') else ''),
-                    'room': e.get('room') if hasattr(e, 'keys') else e[10],
-                    'is_lab': e.get('is_lab') if hasattr(e, 'keys') else e[9],
-                })
-            rows = mapped
-            rows_source = 'normalized'
+        logger.debug("Timetable manage page loaded: normalized_count=%s, raw_count=%s, rows_source=%s", normalized_count, raw_count, rows_source)
 
         return render_template("timetable_manage.html", rows=rows, entries=entries, skipped_preview=skipped_preview, rows_source=rows_source, raw_count=raw_count, normalized_count=normalized_count)
 
