@@ -52,11 +52,12 @@
     <div class="grid" style="grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 20px;">
         <div>
             <h2 style="margin-top:0;">Imported slots</h2>
-            {% if rows_source == 'normalized' %}
+            {% if normalized_rows|length > 0 %}
             <p style="margin:0 0 10px 0; color:var(--text-secondary); font-size:0.92rem;">Showing normalized timetable entries.</p>
             {% else %}
             <p style="margin:0 0 10px 0; color:var(--text-secondary); font-size:0.92rem;">Showing legacy timetable slots.</p>
             {% endif %}
+            <div style="margin-bottom:8px; color:var(--text-secondary);">Total normalized rows: {{ normalized_rows|length }}</div>
             <div class="table-responsive">
                 <table style="width:100%; border-collapse:collapse;">
                     <thead>
@@ -65,17 +66,16 @@
                         </tr>
                     </thead>
                     <tbody>
-                        {% if rows %}
-                            {% for r in rows %}
+                        {% if normalized_rows|length > 0 %}
+                            {% for row in normalized_rows %}
                             <tr>
-                                <td>{{ r['day'] or '' }}</td>
-                                <td>{{ (r['start_time'] or '') + (' - ' + r['end_time'] if r.get('end_time') else '') }}</td>
-                                <td>{{ r['branch'] or '' }}</td>
-                                <td>{{ r['section'] or '' }}</td>
-                                <td>{{ r['semester'] or '' }}</td>
-                                <td>{{ r['subject_name'] or '' }}</td>
-                                <td>{{ r['faculty_name'] or '' }}</td>
-                                <td>{{ r['room'] or '' }}</td>
+                                <td>{{ row.day }}</td>
+                                <td>{{ row.start_time }}</td>
+                                <td>{{ row.branch }}</td>
+                                <td>{{ row.section }}</td>
+                                <td>{{ row.semester }}</td>
+                                <td>{{ row.subject_name }}</td>
+                                <td>{{ row.faculty_name }}</td>
                             </tr>
                             {% endfor %}
                         {% else %}

@@ -3121,10 +3121,44 @@ def register_routes(app, db_getter=None):
         # legacy `timetable_slots` only when no normalized entries are present.
         rows = []
         rows_source = "raw"
+        # Print counts for debugging (will appear in Render logs)
         try:
-            entries = _db_execute(db, "SELECT te.*, s.name AS subject_name, t.name AS teacher_name, b.name AS branch_name FROM timetable_entries te LEFT JOIN subjects s ON te.subject_id = s.id LEFT JOIN teachers t ON te.teacher_id = t.id LEFT JOIN branches b ON te.branch_id = b.id ORDER BY te.day, te.start_time").fetchall()
+            c1 = _db_execute(db, "SELECT COUNT(*) AS c FROM timetable_entries").fetchone()
+            c_entries = int(c1[0] if c1 is not None else 0)
         except Exception:
-            logger.exception("Failed to load normalized timetable entries for manage page")
+            c_entries = 0
+        try:
+            c2 = _db_execute(db, "SELECT COUNT(*) AS c FROM timetable_slots").fetchone()
+            c_slots = int(c2[0] if c2 is not None else 0)
+        except Exception:
+            c_slots = 0
+        print(f"DEBUG: timetable_entries_count={c_entries} timetable_slots_count={c_slots}")
+
+        # Force load normalized rows with the exact required columns
+        try:
+            sql = """
+            SELECT
+                te.day,
+                te.start_time,
+                te.end_time,
+                te.section,
+                te.semester,
+                te.room,
+                te.is_lab,
+                COALESCE(s.name, '') AS subject_name,
+                COALESCE(t.name, '') AS faculty_name,
+                COALESCE(b.name, '') AS branch
+            FROM timetable_entries te
+            LEFT JOIN subjects s ON te.subject_id = s.id
+            LEFT JOIN teachers t ON te.teacher_id = t.id
+            LEFT JOIN branches b ON te.branch_id = b.id
+            ORDER BY te.day, te.start_time
+            """
+            entries = _db_execute(db, sql).fetchall()
+            # normalize to list of dicts for Jinja access
+            entries = [dict(r) for r in entries]
+        except Exception:
+            logger.exception("Failed to load normalized timetable entries for manage page (forced query)")
             entries = []
 
         # If normalized entries exist, map them into the `rows` shape used by
@@ -3184,7 +3218,8 @@ def register_routes(app, db_getter=None):
 
         logger.debug("Timetable manage page loaded: normalized_count=%s, raw_count=%s, rows_source=%s", normalized_count, raw_count, rows_source)
 
-        return render_template("timetable_manage.html", rows=rows, entries=entries, skipped_preview=skipped_preview, rows_source=rows_source, raw_count=raw_count, normalized_count=normalized_count)
+        # Expose normalized_rows (mapped from 'rows') so template can force-load normalized data
+        return render_template("timetable_manage.html", rows=rows, entries=entries, skipped_preview=skipped_preview, rows_source=rows_source, raw_count=raw_count, normalized_count=normalized_count, normalized_rows=rows)
 
     @app.route("/timetable/active")
     def timetable_active():
