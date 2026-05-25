@@ -1652,6 +1652,12 @@ def _pdf_parse_timetable_table(
                     resolved = _resolve_subject(subject_piece, faculty_map)
                     subject_name = _clean_text(resolved.get("subject_name") or subject_piece)
                     faculty_name = _clean_text(resolved.get("faculty_name") or "")
+                    # Ignore administrative rows that are not real timetable entries
+                    admin_tokens = ("PRINCIPAL", "PRINCIPAL-VICE", "HOD", "DEAN", "DIRECTOR")
+                    if any(tok.lower() in subject_piece.lower() or tok.lower() in text.lower() for tok in admin_tokens):
+                        if report is not None and len(report.get("skipped_admin_rows", [])) < PDF_DIAG_SAMPLE_CAP:
+                            report.setdefault("skipped_admin_rows", []).append({"index": row_index, "text": text})
+                        continue
                     slot = {
                         "branch": branch_name,
                         "section": section_name,
@@ -1664,8 +1670,39 @@ def _pdf_parse_timetable_table(
                         "is_lab": int(bool(_row_has_token(subject_piece, "lab", "practical") or _row_has_token(text, "lab", "practical"))),
                         "room": "",
                     }
+                    # If both subject and faculty are missing, skip this row (likely noise)
+                    if not subject_name and not faculty_name:
+                        if report is not None and len(report.get("skipped_empty_rows", [])) < PDF_DIAG_SAMPLE_CAP:
+                            report.setdefault("skipped_empty_rows", []).append({"index": row_index, "text": text})
+                        continue
+
                     if subject_name and subject_name not in detected_subjects:
                         detected_subjects.append(subject_name)
+                    # Attempt fuzzy faculty name detection from teachers table if missing
+                    if not faculty_name:
+                        try:
+                            db = get_db()
+                            teacher_name_index = _build_teacher_name_index(db)
+                            import difflib
+                            key = _normalize_teacher_name(text)
+                            candidates = difflib.get_close_matches(key, list(teacher_name_index.keys()), n=1, cutoff=0.65)
+                            if candidates:
+                                faculty_name = teacher_name_index.get(candidates[0]) or faculty_name
+                        except Exception:
+                            pass
+
+                    # Log parsed pieces for diagnostics
+                    if report is not None and len(report.get("parsed_rows", [])) < PDF_DIAG_SAMPLE_CAP:
+                        report.setdefault("parsed_rows", []).append({
+                            "index": row_index,
+                            "parsed_subject": subject_name,
+                            "parsed_faculty": faculty_name,
+                            "parsed_section": slot.get("section"),
+                            "day": slot.get("day"),
+                            "start_time": slot.get("start_time"),
+                            "end_time": slot.get("end_time"),
+                            "text": text,
+                        })
                     dup = _dup_key(slot.get("branch"), slot.get("section"), slot.get("semester"), slot.get("day"), slot.get("start_time"), slot.get("end_time"), slot.get("subject_name"), slot.get("faculty_name"), slot.get("room"))
                     if dup in seen_slots_local:
                         if report is not None and len(report.get("skipped_duplicates", [])) < PDF_DIAG_SAMPLE_CAP:
@@ -2173,15 +2210,45 @@ def _build_teacher_lookup_index(db) -> Dict[str, int]:
     return index
 
 
+def _build_teacher_name_index(db) -> Dict[str, str]:
+    """Return mapping of normalized teacher name -> canonical display name."""
+    idx: Dict[str, str] = {}
+    try:
+        rows = _db_execute(db, "SELECT id, name FROM teachers").fetchall()
+    except Exception:
+        return idx
+    for row in rows:
+        teacher_name = row[1] if not hasattr(row, "keys") else row["name"]
+        norm_name = _normalize_teacher_name(teacher_name)
+        if norm_name and norm_name not in idx:
+            idx[norm_name] = teacher_name
+    return idx
+
+
 def _resolve_teacher_id(teacher_name: str, teacher_cache: Dict[str, Optional[int]], teacher_index: Dict[str, int]) -> Optional[int]:
     cache_key = _normalize_teacher_name(teacher_name)
     if not cache_key:
         return None
     if cache_key in teacher_cache:
         return teacher_cache[cache_key]
+    # Exact match first
     teacher_id = teacher_index.get(cache_key)
-    teacher_cache[cache_key] = teacher_id
-    return teacher_id
+    if teacher_id is not None:
+        teacher_cache[cache_key] = teacher_id
+        return teacher_id
+    # Fuzzy match against known teacher normalized names
+    try:
+        import difflib
+
+        candidates = difflib.get_close_matches(cache_key, list(teacher_index.keys()), n=1, cutoff=0.7)
+        if candidates:
+            teacher_id = teacher_index.get(candidates[0])
+            teacher_cache[cache_key] = teacher_id
+            return teacher_id
+    except Exception:
+        pass
+    teacher_cache[cache_key] = None
+    return None
 
 
 def get_upcoming_classes(db, branch: str = "", section: str = "", limit: int = 3, now: Optional[datetime] = None):

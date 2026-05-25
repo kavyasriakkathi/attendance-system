@@ -2,6 +2,7 @@ import os
 import logging
 import re
 import base64
+import secrets
 from datetime import date, timedelta
 from io import BytesIO
 import sqlite3
@@ -32,11 +33,36 @@ _secret_key_from_env = (os.getenv("SECRET_KEY") or "").strip()
 if _secret_key_from_env:
     _effective_secret_key = _secret_key_from_env
 elif is_prod:
-    raise RuntimeError("SECRET_KEY environment variable is required in production (Render).")
+    _effective_secret_key = secrets.token_hex(32)
+    logging.getLogger("app.startup").warning(
+        "SECRET_KEY is not set in production; using a temporary fallback key. "
+        "Set SECRET_KEY in Render to keep sessions stable across restarts."
+    )
 else:
     _effective_secret_key = "dev-key-change-in-production"
 
-_socketio_async_mode = os.getenv("SOCKETIO_ASYNC_MODE", "eventlet" if is_prod else "threading").strip().lower()
+def _resolve_socketio_async_mode() -> str:
+    configured_mode = (os.getenv("SOCKETIO_ASYNC_MODE") or "").strip().lower()
+    if configured_mode:
+        return configured_mode
+
+    if not is_prod:
+        return "threading"
+
+    try:
+        import importlib
+
+        import eventlet  # noqa: F401
+        importlib.import_module("engineio.async_drivers.eventlet")
+        return "eventlet"
+    except Exception:
+        logging.getLogger("app.startup").warning(
+            "eventlet is unavailable or incompatible; falling back to threading async mode."
+        )
+        return "threading"
+
+
+_socketio_async_mode = _resolve_socketio_async_mode()
 
 # Initialize SocketIO with Render-safe defaults and Flask-managed sessions.
 socketio = SocketIO(
