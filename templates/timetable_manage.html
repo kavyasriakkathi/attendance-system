@@ -53,6 +53,11 @@
         <div>
             <h2 style="margin-top:0;">Imported slots</h2>
             {% set imported_rows = normalized_rows or rows or [] %}
+            <div style="margin:0 0 8px 0; color:#991b1b; font-weight:700;">DEBUG normalized_rows|length: {{ normalized_rows|length }}</div>
+            <div style="margin:0 0 8px 0; color:#991b1b; font-weight:700;">DEBUG imported_rows|length: {{ imported_rows|length }}</div>
+            {% for row in normalized_rows[:5] %}
+            <div style="color:red; font-size:0.9rem; word-break:break-word;">{{ row }}</div>
+            {% endfor %}
             {% if imported_rows|length > 0 %}
             <p style="margin:0 0 10px 0; color:var(--text-secondary); font-size:0.92rem;">Showing normalized timetable entries.</p>
             {% else %}
@@ -67,22 +72,20 @@
                         </tr>
                     </thead>
                     <tbody>
-                        {% if imported_rows|length > 0 %}
-                            {% for row in imported_rows %}
-                            <tr>
-                                <td>{{ row.day or '' }}</td>
-                                <td>{{ (row.start_time or '') + (' - ' + row.end_time if row.end_time else '') }}</td>
-                                <td>{{ row.branch or row.branch_name or row.branch_id or '' }}</td>
-                                <td>{{ row.section or '' }}</td>
-                                <td>{{ row.semester or '' }}</td>
-                                <td>{{ row.subject_name or row.subject_id or '' }}</td>
-                                <td>{{ row.faculty_name or row.teacher_name or row.teacher_id or '' }}</td>
-                                <td>{{ row.room or '' }}</td>
-                            </tr>
-                            {% endfor %}
+                        {% for row in normalized_rows %}
+                        <tr>
+                            <td>{{ row.day }}</td>
+                            <td>{{ row.start_time }}</td>
+                            <td>{{ row.branch }}</td>
+                            <td>{{ row.section }}</td>
+                            <td>{{ row.semester }}</td>
+                            <td>{{ row.subject_name }}</td>
+                            <td>{{ row.faculty_name }}</td>
+                            <td>{{ row.room }}</td>
+                        </tr>
                         {% else %}
                             <tr><td colspan="8" style="color:var(--text-secondary);">No imported slots to display.</td></tr>
-                        {% endif %}
+                        {% endfor %}
                     </tbody>
                 </table>
             </div>

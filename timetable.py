@@ -3337,8 +3337,10 @@ def register_routes(app, db_getter=None):
         except Exception:
             logger.exception("Failed to print /timetable/manage row preview")
 
-        # Expose normalized_rows (mapped from 'rows') so template can force-load normalized data
-        return render_template("timetable_manage.html", rows=rows, entries=entries, skipped_preview=skipped_preview, rows_source=rows_source, raw_count=raw_count, normalized_count=normalized_count, normalized_rows=rows)
+        normalized_rows = rows
+
+        # Expose normalized_rows with an explicit same-named variable for template clarity.
+        return render_template("timetable_manage.html", rows=rows, entries=entries, skipped_preview=skipped_preview, rows_source=rows_source, raw_count=raw_count, normalized_count=normalized_count, normalized_rows=normalized_rows)
 
     @app.route("/timetable/active")
     def timetable_active():
