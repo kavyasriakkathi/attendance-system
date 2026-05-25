@@ -609,6 +609,12 @@ def _section_from_text(text: str) -> str:
     text = _clean_text(text)
     if not text:
         return ""
+    # Prefer explicit known section patterns like CSE-A, CSE B, CIVIL, MECH
+    known = re.search(r"\b(CSE|CSM|ECE|EEE|IT|MECH|CIVIL|AIML|DS)\s*[-_ ]?\s*([A-Z0-9]{0,4})\b", text, flags=re.IGNORECASE)
+    if known:
+        dept = known.group(1).upper()
+        sec = (known.group(2) or "").upper().strip()
+        return (dept + ("-" + sec if sec else "")).strip("-")
     patterns = [
         r"\b([A-Z]{2,}[A-Z0-9]*(?:\s*[-/]\s*[A-Z0-9]{1,4})+)\b",
         r"\b([A-Z]{2,}[A-Z0-9]*\s*[-]\s*[A-Z0-9]{1,4})\b",
@@ -752,6 +758,14 @@ def _expand_time_bounds(header_cells: List[str], start_col: int, end_col: int) -
             start_time = header_start
         if header_end:
             end_time = header_end
+    # If end_time still empty, try to infer from the next header to the right
+    if not end_time:
+        # try subsequent headers to find an end_time
+        for header in header_cells[end_col + 1:]:
+            _, header_end = _split_time_range(header)
+            if header_end:
+                end_time = header_end
+                break
     return start_time, end_time
 
 
@@ -835,6 +849,7 @@ def iter_docx_section_slots(
         "faculty_map": {},
         "table_count": 0,
         "slot_count": 0,
+        "seen_slots": set(),
     }
     primary_section = ""
     total_tables = 0
@@ -878,6 +893,7 @@ def iter_docx_section_slots(
             "faculty_map": {},
             "table_count": 0,
             "slot_count": 0,
+            "seen_slots": set(),
         }
         gc.collect()
 
@@ -935,20 +951,67 @@ def iter_docx_section_slots(
             try:
                 if _is_faculty_table(table_rows):
                     entries = []
+                    # Determine column indices from header if possible
+                    header_expanded = table_rows[0].get("expanded") or []
+                    hkeys = [_normalize_key(h) for h in header_expanded]
+                    code_idx = None
+                    name_idx = None
+                    faculty_idx = None
+                    for i, k in enumerate(hkeys):
+                        if code_idx is None and ("sub code" in k or "subject code" in k):
+                            code_idx = i
+                        elif name_idx is None and "subject name" in k:
+                            name_idx = i
+                        elif faculty_idx is None and "faculty" in k:
+                            faculty_idx = i
+
+                    # Fallback: assume groups of three if header not explicit
+                    last_code = last_name = last_faculty = ""
                     for row in table_rows[1:]:
                         expanded = row.get("expanded") or []
-                        for offset in range(0, len(expanded), 3):
-                            group = expanded[offset:offset + 3]
-                            if len(group) < 3:
-                                continue
-                            sub_code = _clean_text(group[0])
-                            subject_name = _clean_text(group[1])
-                            faculty_name = _clean_text(group[2])
-                            if not (sub_code or subject_name or faculty_name):
-                                continue
-                            if _normalize_key(sub_code) in {"sub code", "subject code"} or _normalize_key(subject_name) == "subject name":
-                                continue
-                            entries.append({"sub_code": sub_code, "subject_name": subject_name, "faculty_name": faculty_name})
+                        if code_idx is not None or name_idx is not None or faculty_idx is not None:
+                            sub_code = _clean_text(expanded[code_idx]) if code_idx is not None and code_idx < len(expanded) else ""
+                            subject_name = _clean_text(expanded[name_idx]) if name_idx is not None and name_idx < len(expanded) else ""
+                            faculty_name = _clean_text(expanded[faculty_idx]) if faculty_idx is not None and faculty_idx < len(expanded) else ""
+                        else:
+                            # group into triplets
+                            sub_code = subject_name = faculty_name = ""
+                            for offset in range(0, len(expanded), 3):
+                                group = expanded[offset:offset + 3]
+                                if len(group) < 2:
+                                    continue
+                                # if 3 elements, treat as code, name, faculty
+                                if len(group) >= 3:
+                                    sub_code = _clean_text(group[0])
+                                    subject_name = _clean_text(group[1])
+                                    faculty_name = _clean_text(group[2])
+                                else:
+                                    # two columns: subject, faculty
+                                    subject_name = _clean_text(group[0])
+                                    faculty_name = _clean_text(group[1])
+                                # prefer non-empty groups
+                                if sub_code or subject_name or faculty_name:
+                                    break
+
+                        # carry-forward merged rows
+                        if not sub_code:
+                            sub_code = last_code
+                        else:
+                            last_code = sub_code
+                        if not subject_name:
+                            subject_name = last_name
+                        else:
+                            last_name = subject_name
+                        if not faculty_name:
+                            faculty_name = last_faculty
+                        else:
+                            last_faculty = faculty_name
+
+                        if not (sub_code or subject_name or faculty_name):
+                            continue
+                        if _normalize_key(sub_code) in {"sub code", "subject code"} or _normalize_key(subject_name) == "subject name":
+                            continue
+                        entries.append({"sub_code": sub_code, "subject_name": subject_name, "faculty_name": faculty_name})
                     _merge_faculty_entries(section_state["faculty_map"], entries)
                     section_state["table_count"] += 1
                     if debug_jsonl_path:
@@ -961,6 +1024,13 @@ def iter_docx_section_slots(
                 if _is_timetable_table(table_rows) or section_state.get("table_count", 0) == 0:
                     section_state["table_count"] += 1
                     for slot in _iter_section_table_slots(table_rows, section_state, section_state.get("faculty_map") or {}):
+                        # dedupe per-section to avoid duplicates caused by merged cells or parsing overlap
+                        dup = _dup_key(slot.get("branch"), slot.get("section"), slot.get("semester"), slot.get("day"), slot.get("start_time"), slot.get("end_time"), slot.get("subject_name"), slot.get("faculty_name"), slot.get("room"))
+                        if dup in section_state.get("seen_slots", set()):
+                            if debug_jsonl_path:
+                                _append_jsonl(debug_jsonl_path, {"type": "skipped_duplicate", "dup": dup, "slot": slot, "timestamp": time.time()})
+                            continue
+                        section_state.get("seen_slots").add(dup)
                         section_state["slot_count"] += 1
                         total_slots += 1
                         yield slot
@@ -1005,8 +1075,8 @@ _PDF_TIME_RANGE_RE = re.compile(r"(\d{1,2}[:\.]\d{2}\s*(?:AM|PM)?)\s*(?:-|to)\s*
 _PDF_TIME_RANGE_HOUR_RE = re.compile(r"(\d{1,2}\s*(?:AM|PM))\s*(?:-|to)\s*(\d{1,2}\s*(?:AM|PM))", re.IGNORECASE)
 _PDF_DECORATIVE_TOKENS = ("principal", "hod", "head of department", "department", "dean")
 _PDF_BREAK_TOKENS = ("short break", "lunch break", "break", "lunch")
-_PDF_SECTION_STRICT_RE = re.compile(r"\b(CSM|CSE|ECE|EEE|IT|MECH|CIVIL|AIML|DS)\s*[-_/ ]\s*([A-Z0-9]{1,4})\b", re.IGNORECASE)
-_PDF_SECTION_CANDIDATE_RE = re.compile(r"\b(CSM|CSE|ECE|EEE|IT|MECH|CIVIL|AIML|DS)\s*[-_/ ]\s*([A-Z0-9]{1,4})\b", re.IGNORECASE)
+_PDF_SECTION_STRICT_RE = re.compile(r"\b((?:CSM|CSE|ECE|EEE|IT|MECH|CIVIL|AIML|DS))(?:\s*[-_/ ]\s*([A-Z0-9]{1,4}))?\b", re.IGNORECASE)
+_PDF_SECTION_CANDIDATE_RE = re.compile(r"\b((?:CSM|CSE|ECE|EEE|IT|MECH|CIVIL|AIML|DS))(?:\s*[-_/ ]\s*([A-Z0-9]{1,4}))?\b", re.IGNORECASE)
 _PDF_SECTION_CONTEXT_TOKENS = ("class", "section", "branch", "dept", "department", "program", "programme", "course")
 
 
@@ -1275,12 +1345,33 @@ def _pdf_parse_faculty_rows(rows: List[List[str]]) -> List[Dict]:
         elif faculty_idx is None and "faculty" in key:
             faculty_idx = idx
     entries: List[Dict] = []
+    # Fallback heuristics: if columns couldn't be located, pick sensible defaults
+    col_count = len(header_cells)
+    if faculty_idx is None:
+        faculty_idx = col_count - 1
+    if name_idx is None:
+        name_idx = max(0, col_count - 2)
+    # carry-forward last seen values to handle merged rows
+    last_code = last_name = last_faculty = ""
     for row in rows[header_idx + 1:]:
         if not row or not any(_clean_text(c) for c in row):
             continue
         sub_code = _clean_text(row[code_idx]) if code_idx is not None and code_idx < len(row) else ""
         subject_name = _clean_text(row[name_idx]) if name_idx is not None and name_idx < len(row) else ""
         faculty_name = _clean_text(row[faculty_idx]) if faculty_idx is not None and faculty_idx < len(row) else ""
+        # If any column is empty, try to inherit from previous non-empty value (merged rows)
+        if not sub_code:
+            sub_code = last_code
+        else:
+            last_code = sub_code
+        if not subject_name:
+            subject_name = last_name
+        else:
+            last_name = subject_name
+        if not faculty_name:
+            faculty_name = last_faculty
+        else:
+            last_faculty = faculty_name
         if not (sub_code or subject_name or faculty_name):
             continue
         if _normalize_key(sub_code) in {"sub code", "subject code"}:
@@ -1491,6 +1582,9 @@ def _pdf_parse_timetable_table(
                 detected_time_slots.append(label)
     report["detected_time_slots"] = detected_time_slots[:PDF_DIAG_SAMPLE_CAP]
 
+    # track duplicates to avoid emitting the same logical slot multiple times
+    seen_slots_local = set()
+
     col_bounds = _pdf_table_column_bounds(table_info.get("table"), len(header_cells))
     for row_index, row in enumerate(rows[header_idx + 1:], start=header_idx + 1):
         if not row:
@@ -1537,6 +1631,12 @@ def _pdf_parse_timetable_table(
                     }
                     if subject_name and subject_name not in detected_subjects:
                         detected_subjects.append(subject_name)
+                    dup = _dup_key(slot.get("branch"), slot.get("section"), slot.get("semester"), slot.get("day"), slot.get("start_time"), slot.get("end_time"), slot.get("subject_name"), slot.get("faculty_name"), slot.get("room"))
+                    if dup in seen_slots_local:
+                        if report is not None and len(report.get("skipped_duplicates", [])) < PDF_DIAG_SAMPLE_CAP:
+                            report.setdefault("skipped_duplicates", []).append(dup)
+                        continue
+                    seen_slots_local.add(dup)
                     yield slot
 
     report["detected_days"] = sorted(detected_days)
