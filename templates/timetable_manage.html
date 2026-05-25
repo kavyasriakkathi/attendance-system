@@ -92,8 +92,8 @@
                         {% endif %}
                     {% endfor %}
                 {% else %}
-                    {% set left = max(1, page-2) %}
-                    {% set right = min(total_pages, page+2) %}
+                    {% set left = page - 2 if page - 2 > 1 else 1 %}
+                    {% set right = page + 2 if page + 2 < total_pages else total_pages %}
                     {% if left > 1 %}
                         <a class="button" href="{{ url_for('timetable_manage', page=1, q=q) }}">1</a>
                         {% if left > 2 %}<span class="button">…</span>{% endif %}
