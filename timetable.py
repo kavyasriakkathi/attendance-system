@@ -3285,66 +3285,57 @@ def register_routes(app, db_getter=None):
         except Exception:
             c_slots = 0
 
-        # Force load normalized rows with the exact required columns
+        # Server-side pagination & search
+        page = 1
         try:
-            sql = """
-            SELECT
-                te.day,
-                te.start_time,
-                te.end_time,
-                te.section,
-                te.semester,
-                te.room,
-                te.is_lab,
-                COALESCE(s.name, '') AS subject_name,
-                COALESCE(t.name, '') AS faculty_name,
-                COALESCE(b.name, '') AS branch
-            FROM timetable_entries te
-            LEFT JOIN subjects s ON te.subject_id = s.id
-            LEFT JOIN teachers t ON te.teacher_id = t.id
-            LEFT JOIN branches b ON te.branch_id = b.id
-            ORDER BY te.day, te.start_time
-            """
-            entries = _db_execute(db, sql).fetchall()
-            # normalize to list of dicts for Jinja access
-            entries = [dict(r) for r in entries]
+            page = int(request.args.get('page') or request.form.get('page') or 1)
         except Exception:
-            logger.exception("Failed to load normalized timetable entries for manage page (forced query)")
-            entries = []
+            page = 1
+        PAGE_SIZE = 25
+        q = (request.args.get('q') or request.form.get('q') or '').strip()
 
-        # If normalized entries exist, map them into the `rows` shape used by
-        # the template. Otherwise, read legacy timetable_slots.
-        if entries:
-            mapped = []
-            for e in entries:
-                # e may be sqlite Row or mapping-like
-                def g(k, idx=None):
-                    try:
-                        return e.get(k) if hasattr(e, 'get') else e[idx]
-                    except Exception:
-                        return None
+        # Build WHERE clause for simple text search across subject, faculty, section, branch, room
+        where_clauses = []
+        params = []
+        if q:
+            like = f"%{q}%"
+            where_clauses.append("(COALESCE(s.name,'') LIKE %s OR COALESCE(t.name,'') LIKE %s OR te.section LIKE %s OR COALESCE(b.name,'') LIKE %s OR te.room LIKE %s)")
+            params.extend([like, like, like, like, like])
 
-                mapped.append({
-                    'day': g('day', 4) or '',
-                    'start_time': g('start_time', 5) or '',
-                    'end_time': g('end_time', 6) or '',
-                    'branch': g('branch') or g('branch_name') or (g('branch_id') or ''),
-                    'section': g('section', 2) or '',
-                    'semester': g('semester', 3) or '',
-                    'subject_name': g('subject_name') or (g('subject_id') or ''),
-                    'faculty_name': g('faculty_name') or g('teacher_name') or (g('teacher_id') or ''),
-                    'room': g('room', 10) or '',
-                    'is_lab': g('is_lab', 9) or 0,
-                })
-            rows = mapped
-            rows_source = 'normalized'
-        else:
-            try:
-                rows = _db_execute(db, "SELECT * FROM timetable_slots ORDER BY day, start_time").fetchall()
+        where_sql = "WHERE " + " AND ".join(where_clauses) if where_clauses else ""
+
+        try:
+            # total count of normalized entries
+            count_sql = f"SELECT COUNT(1) AS c FROM timetable_entries te LEFT JOIN subjects s ON te.subject_id = s.id LEFT JOIN teachers t ON te.teacher_id = t.id LEFT JOIN branches b ON te.branch_id = b.id {where_sql}"
+            total_row = _db_execute(db, count_sql, tuple(params)).fetchone()
+            total_count = int(total_row[0] if total_row is not None else 0)
+        except Exception:
+            logger.exception("Failed to count timetable_entries for pagination")
+            total_count = 0
+
+        entries = []
+        rows_source = 'raw'
+        try:
+            if total_count > 0:
+                offset = max(0, (page - 1) * PAGE_SIZE)
+                sql = f"SELECT te.day, te.start_time, te.end_time, te.section, te.semester, te.room, te.is_lab, COALESCE(s.name,'') AS subject_name, COALESCE(t.name,'') AS faculty_name, COALESCE(b.name,'') AS branch FROM timetable_entries te LEFT JOIN subjects s ON te.subject_id = s.id LEFT JOIN teachers t ON te.teacher_id = t.id LEFT JOIN branches b ON te.branch_id = b.id {where_sql} ORDER BY te.day, te.start_time LIMIT %s OFFSET %s"
+                qparams = list(params) + [PAGE_SIZE, offset]
+                entries = _db_execute(db, sql, tuple(qparams)).fetchall()
+                entries = [dict(r) for r in entries]
+                rows_source = 'normalized'
+            else:
+                # Fallback to legacy slots with paging
+                count_sql = "SELECT COUNT(1) AS c FROM timetable_slots"
+                total_row = _db_execute(db, count_sql).fetchone()
+                total_count = int(total_row[0] if total_row is not None else 0)
+                offset = max(0, (page - 1) * PAGE_SIZE)
+                sql = "SELECT * FROM timetable_slots ORDER BY day, start_time LIMIT %s OFFSET %s"
+                entries = _db_execute(db, sql, (PAGE_SIZE, offset)).fetchall()
+                entries = [dict(r) for r in entries]
                 rows_source = 'raw'
-            except Exception:
-                logger.exception("Failed to load legacy timetable_slots for manage page")
-                rows = []
+        except Exception:
+            logger.exception("Failed to load paginated timetable rows")
+            entries = []
 
         # Debug preview of last import
         skipped_preview = None
@@ -3389,8 +3380,24 @@ def register_routes(app, db_getter=None):
 
         normalized_rows = rows
 
-        # Expose normalized_rows with an explicit same-named variable for template clarity.
-        return render_template("timetable_manage.html", rows=rows, entries=entries, skipped_preview=skipped_preview, rows_source=rows_source, raw_count=raw_count, normalized_count=normalized_count, normalized_rows=normalized_rows, success_banner=success_banner, last_imported_file=last_imported_file)
+        # Expose pagination context
+        page_size = PAGE_SIZE
+        return render_template(
+            "timetable_manage.html",
+            rows=rows,
+            entries=entries,
+            skipped_preview=skipped_preview,
+            rows_source=rows_source,
+            raw_count=raw_count,
+            normalized_count=normalized_count,
+            normalized_rows=normalized_rows,
+            success_banner=success_banner,
+            last_imported_file=last_imported_file,
+            total_count=total_count,
+            page=page,
+            page_size=page_size,
+            q=q,
+        )
 
     @app.route("/timetable/active")
     def timetable_active():

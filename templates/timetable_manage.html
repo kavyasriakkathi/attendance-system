@@ -62,30 +62,67 @@
     </form>
 
     <div class="manage-toolbar">
-        <div class="manage-search">
-            <label for="timetable-search">Search</label>
-            <input type="search" id="timetable-search" placeholder="Search day, subject, faculty, room...">
-        </div>
-        <div class="manage-pagination-controls">
-            <label for="timetable-page-size">Rows per page</label>
-            <select id="timetable-page-size">
-                <option value="10">10</option>
-                <option value="25" selected>25</option>
-                <option value="50">50</option>
-                <option value="100">100</option>
-            </select>
-            <div class="manage-page-info" id="timetable-page-info"></div>
+        <form method="get" class="manage-search" style="margin:0;">
+            <label for="q">Search</label>
+            <div style="display:flex; gap:8px; align-items:center;">
+                <input type="search" id="q" name="q" value="{{ q }}" placeholder="Search section, subject, faculty...">
+                <button type="submit" class="button">Search</button>
+            </div>
+        </form>
+        <div class="manage-pagination-controls" style="align-items:center; gap:12px;">
+            {% set total_pages = (total_count // page_size) + (1 if total_count % page_size else 0) %}
+            {% set start_idx = ((page - 1) * page_size) + 1 if total_count > 0 else 0 %}
+            {% set end_idx = (page * page_size) if page * page_size < total_count else total_count %}
+            <div class="manage-page-info">Showing {{ start_idx }}–{{ end_idx }} of {{ total_count }} rows</div>
             <div class="manage-pagination-buttons">
-                <button type="button" class="button" id="timetable-prev-page">Previous</button>
-                <button type="button" class="button" id="timetable-next-page">Next</button>
+                {% if page > 1 %}
+                <a class="button" href="{{ url_for('timetable_manage', page=page-1, q=q) }}">Previous</a>
+                {% else %}
+                <span class="button" aria-disabled="true">Previous</span>
+                {% endif %}
+
+                {% set first = 1 %}
+                {% set last = total_pages %}
+                {% if total_pages <= 9 %}
+                    {% for pnum in range(1, total_pages + 1) %}
+                        {% if pnum == page %}
+                            <span class="button" style="font-weight:900;">{{ pnum }}</span>
+                        {% else %}
+                            <a class="button" href="{{ url_for('timetable_manage', page=pnum, q=q) }}">{{ pnum }}</a>
+                        {% endif %}
+                    {% endfor %}
+                {% else %}
+                    {% set left = max(1, page-2) %}
+                    {% set right = min(total_pages, page+2) %}
+                    {% if left > 1 %}
+                        <a class="button" href="{{ url_for('timetable_manage', page=1, q=q) }}">1</a>
+                        {% if left > 2 %}<span class="button">…</span>{% endif %}
+                    {% endif %}
+                    {% for pnum in range(left, right + 1) %}
+                        {% if pnum == page %}
+                            <span class="button" style="font-weight:900;">{{ pnum }}</span>
+                        {% else %}
+                            <a class="button" href="{{ url_for('timetable_manage', page=pnum, q=q) }}">{{ pnum }}</a>
+                        {% endif %}
+                    {% endfor %}
+                    {% if right < total_pages %}
+                        {% if right < total_pages - 1 %}<span class="button">…</span>{% endif %}
+                        <a class="button" href="{{ url_for('timetable_manage', page=total_pages, q=q) }}">{{ total_pages }}</a>
+                    {% endif %}
+                {% endif %}
+
+                {% if page < total_pages %}
+                <a class="button" href="{{ url_for('timetable_manage', page=page+1, q=q) }}">Next</a>
+                {% else %}
+                <span class="button" aria-disabled="true">Next</span>
+                {% endif %}
             </div>
         </div>
     </div>
 
-    {% set import_rows = normalized_rows if normalized_rows else rows %}
-    {% if import_rows %}
+    {% if entries %}
     <div class="table-responsive">
-        <table class="manage-table" id="timetable-manage-table">
+        <table class="manage-table">
             <thead>
                 <tr>
                     <th>Day</th>
@@ -100,114 +137,25 @@
                 </tr>
             </thead>
             <tbody>
-                {% for row in import_rows %}
-                {% set day_value = row.get('day', '') %}
-                {% set start_value = row.get('start_time', '') %}
-                {% set end_value = row.get('end_time', '') %}
-                {% set branch_value = row.get('branch') or row.get('branch_name') or row.get('branch_id') or '' %}
-                {% set section_value = row.get('section', '') %}
-                {% set semester_value = row.get('semester', '') %}
-                {% set subject_value = row.get('subject_name') or row.get('subject_id') or '' %}
-                {% set faculty_value = row.get('faculty_name') or row.get('teacher_name') or row.get('teacher_id') or '' %}
-                {% set room_value = row.get('room', '') %}
-                {% set lab_value = row.get('is_lab', 0) %}
-                {% if day_value or start_value or end_value or branch_value or section_value or semester_value or subject_value or faculty_value or room_value %}
-                <tr data-row>
-                    <td>{{ day_value }}</td>
-                    <td>{{ start_value }}{% if end_value %} - {{ end_value }}{% endif %}</td>
-                    <td>{{ branch_value }}</td>
-                    <td>{{ section_value }}</td>
-                    <td>{{ semester_value }}</td>
-                    <td>{{ subject_value }}</td>
-                    <td>{{ faculty_value }}</td>
-                    <td>{{ room_value }}</td>
-                    <td>{{ 'Lab' if lab_value else 'Theory' }}</td>
+                {% for row in entries %}
+                <tr>
+                    <td>{{ row.get('day', '') }}</td>
+                    <td>{{ row.get('start_time', '') }}{% if row.get('end_time') %} - {{ row.get('end_time') }}{% endif %}</td>
+                    <td>{{ row.get('branch') or row.get('branch_name') or row.get('branch_id') or '' }}</td>
+                    <td>{{ row.get('section', '') }}</td>
+                    <td>{{ row.get('semester', '') }}</td>
+                    <td>{{ row.get('subject_name') or row.get('subject_id') or '' }}</td>
+                    <td>{{ row.get('faculty_name') or row.get('teacher_name') or row.get('teacher_id') or '' }}</td>
+                    <td>{{ row.get('room', '') }}</td>
+                    <td>{{ 'Lab' if row.get('is_lab') else 'Theory' }}</td>
                 </tr>
-                {% endif %}
                 {% endfor %}
             </tbody>
         </table>
     </div>
-    <div class="manage-empty-state" id="timetable-empty-state" hidden>No matching timetable rows.</div>
     {% else %}
-    <div class="manage-empty-state">No normalized timetable rows to display yet.</div>
+    <div class="manage-empty-state">No timetable rows to display.</div>
     {% endif %}
 </div>
 
-<script>
-(function () {
-    const table = document.getElementById('timetable-manage-table');
-    const searchInput = document.getElementById('timetable-search');
-    const pageSizeSelect = document.getElementById('timetable-page-size');
-    const pageInfo = document.getElementById('timetable-page-info');
-    const prevButton = document.getElementById('timetable-prev-page');
-    const nextButton = document.getElementById('timetable-next-page');
-    const emptyState = document.getElementById('timetable-empty-state');
-
-    if (!table || !searchInput || !pageSizeSelect || !pageInfo || !prevButton || !nextButton) {
-        return;
-    }
-
-    const allRows = Array.from(table.querySelectorAll('tbody tr[data-row]'));
-    let currentPage = 1;
-    let pageSize = parseInt(pageSizeSelect.value, 10) || 25;
-
-    const render = () => {
-        const query = searchInput.value.trim().toLowerCase();
-        const filteredRows = allRows.filter((row) => row.textContent.toLowerCase().includes(query));
-        const totalPages = Math.max(1, Math.ceil(filteredRows.length / pageSize));
-
-        if (currentPage > totalPages) {
-            currentPage = totalPages;
-        }
-
-        const startIndex = (currentPage - 1) * pageSize;
-        const endIndex = startIndex + pageSize;
-
-        allRows.forEach((row) => {
-            row.style.display = 'none';
-        });
-
-        filteredRows.forEach((row, index) => {
-            row.style.display = index >= startIndex && index < endIndex ? '' : 'none';
-        });
-
-        pageInfo.textContent = filteredRows.length
-            ? `Showing ${Math.min(startIndex + 1, filteredRows.length)}-${Math.min(endIndex, filteredRows.length)} of ${filteredRows.length}`
-            : 'No matching rows';
-
-        prevButton.disabled = currentPage <= 1 || filteredRows.length === 0;
-        nextButton.disabled = currentPage >= totalPages || filteredRows.length === 0;
-
-        if (emptyState) {
-            emptyState.hidden = filteredRows.length !== 0;
-        }
-    };
-
-    searchInput.addEventListener('input', () => {
-        currentPage = 1;
-        render();
-    });
-
-    pageSizeSelect.addEventListener('change', () => {
-        pageSize = parseInt(pageSizeSelect.value, 10) || 25;
-        currentPage = 1;
-        render();
-    });
-
-    prevButton.addEventListener('click', () => {
-        if (currentPage > 1) {
-            currentPage -= 1;
-            render();
-        }
-    });
-
-    nextButton.addEventListener('click', () => {
-        currentPage += 1;
-        render();
-    });
-
-    render();
-})();
-</script>
 {% endblock %}
