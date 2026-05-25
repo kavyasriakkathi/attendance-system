@@ -407,6 +407,221 @@ tr:hover td {
     background-color: #fafbfc;
 }
 
+.timetable-manage-card {
+    display: grid;
+    gap: 20px;
+}
+
+.manage-banner {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 16px 20px;
+    border-radius: var(--border-radius);
+    font-weight: 700;
+    box-shadow: var(--shadow-sm);
+}
+
+.manage-banner.success {
+    background: #d1f7ec;
+    color: #0b6e54;
+    border: 1px solid #9be5cf;
+}
+
+.manage-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 20px;
+    flex-wrap: wrap;
+}
+
+.manage-kicker {
+    margin: 0 0 6px 0;
+    text-transform: uppercase;
+    letter-spacing: 0.7px;
+    color: var(--text-secondary);
+    font-weight: 700;
+    font-size: 0.8rem;
+}
+
+.manage-description {
+    margin: 0;
+    color: var(--text-secondary);
+}
+
+.manage-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-top: 12px;
+    align-items: center;
+}
+
+.manage-label {
+    padding: 6px 10px;
+    border-radius: 999px;
+    background: #eff6ff;
+    color: #1d4ed8;
+    font-size: 0.9rem;
+    font-weight: 600;
+}
+
+.manage-actions,
+.manage-form-actions,
+.manage-bulk-form,
+.manage-pagination-controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: center;
+}
+
+.manage-pagination-buttons {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.manage-summary-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 12px;
+}
+
+.manage-summary-card {
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    background: #f8fafc;
+    padding: 16px 18px;
+    display: grid;
+    gap: 6px;
+}
+
+.manage-summary-card span {
+    color: var(--text-secondary);
+    font-size: 0.85rem;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    font-weight: 700;
+}
+
+.manage-summary-card strong {
+    font-size: 1.55rem;
+    line-height: 1.1;
+}
+
+.manage-note,
+.manage-empty-state,
+.manage-page-info {
+    color: var(--text-secondary);
+}
+
+.manage-note {
+    padding: 14px 16px;
+    border-left: 4px solid var(--warning-color);
+    background: #fffdf5;
+    border-radius: 10px;
+}
+
+.manage-upload-form,
+.manage-bulk-form {
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    padding: 16px;
+    background: #fbfdff;
+}
+
+.manage-check {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 0;
+    text-transform: none;
+    letter-spacing: normal;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.manage-toolbar {
+    display: flex;
+    justify-content: space-between;
+    gap: 16px;
+    align-items: flex-end;
+    flex-wrap: wrap;
+    padding: 16px;
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    background: #f8fafc;
+}
+
+.manage-search {
+    display: grid;
+    gap: 8px;
+    min-width: min(100%, 420px);
+    flex: 1 1 420px;
+}
+
+.manage-pagination-controls label,
+.manage-search label {
+    margin-bottom: 0;
+}
+
+.manage-page-info {
+    font-weight: 600;
+}
+
+.manage-danger {
+    background: #b91c1c;
+}
+
+button:disabled,
+.button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+    transform: none;
+    box-shadow: none;
+}
+
+.manage-table {
+    width: 100%;
+    border-collapse: collapse;
+    min-width: 960px;
+    border: 1px solid var(--border-color);
+    overflow: hidden;
+    border-radius: 12px;
+}
+
+.manage-table thead th {
+    position: sticky;
+    top: 0;
+    background: #eef2ff;
+    color: #334155;
+}
+
+.manage-table tbody tr:nth-child(even) td {
+    background: #f8fafc;
+}
+
+.manage-table tbody tr:hover td {
+    background: #eef4ff;
+}
+
+.manage-table th,
+.manage-table td {
+    border: 1px solid var(--border-color);
+    white-space: nowrap;
+}
+
+.manage-empty-state {
+    margin-top: 16px;
+    padding: 18px;
+    border: 1px dashed var(--border-color);
+    border-radius: 12px;
+    background: #fafbfc;
+    text-align: center;
+}
+
 /* Flash Messages */
 .flash-container {
     margin-bottom: 24px;

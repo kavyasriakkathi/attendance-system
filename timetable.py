@@ -3238,6 +3238,11 @@ def register_routes(app, db_getter=None):
                     logger.exception("Failed to write import debug preview")
 
                 n_c = normalized_info.get("counters", {}) if isinstance(normalized_info, dict) else {}
+                success_count = int(n_c.get("inserted", 0) or 0)
+                if success_count <= 0:
+                    success_count = int(i_c.get("inserted", 0) or 0)
+                session["timetable_manage_banner"] = f"{success_count} timetable rows imported successfully"
+                session["timetable_last_imported_file"] = filename
                 logger.info(
                     "timetable import diagnostics raw_inserted=%s raw_skipped=%s normalized_inserted=%s normalized_skipped=%s normalized_skip_reasons=%s",
                     i_c.get("inserted", 0),
@@ -3245,10 +3250,6 @@ def register_routes(app, db_getter=None):
                     n_c.get("inserted", 0),
                     n_c.get("skipped_total", 0),
                     n_c.get("skip_reasons", {}),
-                )
-                flash(
-                    f"Imported slots: processed={i_c.get('processed', 0)} inserted={i_c.get('inserted', 0)} skipped={i_c.get('skipped_total', 0)}. Normalized: processed={n_c.get('processed', 0)} inserted={n_c.get('inserted', 0)} skipped={n_c.get('skipped_total', 0)}. Batch commits={import_info.get('batch_commits', 0)}.",
-                    "success",
                 )
             except TimetablePDFValidationError as e:
                 logger.warning("PDF validation failed: %s", str(e))
@@ -3269,9 +3270,10 @@ def register_routes(app, db_getter=None):
         # GET: show simple management UI
         # Prefer showing normalized `timetable_entries` first; fall back to
         # legacy `timetable_slots` only when no normalized entries are present.
+        success_banner = session.pop("timetable_manage_banner", None)
+        last_imported_file = session.get("timetable_last_imported_file")
         rows = []
         rows_source = "raw"
-        # Print counts for debugging (will appear in Render logs)
         try:
             c1 = _db_execute(db, "SELECT COUNT(*) AS c FROM timetable_entries").fetchone()
             c_entries = int(c1[0] if c1 is not None else 0)
@@ -3282,7 +3284,6 @@ def register_routes(app, db_getter=None):
             c_slots = int(c2[0] if c2 is not None else 0)
         except Exception:
             c_slots = 0
-        print(f"DEBUG: timetable_entries_count={c_entries} timetable_slots_count={c_slots}")
 
         # Force load normalized rows with the exact required columns
         try:
@@ -3366,12 +3367,30 @@ def register_routes(app, db_getter=None):
         except Exception:
             normalized_count = 0
 
+        def _row_to_dict(value):
+            try:
+                if isinstance(value, dict):
+                    return dict(value)
+                if hasattr(value, "keys"):
+                    return {k: value[k] for k in value.keys()}
+                return dict(value)
+            except Exception:
+                return {}
+
+        def _has_visible_data(value):
+            data = _row_to_dict(value)
+            for key in ("id", "created_at"):
+                data.pop(key, None)
+            return any(_clean_text(v) for v in data.values())
+
+        rows = [_row_to_dict(row) for row in rows if _has_visible_data(row)]
+
         logger.debug("Timetable manage page loaded: normalized_count=%s, raw_count=%s, rows_source=%s", normalized_count, raw_count, rows_source)
 
         normalized_rows = rows
 
         # Expose normalized_rows with an explicit same-named variable for template clarity.
-        return render_template("timetable_manage.html", rows=rows, entries=entries, skipped_preview=skipped_preview, rows_source=rows_source, raw_count=raw_count, normalized_count=normalized_count, normalized_rows=normalized_rows)
+        return render_template("timetable_manage.html", rows=rows, entries=entries, skipped_preview=skipped_preview, rows_source=rows_source, raw_count=raw_count, normalized_count=normalized_count, normalized_rows=normalized_rows, success_banner=success_banner, last_imported_file=last_imported_file)
 
     @app.route("/timetable/active")
     def timetable_active():

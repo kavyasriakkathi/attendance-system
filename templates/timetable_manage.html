@@ -1,119 +1,213 @@
 {% extends "layout.html" %}
 {% block content %}
-<div class="card">
-    <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:16px; flex-wrap:wrap;">
+<div class="card timetable-manage-card">
+    {% if success_banner %}
+    <div class="manage-banner success">
+        <i class="fa-solid fa-circle-check"></i>
+        <span>{{ success_banner }}</span>
+    </div>
+    {% endif %}
+
+    <div class="manage-header">
         <div>
-            <p style="margin:0 0 6px 0; text-transform:uppercase; letter-spacing:0.7px; color:var(--text-secondary); font-weight:700; font-size:0.8rem;">Timetable</p>
-            <h1 style="margin:0 0 8px 0;">Timetable Management</h1>
-            <p style="margin:0; color:var(--text-secondary);">Upload a DOCX or PDF timetable to import slots and normalized timetable entries.</p>
-            <div style="margin-top:8px; color:var(--text-secondary); font-size:0.95rem;">
-                <strong>Raw Slots Count:</strong> {{ raw_count or 0 }} &nbsp; • &nbsp;
-                <strong>Normalized Entries Count:</strong> {{ normalized_count or 0 }}
+            <p class="manage-kicker">Timetable</p>
+            <h1>Timetable Management</h1>
+            <p class="manage-description">Upload a DOCX or PDF timetable, then browse the normalized rows below.</p>
+            <div class="manage-meta">
+                <span class="badge badge-success">Normalized rows first</span>
+                {% if last_imported_file %}
+                <span class="manage-label">Last imported file: {{ last_imported_file }}</span>
+                {% endif %}
             </div>
         </div>
-        <div style="display:flex; gap:10px; flex-wrap:wrap;">
+        <div class="manage-actions">
             <a class="button" href="{{ url_for('timetable_home') }}"><i class="fa-solid fa-gauge-high"></i> Timetable Dashboard</a>
             <a class="button" href="{{ url_for('timetable_faculty_schedules') }}" style="background: var(--text-secondary);"><i class="fa-solid fa-user-clock"></i> Faculty Schedules</a>
         </div>
     </div>
 
-    <div class="card" style="margin-top:16px; background:#fff7ed; border:1px solid #fdba74; color:#7c2d12;">
-        <h2 style="margin-top:0;">DOCX uploads recommended</h2>
-        <p style="margin:0;">For best reliability, upload one section per DOCX with a proper table layout and a faculty mapping table below the timetable. On low-memory servers (Render free/starter), avoid large multi-branch files.</p>
+    <div class="manage-summary-grid">
+        <div class="manage-summary-card">
+            <span>Raw slots</span>
+            <strong>{{ raw_count or 0 }}</strong>
+        </div>
+        <div class="manage-summary-card">
+            <span>Normalized rows</span>
+            <strong>{{ normalized_count or 0 }}</strong>
+        </div>
+        <div class="manage-summary-card">
+            <span>Visible rows</span>
+            <strong>{% set visible_row_count = normalized_rows|length if normalized_rows else rows|length %}{{ visible_row_count }}</strong>
+        </div>
     </div>
 
-    <form method="post" enctype="multipart/form-data">
+    <div class="manage-note">
+        For best reliability, upload one section per DOCX with a proper table layout and a faculty mapping table below the timetable.
+    </div>
+
+    <form method="post" enctype="multipart/form-data" class="manage-upload-form">
         <div class="form-group">
             <label for="timetable_file">Timetable file (.docx or .pdf)</label>
             <input type="file" name="timetable_file" id="timetable_file" accept=".docx,.pdf" required>
         </div>
-        <button type="submit" class="button">Upload & Import</button>
-    </form>
-    <form method="post" style="margin-top:8px;">
-        <input type="hidden" name="action" value="delete_timetable">
-        <button type="submit" class="button" style="background:#b91c1c;">Delete Timetable</button>
+        <div class="manage-form-actions">
+            <button type="submit" class="button">Upload & Import</button>
+            <button type="submit" name="action" value="delete_timetable" formnovalidate class="button manage-danger">Delete Timetable</button>
+        </div>
     </form>
 
-    <!-- Admin: bulk-resolve subjects/teachers -->
-    <form method="post" action="{{ url_for('timetable_admin_bulk_resolve') }}" style="margin-top:8px; display:flex; gap:8px; align-items:center;">
-        <label style="display:flex; gap:8px; align-items:center;"><input type="checkbox" name="create_missing_subjects" value="1"> Create missing subjects</label>
+    <form method="post" action="{{ url_for('timetable_admin_bulk_resolve') }}" class="manage-bulk-form">
+        <label class="manage-check"><input type="checkbox" name="create_missing_subjects" value="1"> Create missing subjects</label>
         <button type="submit" class="button" style="background:var(--accent);">Bulk Resolve Subjects/Teachers</button>
     </form>
 
-    {% if skipped_preview %}
-    <div class="card" style="margin-top:16px; border:1px solid #e5e7eb;">
-        <h2 style="margin-top:0;">Last Import Preview</h2>
-        <p style="margin:0 0 8px 0; color:var(--text-secondary);">Temporary preview of skipped/processed rows from the last upload.</p>
-        <pre style="white-space:pre-wrap; word-break:break-word; background:#f8fafc; padding:12px; border-radius:8px; max-height:320px; overflow:auto;">{{ skipped_preview }}</pre>
+    <div class="manage-toolbar">
+        <div class="manage-search">
+            <label for="timetable-search">Search</label>
+            <input type="search" id="timetable-search" placeholder="Search day, subject, faculty, room...">
+        </div>
+        <div class="manage-pagination-controls">
+            <label for="timetable-page-size">Rows per page</label>
+            <select id="timetable-page-size">
+                <option value="10">10</option>
+                <option value="25" selected>25</option>
+                <option value="50">50</option>
+                <option value="100">100</option>
+            </select>
+            <div class="manage-page-info" id="timetable-page-info"></div>
+            <div class="manage-pagination-buttons">
+                <button type="button" class="button" id="timetable-prev-page">Previous</button>
+                <button type="button" class="button" id="timetable-next-page">Next</button>
+            </div>
+        </div>
     </div>
-    {% endif %}
 
-    <hr>
-    <div class="grid" style="grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 20px;">
-            {% for row in normalized_rows[:5] %}
-            <div style="color:red; font-size:0.9rem; word-break:break-word;">{{ row }}</div>
-            {% endfor %}
-            {% if imported_rows|length > 0 %}
-            <p style="margin:0 0 10px 0; color:var(--text-secondary); font-size:0.92rem;">Showing normalized timetable entries.</p>
-            {% else %}
-            <p style="margin:0 0 10px 0; color:var(--text-secondary); font-size:0.92rem;">Showing legacy timetable slots.</p>
-            {% endif %}
-            <div style="margin-bottom:8px; color:var(--text-secondary);">Total normalized rows: {{ imported_rows|length }}</div>
-            <div class="table-responsive">
-                <table style="width:100%; border-collapse:collapse;">
-                    <thead>
-                        <tr style="text-align:left; border-bottom:1px solid #ddd;">
-                            <th>Day</th><th>Time</th><th>Branch</th><th>Section</th><th>Sem</th><th>Subject</th><th>Faculty</th><th>Room</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {% for row in normalized_rows %}
-                        <tr>
-                            <td>{{ row.day }}</td>
-                            <td>{{ row.start_time }}</td>
-                            <td>{{ row.branch }}</td>
-                            <td>{{ row.section }}</td>
-                            <td>{{ row.semester }}</td>
-                            <td>{{ row.subject_name }}</td>
-                            <td>{{ row.faculty_name }}</td>
-                            <td>{{ row.room }}</td>
-                        </tr>
-                        {% else %}
-                            <tr><td colspan="8" style="color:var(--text-secondary);">No imported slots to display.</td></tr>
-                        {% endfor %}
-                    </tbody>
-                </table>
-            </div>
-        </div>
-        <div>
-            <h2 style="margin-top:0;">Normalized preview</h2>
-            <div class="table-responsive">
-                <table style="width:100%; border-collapse:collapse;">
-                    <thead>
-                        <tr style="text-align:left; border-bottom:1px solid #ddd;">
-                            <th>Day</th><th>Time</th><th>Branch</th><th>Section</th><th>Subject</th><th>Faculty</th><th>Lab</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {% if entries %}
-                            {% for e in entries %}
-                            <tr>
-                                <td>{{ e['day'] or '' }}</td>
-                                <td>{{ (e['start_time'] or '') + (' - ' + e.get('end_time') if e.get('end_time') else '') }}</td>
-                                <td>{{ e.get('branch') or e.get('branch_name') or e.get('branch_id') or '' }}</td>
-                                <td>{{ e['section'] or '' }}</td>
-                                <td>{{ e['subject_name'] or e['subject_id'] or '' }}</td>
-                                <td>{{ e.get('faculty_name') or e.get('teacher_name') or e.get('teacher_id') or '' }}</td>
-                                <td>{{ 'Yes' if e['is_lab'] else 'No' }}</td>
-                            </tr>
-                            {% endfor %}
-                        {% else %}
-                            <tr><td colspan="7" style="color:var(--text-secondary);">No normalized entries to display.</td></tr>
-                        {% endif %}
-                    </tbody>
-                </table>
-            </div>
-        </div>
+    {% set import_rows = normalized_rows if normalized_rows else rows %}
+    {% if import_rows %}
+    <div class="table-responsive">
+        <table class="manage-table" id="timetable-manage-table">
+            <thead>
+                <tr>
+                    <th>Day</th>
+                    <th>Time</th>
+                    <th>Branch</th>
+                    <th>Section</th>
+                    <th>Sem</th>
+                    <th>Subject</th>
+                    <th>Faculty</th>
+                    <th>Room</th>
+                    <th>Lab/Theory</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for row in import_rows %}
+                {% set day_value = row.get('day', '') %}
+                {% set start_value = row.get('start_time', '') %}
+                {% set end_value = row.get('end_time', '') %}
+                {% set branch_value = row.get('branch') or row.get('branch_name') or row.get('branch_id') or '' %}
+                {% set section_value = row.get('section', '') %}
+                {% set semester_value = row.get('semester', '') %}
+                {% set subject_value = row.get('subject_name') or row.get('subject_id') or '' %}
+                {% set faculty_value = row.get('faculty_name') or row.get('teacher_name') or row.get('teacher_id') or '' %}
+                {% set room_value = row.get('room', '') %}
+                {% set lab_value = row.get('is_lab', 0) %}
+                {% if day_value or start_value or end_value or branch_value or section_value or semester_value or subject_value or faculty_value or room_value %}
+                <tr data-row>
+                    <td>{{ day_value }}</td>
+                    <td>{{ start_value }}{% if end_value %} - {{ end_value }}{% endif %}</td>
+                    <td>{{ branch_value }}</td>
+                    <td>{{ section_value }}</td>
+                    <td>{{ semester_value }}</td>
+                    <td>{{ subject_value }}</td>
+                    <td>{{ faculty_value }}</td>
+                    <td>{{ room_value }}</td>
+                    <td>{{ 'Lab' if lab_value else 'Theory' }}</td>
+                </tr>
+                {% endif %}
+                {% endfor %}
+            </tbody>
+        </table>
     </div>
+    <div class="manage-empty-state" id="timetable-empty-state" hidden>No matching timetable rows.</div>
+    {% else %}
+    <div class="manage-empty-state">No normalized timetable rows to display yet.</div>
+    {% endif %}
 </div>
+
+<script>
+(function () {
+    const table = document.getElementById('timetable-manage-table');
+    const searchInput = document.getElementById('timetable-search');
+    const pageSizeSelect = document.getElementById('timetable-page-size');
+    const pageInfo = document.getElementById('timetable-page-info');
+    const prevButton = document.getElementById('timetable-prev-page');
+    const nextButton = document.getElementById('timetable-next-page');
+    const emptyState = document.getElementById('timetable-empty-state');
+
+    if (!table || !searchInput || !pageSizeSelect || !pageInfo || !prevButton || !nextButton) {
+        return;
+    }
+
+    const allRows = Array.from(table.querySelectorAll('tbody tr[data-row]'));
+    let currentPage = 1;
+    let pageSize = parseInt(pageSizeSelect.value, 10) || 25;
+
+    const render = () => {
+        const query = searchInput.value.trim().toLowerCase();
+        const filteredRows = allRows.filter((row) => row.textContent.toLowerCase().includes(query));
+        const totalPages = Math.max(1, Math.ceil(filteredRows.length / pageSize));
+
+        if (currentPage > totalPages) {
+            currentPage = totalPages;
+        }
+
+        const startIndex = (currentPage - 1) * pageSize;
+        const endIndex = startIndex + pageSize;
+
+        allRows.forEach((row) => {
+            row.style.display = 'none';
+        });
+
+        filteredRows.forEach((row, index) => {
+            row.style.display = index >= startIndex && index < endIndex ? '' : 'none';
+        });
+
+        pageInfo.textContent = filteredRows.length
+            ? `Showing ${Math.min(startIndex + 1, filteredRows.length)}-${Math.min(endIndex, filteredRows.length)} of ${filteredRows.length}`
+            : 'No matching rows';
+
+        prevButton.disabled = currentPage <= 1 || filteredRows.length === 0;
+        nextButton.disabled = currentPage >= totalPages || filteredRows.length === 0;
+
+        if (emptyState) {
+            emptyState.hidden = filteredRows.length !== 0;
+        }
+    };
+
+    searchInput.addEventListener('input', () => {
+        currentPage = 1;
+        render();
+    });
+
+    pageSizeSelect.addEventListener('change', () => {
+        pageSize = parseInt(pageSizeSelect.value, 10) || 25;
+        currentPage = 1;
+        render();
+    });
+
+    prevButton.addEventListener('click', () => {
+        if (currentPage > 1) {
+            currentPage -= 1;
+            render();
+        }
+    });
+
+    nextButton.addEventListener('click', () => {
+        currentPage += 1;
+        render();
+    });
+
+    render();
+})();
+</script>
 {% endblock %}
