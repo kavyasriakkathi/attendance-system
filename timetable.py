@@ -3277,11 +3277,11 @@ def register_routes(app, db_getter=None):
                     'day': g('day', 4) or '',
                     'start_time': g('start_time', 5) or '',
                     'end_time': g('end_time', 6) or '',
-                    'branch': g('branch_name') or (g('branch_id') or ''),
+                    'branch': g('branch') or g('branch_name') or (g('branch_id') or ''),
                     'section': g('section', 2) or '',
                     'semester': g('semester', 3) or '',
                     'subject_name': g('subject_name') or (g('subject_id') or ''),
-                    'faculty_name': g('teacher_name') or (g('teacher_id') or ''),
+                    'faculty_name': g('faculty_name') or g('teacher_name') or (g('teacher_id') or ''),
                     'room': g('room', 10) or '',
                     'is_lab': g('is_lab', 9) or 0,
                 })
@@ -3317,6 +3317,25 @@ def register_routes(app, db_getter=None):
             normalized_count = 0
 
         logger.debug("Timetable manage page loaded: normalized_count=%s, raw_count=%s, rows_source=%s", normalized_count, raw_count, rows_source)
+
+        # Print first 5 rows before rendering so server logs show render payload.
+        try:
+            def _preview_rows(data, limit=5):
+                out = []
+                for r in (data or [])[:limit]:
+                    if isinstance(r, dict):
+                        out.append(r)
+                    else:
+                        try:
+                            out.append(dict(r))
+                        except Exception:
+                            out.append(str(r))
+                return out
+
+            print(f"DEBUG: /timetable/manage first 5 normalized_rows={_preview_rows(rows)}")
+            print(f"DEBUG: /timetable/manage first 5 entries={_preview_rows(entries)}")
+        except Exception:
+            logger.exception("Failed to print /timetable/manage row preview")
 
         # Expose normalized_rows (mapped from 'rows') so template can force-load normalized data
         return render_template("timetable_manage.html", rows=rows, entries=entries, skipped_preview=skipped_preview, rows_source=rows_source, raw_count=raw_count, normalized_count=normalized_count, normalized_rows=rows)

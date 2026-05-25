@@ -52,12 +52,13 @@
     <div class="grid" style="grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 20px;">
         <div>
             <h2 style="margin-top:0;">Imported slots</h2>
-            {% if normalized_rows|length > 0 %}
+            {% set imported_rows = normalized_rows or rows or [] %}
+            {% if imported_rows|length > 0 %}
             <p style="margin:0 0 10px 0; color:var(--text-secondary); font-size:0.92rem;">Showing normalized timetable entries.</p>
             {% else %}
             <p style="margin:0 0 10px 0; color:var(--text-secondary); font-size:0.92rem;">Showing legacy timetable slots.</p>
             {% endif %}
-            <div style="margin-bottom:8px; color:var(--text-secondary);">Total normalized rows: {{ normalized_rows|length }}</div>
+            <div style="margin-bottom:8px; color:var(--text-secondary);">Total normalized rows: {{ imported_rows|length }}</div>
             <div class="table-responsive">
                 <table style="width:100%; border-collapse:collapse;">
                     <thead>
@@ -66,16 +67,17 @@
                         </tr>
                     </thead>
                     <tbody>
-                        {% if normalized_rows|length > 0 %}
-                            {% for row in normalized_rows %}
+                        {% if imported_rows|length > 0 %}
+                            {% for row in imported_rows %}
                             <tr>
-                                <td>{{ row.day }}</td>
-                                <td>{{ row.start_time }}</td>
-                                <td>{{ row.branch }}</td>
-                                <td>{{ row.section }}</td>
-                                <td>{{ row.semester }}</td>
-                                <td>{{ row.subject_name }}</td>
-                                <td>{{ row.faculty_name }}</td>
+                                <td>{{ row.day or '' }}</td>
+                                <td>{{ (row.start_time or '') + (' - ' + row.end_time if row.end_time else '') }}</td>
+                                <td>{{ row.branch or row.branch_name or row.branch_id or '' }}</td>
+                                <td>{{ row.section or '' }}</td>
+                                <td>{{ row.semester or '' }}</td>
+                                <td>{{ row.subject_name or row.subject_id or '' }}</td>
+                                <td>{{ row.faculty_name or row.teacher_name or row.teacher_id or '' }}</td>
+                                <td>{{ row.room or '' }}</td>
                             </tr>
                             {% endfor %}
                         {% else %}
@@ -100,10 +102,10 @@
                             <tr>
                                 <td>{{ e['day'] or '' }}</td>
                                 <td>{{ (e['start_time'] or '') + (' - ' + e.get('end_time') if e.get('end_time') else '') }}</td>
-                                <td>{{ e['branch_name'] or e['branch_id'] or '' }}</td>
+                                <td>{{ e.get('branch') or e.get('branch_name') or e.get('branch_id') or '' }}</td>
                                 <td>{{ e['section'] or '' }}</td>
                                 <td>{{ e['subject_name'] or e['subject_id'] or '' }}</td>
-                                <td>{{ e['teacher_name'] or e['teacher_id'] or '' }}</td>
+                                <td>{{ e.get('faculty_name') or e.get('teacher_name') or e.get('teacher_id') or '' }}</td>
                                 <td>{{ 'Yes' if e['is_lab'] else 'No' }}</td>
                             </tr>
                             {% endfor %}
