@@ -501,6 +501,16 @@ def _docx_text(elem) -> str:
     return _clean_text("".join(parts).replace("\xa0", " "))
 
 
+def _docx_preview_rows(table_rows: List[Dict], limit: int = 3) -> List[List[str]]:
+    preview = []
+    for row in (table_rows or [])[:limit]:
+        try:
+            preview.append([_clean_text(cell.get("text")) for cell in row.get("cells", [])])
+        except Exception:
+            preview.append([str(row)])
+    return preview
+
+
 def _docx_cell_span(tc) -> int:
     span = 1
     tc_pr = tc.find(W_TC_PR)
@@ -610,7 +620,7 @@ def _section_from_text(text: str) -> str:
     if not text:
         return ""
     # Prefer explicit known section patterns like CSE-A, CSE B, CIVIL, MECH
-    known = re.search(r"\b(CSE|CSM|ECE|EEE|IT|MECH|CIVIL|AIML|DS)\s*[-_ ]?\s*([A-Z0-9]{0,4})\b", text, flags=re.IGNORECASE)
+    known = re.search(r"\b(CSE|CSM|ECE|EEE|IT|MECH|CIVIL|AIML|DS)\s*[-_ ]?\s*([A-Z0-9]{1,4})\b", text, flags=re.IGNORECASE)
     if known:
         dept = known.group(1).upper()
         sec = (known.group(2) or "").upper().strip()
@@ -949,6 +959,18 @@ def iter_docx_section_slots(
                     f"Too many tables detected ({total_tables}). Split the timetable into section-wise DOCX files."
                 )
             try:
+                if debug_jsonl_path:
+                    _append_jsonl(
+                        debug_jsonl_path,
+                        {
+                            "type": "raw_table_preview",
+                            "section": section_state.get("section") or section_state.get("section_hint") or f"section_{total_tables}",
+                            "rows": _docx_preview_rows(table_rows),
+                            "timestamp": time.time(),
+                        },
+                    )
+                if total_tables == 1:
+                    logger.info("DOCX raw table preview section=%s rows=%s", section_state.get("section") or section_state.get("section_hint") or f"section_{total_tables}", _docx_preview_rows(table_rows))
                 if _is_faculty_table(table_rows):
                     entries = []
                     # Determine column indices from header if possible
@@ -1544,6 +1566,13 @@ def _pdf_build_header_slots(header_cells: List[str]) -> List[Dict]:
     return slots
 
 
+def _pdf_debug_table_sample(rows: List[List[str]], limit: int = 3) -> List[List[str]]:
+    sample = []
+    for row in (rows or [])[:limit]:
+        sample.append([_clean_text(cell) for cell in (row or [])])
+    return sample
+
+
 def _pdf_parse_timetable_table(
     table_info: Dict,
     section_name: str,
@@ -1558,6 +1587,10 @@ def _pdf_parse_timetable_table(
     if header_idx < 0 or not header_cells:
         report["validation_errors"].append("Timetable header row not detected (Day/time headers missing).")
         raise TimetablePDFValidationError("Timetable header row not detected. Ensure the grid has a Day column and time slot headers.")
+
+    raw_samples = report.setdefault("raw_table_samples", [])
+    if len(raw_samples) < PDF_DIAG_SAMPLE_CAP:
+        raw_samples.append(_pdf_debug_table_sample(rows))
 
     day_col = _pdf_find_day_col(header_cells, rows, header_idx)
     if day_col is None:
@@ -1588,6 +1621,8 @@ def _pdf_parse_timetable_table(
     col_bounds = _pdf_table_column_bounds(table_info.get("table"), len(header_cells))
     for row_index, row in enumerate(rows[header_idx + 1:], start=header_idx + 1):
         if not row:
+            continue
+        if not any(_clean_text(cell) for cell in row):
             continue
         if len(row) < len(header_cells):
             row = row + [""] * (len(header_cells) - len(row))
@@ -1674,6 +1709,7 @@ def parse_pdf_to_slots(path: str, stats: Optional[Dict[str, object]] = None) -> 
     report.setdefault("faculty_mappings_sample", [])
     report.setdefault("faculty_mappings_count", 0)
     report.setdefault("validation_errors", [])
+    report.setdefault("raw_table_samples", [])
 
     base_name = os.path.splitext(os.path.basename(path))[0]
     section_candidates = []
@@ -1752,6 +1788,10 @@ def parse_pdf_to_slots(path: str, stats: Optional[Dict[str, object]] = None) -> 
                 if not rows:
                     continue
                 info["rows"] = rows
+                if len(report["raw_table_samples"]) < PDF_DIAG_SAMPLE_CAP:
+                    report["raw_table_samples"].append(_pdf_debug_table_sample(rows))
+                    if len(report["raw_table_samples"]) == 1:
+                        logger.info("PDF raw table preview rows=%s", report["raw_table_samples"][0])
                 row_samples = []
                 for row in rows[:3]:
                     row_text = _pdf_excerpt(" ".join(cell for cell in row if cell))
@@ -1960,6 +2000,8 @@ def _normalize_time(val: str) -> str:
 
 def _format_time_str(s: str) -> Optional[str]:
     s = s.strip()
+    s = re.sub(r"\s+", " ", s)
+    s = re.sub(r"(?i)(\d)(am|pm)\b", r"\1 \2", s)
     # Try HH:MM
     for fmt in ("%H:%M", "%I:%M %p", "%I %p", "%H.%M"):
         try:
@@ -1976,6 +2018,8 @@ def _format_time_str(s: str) -> Optional[str]:
 
 
 def _split_time_range(s: str):
+    s = _clean_text(s)
+    s = re.sub(r"(?i)(\d)(am|pm)\b", r"\1 \2", s)
     if "-" in s:
         a, b = s.split("-", 1)
         return _format_time_str(a.strip()) or "", _format_time_str(b.strip()) or ""
@@ -2355,6 +2399,12 @@ def import_slots_streaming(db, slots_iter: Iterable[Dict]):
             "room": _clean_text(slot_in.get("room")),
         }
         raw_counters["processed"] += 1
+
+        if not any(_clean_text(value) for value in row.values()):
+            raw_counters["skipped_total"] += 1
+            raw_counters["skipped_invalid"] += 1
+            _write_preview_line(preview_path, preview_state, {"index": row_index, "reason": "completely_empty_row", "row": row})
+            continue
 
         if not _valid_slot_row(row):
             raw_counters["skipped_total"] += 1
@@ -3317,25 +3367,6 @@ def register_routes(app, db_getter=None):
             normalized_count = 0
 
         logger.debug("Timetable manage page loaded: normalized_count=%s, raw_count=%s, rows_source=%s", normalized_count, raw_count, rows_source)
-
-        # Print first 5 rows before rendering so server logs show render payload.
-        try:
-            def _preview_rows(data, limit=5):
-                out = []
-                for r in (data or [])[:limit]:
-                    if isinstance(r, dict):
-                        out.append(r)
-                    else:
-                        try:
-                            out.append(dict(r))
-                        except Exception:
-                            out.append(str(r))
-                return out
-
-            print(f"DEBUG: /timetable/manage first 5 normalized_rows={_preview_rows(rows)}")
-            print(f"DEBUG: /timetable/manage first 5 entries={_preview_rows(entries)}")
-        except Exception:
-            logger.exception("Failed to print /timetable/manage row preview")
 
         normalized_rows = rows
 

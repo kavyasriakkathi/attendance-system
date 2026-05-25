@@ -50,11 +50,6 @@
 
     <hr>
     <div class="grid" style="grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 20px;">
-        <div>
-            <h2 style="margin-top:0;">Imported slots</h2>
-            {% set imported_rows = normalized_rows or rows or [] %}
-            <div style="margin:0 0 8px 0; color:#991b1b; font-weight:700;">DEBUG normalized_rows|length: {{ normalized_rows|length }}</div>
-            <div style="margin:0 0 8px 0; color:#991b1b; font-weight:700;">DEBUG imported_rows|length: {{ imported_rows|length }}</div>
             {% for row in normalized_rows[:5] %}
             <div style="color:red; font-size:0.9rem; word-break:break-word;">{{ row }}</div>
             {% endfor %}
