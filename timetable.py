@@ -591,12 +591,19 @@ def _docx_collapse_merged_text(value: str) -> str:
     text = _clean_text(value)
     if not text:
         return ""
-    compact = re.sub(r"[\s|]+", "", text)
-    if len(compact) >= 4 and len(compact) % 2 == 0:
-        half = len(compact) // 2
-        if compact[:half] == compact[half:]:
-            return _clean_text(compact[:half])
-    return text
+    # Normalize whitespace and separators
+    compact = re.sub(r"[\s|]+", " ", text).strip()
+    parts = compact.split()
+    # If the sequence of tokens repeats twice, collapse to first half
+    if len(parts) >= 2 and len(parts) % 2 == 0:
+        half = len(parts) // 2
+        if parts[:half] == parts[half:]:
+            return _clean_text(" ".join(parts[:half]))
+    # If entire string is a direct repetition (e.g. "ABCABC"), try collapsing
+    m = re.match(r"^(?P<g>.+?)\s*(?P=g)+$", compact)
+    if m:
+        return _clean_text(m.group("g"))
+    return compact
 
 
 def _docx_header_map(table_rows: List[Dict]) -> tuple[int, Dict[str, int]]:
@@ -706,8 +713,12 @@ def _docx_parse_direct_rows(table_rows: List[Dict], section_state: Dict, debug_j
             "room": room,
         }
 
-        if not any(_clean_text(value) for value in slot.values()):
-            logger.info("skipped_empty_row table_row=%s reason=slot_empty text=%s", row_index, row_text)
+        # Skip rows where core timetable fields are missing
+        core_fields = [slot.get("day"), slot.get("start_time"), slot.get("subject_name")]
+        if not any(_clean_text(v) for v in core_fields):
+            logger.info("skipped_empty_row table_row=%s reason=missing_core_fields slot=%s", row_index, {k: slot.get(k) for k in ("day", "start_time", "subject_name", "faculty_name")})
+            if debug_jsonl_path:
+                _append_jsonl(debug_jsonl_path, {"type": "skipped_empty_core", "table_row": row_index, "slot": slot, "timestamp": time.time()})
             continue
 
         if _row_has_token(row_text, *_DOCX_IGNORE_ROW_TOKENS):
@@ -965,7 +976,10 @@ def _expand_time_bounds(header_cells: List[str], start_col: int, end_col: int) -
 
 
 def _finalize_section_slots(section_state: Dict) -> List[Dict]:
-    faculty_map = section_state.get("faculty_map") or _faculty_lookup(section_state.get("faculty_entries", []))
+    # Ensure faculty_map includes any buffered faculty_entries
+    faculty_entries = section_state.get("faculty_entries") or []
+    faculty_map = section_state.get("faculty_map") or {}
+    _merge_faculty_entries(faculty_map, faculty_entries)
     timetable_tables = section_state.get("timetable_tables", [])
     resolved_slots: List[Dict] = []
     for table_info in timetable_tables:
@@ -1019,6 +1033,9 @@ def _iter_section_table_slots(table_rows: List[Dict], section_state: Dict, facul
                     "is_lab": int(bool(_row_has_token(subject_piece, "lab", "practical") or _row_has_token(cell_text, "lab", "practical"))),
                     "room": _clean_text(section_state.get("room", "")),
                 }
+                # Skip if essential semantic fields are missing
+                if not (slot.get("day") and slot.get("start_time") and (slot.get("subject_name") or slot.get("faculty_name"))):
+                    continue
                 if _valid_slot_row(slot):
                     yield slot
 
@@ -1053,8 +1070,24 @@ def iter_docx_section_slots(
 
     def flush_section(reason: str):
         nonlocal section_state, total_slots
+        # Finalize and return resolved slots for this section so caller can yield them.
         if section_state.get("table_count", 0) == 0 and not section_state.get("faculty_map"):
-            return
+            # reset state
+            section_state = {
+                "section": "",
+                "section_hint": "",
+                "branch": "",
+                "semester": None,
+                "doc_base": base_name,
+                "room": "",
+                "faculty_map": {},
+                "table_count": 0,
+                "slot_count": 0,
+                "seen_slots": set(),
+                "timetable_tables": [],
+                "faculty_entries": [],
+            }
+            return []
         section_name = _clean_text(section_state.get("section")) or _clean_text(section_state.get("section_hint")) or f"section_{total_tables}"
         if debug_jsonl_path:
             _append_jsonl(
@@ -1078,6 +1111,9 @@ def iter_docx_section_slots(
             section_state.get("table_count", 0),
             section_state.get("slot_count", 0),
         )
+        # Resolve buffered timetable tables now that faculty_map should be collected
+        resolved = _finalize_section_slots(section_state)
+        # Reset
         section_state = {
             "section": "",
             "section_hint": "",
@@ -1089,8 +1125,11 @@ def iter_docx_section_slots(
             "table_count": 0,
             "slot_count": 0,
             "seen_slots": set(),
+            "timetable_tables": [],
+            "faculty_entries": [],
         }
         gc.collect()
+        return resolved
 
     try:
         for block_type, payload in _docx_iter_blocks(path):
@@ -1158,7 +1197,10 @@ def iter_docx_section_slots(
                     logger.info("DOCX raw table preview section=%s rows=%s", section_state.get("section") or section_state.get("section_hint") or f"section_{total_tables}", _docx_preview_rows(table_rows))
                 direct_rows = list(_docx_parse_direct_rows(table_rows, section_state, debug_jsonl_path=debug_jsonl_path))
                 if direct_rows:
+                    # Buffer direct rows as a timetable table for finalization
+                    section_state.setdefault("timetable_tables", []).append({"rows": table_rows})
                     section_state["table_count"] += 1
+                    # Resolve now against current faculty_map
                     for slot in direct_rows:
                         dup = _dup_key(slot.get("branch"), slot.get("section"), slot.get("semester"), slot.get("day"), slot.get("start_time"), slot.get("end_time"), slot.get("subject_name"), slot.get("faculty_name"), slot.get("room"))
                         if dup in section_state.get("seen_slots", set()):
@@ -1238,6 +1280,7 @@ def iter_docx_section_slots(
                             continue
                         entries.append({"sub_code": sub_code, "subject_name": subject_name, "faculty_name": faculty_name})
                     _merge_faculty_entries(section_state["faculty_map"], entries)
+                    section_state.setdefault("faculty_entries", []).extend(entries)
                     section_state["table_count"] += 1
                     if debug_jsonl_path:
                         _append_jsonl(debug_jsonl_path, {"type": "faculty_table", "section": section_state.get("section") or section_state.get("section_hint") or f"section_{total_tables}", "entries": len(entries), "timestamp": time.time()})
@@ -2706,13 +2749,15 @@ def import_slots_streaming(db, slots_iter: Iterable[Dict]):
         }
         raw_counters["processed"] += 1
 
+        # If the row is completely empty, skip immediately
         if not any(_clean_text(value) for value in row.values()):
             raw_counters["skipped_total"] += 1
             raw_counters["skipped_invalid"] += 1
             _write_preview_line(preview_path, preview_state, {"index": row_index, "reason": "completely_empty_row", "row": row})
             continue
 
-        if not _valid_slot_row(row):
+        # Core validation: require day, start_time and subject_name (or faculty_name as fallback)
+        if not (row.get("day") and row.get("start_time") and (row.get("subject_name") or row.get("faculty_name"))):
             raw_counters["skipped_total"] += 1
             raw_counters["skipped_invalid"] += 1
             _write_preview_line(preview_path, preview_state, {"index": row_index, "reason": "invalid_row", "row": row})
