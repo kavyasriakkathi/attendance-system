@@ -3430,7 +3430,10 @@ def register_routes(app, db_getter=None):
         try:
             if total_count > 0:
                 offset = max(0, (page - 1) * PAGE_SIZE)
-                sql = f"SELECT te.day, te.start_time, te.end_time, te.section, COALESCE(CAST(te.semester AS TEXT), '') AS semester, te.room, te.is_lab, COALESCE(s.name,'') AS subject_name, COALESCE(t.name,'') AS faculty_name, COALESCE(b.name,'') AS branch FROM timetable_entries te LEFT JOIN subjects s ON te.subject_id = s.id LEFT JOIN teachers t ON te.teacher_id = t.id LEFT JOIN branches b ON te.branch_id = b.id {where_sql} ORDER BY te.day, te.start_time LIMIT %s OFFSET %s"
+                # If a subject/teacher couldn't be resolved to a canonical id, fall
+                # back to the original raw text stored in timetable_slots so the
+                # management UI shows readable values instead of blanks.
+                sql = f"SELECT te.day, te.start_time, te.end_time, te.section, COALESCE(CAST(te.semester AS TEXT), '') AS semester, te.room, te.is_lab, COALESCE(s.name, (SELECT subject_name FROM timetable_slots ts WHERE ts.section = te.section AND ts.day = te.day AND ts.start_time = te.start_time LIMIT 1), '') AS subject_name, COALESCE(t.name, (SELECT faculty_name FROM timetable_slots ts WHERE ts.section = te.section AND ts.day = te.day AND ts.start_time = te.start_time LIMIT 1), '') AS faculty_name, COALESCE(b.name,'') AS branch FROM timetable_entries te LEFT JOIN subjects s ON te.subject_id = s.id LEFT JOIN teachers t ON te.teacher_id = t.id LEFT JOIN branches b ON te.branch_id = b.id {where_sql} ORDER BY te.day, te.start_time LIMIT %s OFFSET %s"
                 qparams = list(params) + [PAGE_SIZE, offset]
                 entries = _db_execute(db, sql, tuple(qparams)).fetchall()
                 entries = [dict(r) for r in entries]
