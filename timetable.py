@@ -565,6 +565,187 @@ def _docx_expand_rows(table_elem) -> List[Dict]:
     return rows
 
 
+_DOCX_DIRECT_HEADER_ALIASES = {
+    "day": ("day",),
+    "time": ("time", "period", "slot"),
+    "branch": ("branch", "dept", "department", "program", "course", "branch name"),
+    "section": ("section", "class", "division", "batch", "group"),
+    "semester": ("semester", "sem", "term", "year"),
+    "subject": ("subject", "subject name", "course", "paper", "topic", "title"),
+    "faculty": ("faculty", "teacher", "instructor", "lecturer", "staff", "faculty name"),
+    "room": ("room", "classroom", "hall", "venue", "lab room"),
+    "lab_theory": ("lab/theory", "lab theory", "type", "category"),
+}
+
+_DOCX_IGNORE_ROW_TOKENS = ("principal-vice", "principal vice", "principal", "hod", "dean")
+
+
+def _docx_row_text(row: Dict) -> str:
+    try:
+        return " | ".join(_clean_text(cell) for cell in (row.get("expanded") or []) if _clean_text(cell))
+    except Exception:
+        return ""
+
+
+def _docx_collapse_merged_text(value: str) -> str:
+    text = _clean_text(value)
+    if not text:
+        return ""
+    compact = re.sub(r"[\s|]+", "", text)
+    if len(compact) >= 4 and len(compact) % 2 == 0:
+        half = len(compact) // 2
+        if compact[:half] == compact[half:]:
+            return _clean_text(compact[:half])
+    return text
+
+
+def _docx_header_map(table_rows: List[Dict]) -> tuple[int, Dict[str, int]]:
+    best_idx = -1
+    best_map: Dict[str, int] = {}
+    best_score = 0
+    for row_index, row in enumerate((table_rows or [])[:5]):
+        expanded = row.get("expanded") or []
+        if not expanded:
+            continue
+        header_map: Dict[str, int] = {}
+        for cell_index, cell_text in enumerate(expanded):
+            key = _normalize_key(cell_text)
+            if not key:
+                continue
+            for field, aliases in _DOCX_DIRECT_HEADER_ALIASES.items():
+                if field in header_map:
+                    continue
+                for alias in aliases:
+                    alias_key = _normalize_key(alias)
+                    if alias_key and (alias_key == key or alias_key in key or key in alias_key):
+                        header_map[field] = cell_index
+                        break
+        score = sum(1 for field in ("day", "time", "branch", "section", "semester", "subject", "faculty", "room", "lab_theory") if field in header_map)
+        if score > best_score:
+            best_score = score
+            best_idx = row_index
+            best_map = header_map
+    if best_score >= 5:
+        return best_idx, best_map
+    return -1, {}
+
+
+def _docx_table_has_direct_rows(table_rows: List[Dict]) -> bool:
+    header_idx, header_map = _docx_header_map(table_rows)
+    return header_idx >= 0 and bool(header_map)
+
+
+def _docx_parse_direct_rows(table_rows: List[Dict], section_state: Dict, debug_jsonl_path: Optional[str] = None) -> Iterator[Dict]:
+    header_idx, header_map = _docx_header_map(table_rows)
+    if header_idx < 0:
+        return
+
+    last_values = {
+        "branch": _clean_text(section_state.get("branch")),
+        "section": _clean_text(section_state.get("section")),
+        "semester": section_state.get("semester"),
+        "room": _clean_text(section_state.get("room")),
+    }
+
+    for row_index, row in enumerate(table_rows[header_idx + 1 :], start=header_idx + 1):
+        expanded = row.get("expanded") or []
+        if not expanded:
+            logger.info("skipped_empty_row table_row=%s reason=no_cells", row_index)
+            continue
+
+        row_text = _docx_row_text(row)
+        if not row_text or not any(_clean_text(cell) for cell in expanded):
+            logger.info("skipped_empty_row table_row=%s reason=empty_text", row_index)
+            continue
+        if _row_has_token(row_text, *_DOCX_IGNORE_ROW_TOKENS):
+            logger.info("skipped_empty_row table_row=%s reason=admin_token text=%s", row_index, row_text)
+            continue
+
+        def _cell_value(field: str) -> str:
+            idx = header_map.get(field)
+            value = _docx_collapse_merged_text(expanded[idx]) if idx is not None and idx < len(expanded) else ""
+            if value:
+                return value
+            if field in last_values and _clean_text(last_values.get(field)):
+                return _docx_collapse_merged_text(last_values.get(field))
+            return ""
+
+        day = _cell_value("day")
+        time_text = _cell_value("time")
+        branch = _cell_value("branch")
+        section = _cell_value("section")
+        semester_text = _cell_value("semester")
+        subject_name = _cell_value("subject")
+        faculty_name = _cell_value("faculty")
+        room = _cell_value("room")
+        lab_text = _cell_value("lab_theory")
+
+        start_time, end_time = _split_time_value(time_text)
+        if not start_time and not end_time:
+            start_time, end_time = _split_time_range(time_text)
+
+        if branch:
+            last_values["branch"] = branch
+        if section:
+            last_values["section"] = section
+        if semester_text:
+            last_values["semester"] = semester_text
+        if room:
+            last_values["room"] = room
+
+        slot = {
+            "branch": branch,
+            "section": section,
+            "semester": _safe_int(semester_text),
+            "day": day,
+            "start_time": start_time,
+            "end_time": end_time,
+            "subject_name": subject_name,
+            "faculty_name": faculty_name,
+            "is_lab": int(bool(_row_has_token(lab_text, "lab") or _row_has_token(subject_name, "lab", "practical") or _row_has_token(row_text, "lab"))),
+            "room": room,
+        }
+
+        if not any(_clean_text(value) for value in slot.values()):
+            logger.info("skipped_empty_row table_row=%s reason=slot_empty text=%s", row_index, row_text)
+            continue
+
+        if _row_has_token(row_text, *_DOCX_IGNORE_ROW_TOKENS):
+            logger.info("skipped_empty_row table_row=%s reason=admin_token text=%s", row_index, row_text)
+            continue
+
+        if not _valid_slot_row(slot):
+            logger.info("skipped_empty_row table_row=%s reason=invalid_slot slot=%s text=%s", row_index, slot, row_text)
+            continue
+
+        logger.info(
+            "parsed_row table_row=%s day=%s time=%s-%s branch=%s section=%s semester=%s subject=%s faculty=%s room=%s lab=%s",
+            row_index,
+            slot["day"],
+            slot["start_time"],
+            slot["end_time"],
+            slot["branch"],
+            slot["section"],
+            slot["semester"],
+            slot["subject_name"],
+            slot["faculty_name"],
+            slot["room"],
+            slot["is_lab"],
+        )
+        if debug_jsonl_path:
+            _append_jsonl(
+                debug_jsonl_path,
+                {
+                    "type": "parsed_row",
+                    "table_row": row_index,
+                    "row_text": row_text,
+                    "slot": slot,
+                    "timestamp": time.time(),
+                },
+            )
+        yield slot
+
+
 def _docx_iter_blocks(path: str):
     with zipfile.ZipFile(path) as archive:
         with archive.open("word/document.xml") as xml_fp:
@@ -591,6 +772,7 @@ def scan_docx_structure(path: str, max_tables: Optional[int] = None) -> Dict[str
     table_count = 0
     faculty_tables = 0
     timetable_tables = 0
+    direct_timetable_tables = 0
     for block_type, payload in _docx_iter_blocks(path):
         if block_type == "paragraph":
             text = _clean_text(payload)
@@ -605,6 +787,8 @@ def scan_docx_structure(path: str, max_tables: Optional[int] = None) -> Dict[str
             faculty_tables += 1
         if _is_timetable_table(payload):
             timetable_tables += 1
+        if _docx_table_has_direct_rows(payload):
+            direct_timetable_tables += 1
         if max_tables is not None and table_count >= max_tables:
             break
     return {
@@ -612,6 +796,7 @@ def scan_docx_structure(path: str, max_tables: Optional[int] = None) -> Dict[str
         "table_count": table_count,
         "faculty_tables": faculty_tables,
         "timetable_tables": timetable_tables,
+        "direct_timetable_tables": direct_timetable_tables,
     }
 
 
@@ -971,6 +1156,24 @@ def iter_docx_section_slots(
                     )
                 if total_tables == 1:
                     logger.info("DOCX raw table preview section=%s rows=%s", section_state.get("section") or section_state.get("section_hint") or f"section_{total_tables}", _docx_preview_rows(table_rows))
+                direct_rows = list(_docx_parse_direct_rows(table_rows, section_state, debug_jsonl_path=debug_jsonl_path))
+                if direct_rows:
+                    section_state["table_count"] += 1
+                    for slot in direct_rows:
+                        dup = _dup_key(slot.get("branch"), slot.get("section"), slot.get("semester"), slot.get("day"), slot.get("start_time"), slot.get("end_time"), slot.get("subject_name"), slot.get("faculty_name"), slot.get("room"))
+                        if dup in section_state.get("seen_slots", set()):
+                            if debug_jsonl_path:
+                                _append_jsonl(debug_jsonl_path, {"type": "skipped_duplicate", "dup": dup, "slot": slot, "timestamp": time.time()})
+                            continue
+                        section_state.get("seen_slots").add(dup)
+                        section_state["slot_count"] += 1
+                        total_slots += 1
+                        yield slot
+                    if debug_jsonl_path:
+                        _append_jsonl(debug_jsonl_path, {"type": "direct_timetable_table", "section": section_state.get("section") or section_state.get("section_hint") or f"section_{total_tables}", "rows": len(table_rows), "parsed_rows": len(direct_rows), "timestamp": time.time()})
+                    table_rows = None
+                    gc.collect()
+                    continue
                 if _is_faculty_table(table_rows):
                     entries = []
                     # Determine column indices from header if possible
@@ -2623,6 +2826,19 @@ def import_slots_streaming(db, slots_iter: Iterable[Dict]):
                 else:
                     normalized_counters["inserted"] += 1
                     inserted_since_commit += 1
+                    logger.info(
+                        "inserted_row row_index=%s branch_id=%s section=%s semester=%s day=%s start_time=%s end_time=%s subject_id=%s teacher_id=%s room=%s",
+                        row_index,
+                        norm_row["branch_id"],
+                        norm_row["section"],
+                        norm_row["semester"],
+                        norm_row["day"],
+                        norm_row["start_time"],
+                        norm_row["end_time"],
+                        norm_row["subject_id"],
+                        norm_row["teacher_id"],
+                        norm_row["room"],
+                    )
             except Exception as e:
                 if "unique" in str(e).lower() or "duplicate" in str(e).lower():
                     normalized_counters["skipped_total"] += 1
@@ -3281,17 +3497,26 @@ def register_routes(app, db_getter=None):
                             "error",
                         )
                         return redirect(url_for("timetable_manage"))
-                    if summary.get("timetable_tables", 0) == 0:
+                    direct_tables = int(summary.get("direct_timetable_tables", 0) or 0)
+                    legacy_timetable_tables = int(summary.get("timetable_tables", 0) or 0)
+                    if direct_tables == 0 and legacy_timetable_tables == 0:
                         flash("No timetable tables were detected in this DOCX.", "error")
                         return redirect(url_for("timetable_manage"))
-                    if summary.get("faculty_tables", 0) == 0:
-                        flash("Faculty mapping table not detected. Ensure the DOCX includes the faculty table.", "error")
-                        return redirect(url_for("timetable_manage"))
-                    slots_iter = iter_docx_section_slots(
-                        dest,
-                        single_section_only=TIMETABLE_SINGLE_SECTION_ONLY,
-                        max_tables=TIMETABLE_MAX_TABLES,
-                    )
+                    if direct_tables > 0:
+                        slots_iter = iter_docx_section_slots(
+                            dest,
+                            single_section_only=False,
+                            max_tables=TIMETABLE_MAX_TABLES,
+                        )
+                    else:
+                        if summary.get("faculty_tables", 0) == 0:
+                            flash("Faculty mapping table not detected. Ensure the DOCX includes the faculty table.", "error")
+                            return redirect(url_for("timetable_manage"))
+                        slots_iter = iter_docx_section_slots(
+                            dest,
+                            single_section_only=TIMETABLE_SINGLE_SECTION_ONLY,
+                            max_tables=TIMETABLE_MAX_TABLES,
+                        )
                 elif ext in (".pdf",) and pdfplumber is not None:
                     pdf_stats = {}
                     slots_iter = parse_pdf_to_slots(dest, stats=pdf_stats)

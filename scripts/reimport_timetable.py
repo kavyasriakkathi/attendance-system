@@ -4,7 +4,9 @@ sys.path.insert(0, os.getcwd())
 from app import get_db
 import timetable
 
+docx = os.path.join(os.getcwd(), 'uploads', 'timetable_upload.docx')
 pdf = os.path.join(os.getcwd(), 'uploads', 'CSE-A.pdf')
+print('DOCX path:', docx)
 print('PDF path:', pdf)
 
 try:
@@ -19,8 +21,12 @@ try:
         print('Failed to clear timetable_entries:', e)
 
     stats = {}
-    slots = list(timetable.parse_pdf_to_slots(pdf, stats=stats))
-    print('Parsed slots:', len(slots), 'stats:', stats)
+    if os.path.exists(docx):
+        slots = list(timetable.iter_docx_section_slots(docx))
+        print('Parsed DOCX slots:', len(slots), 'stats:', stats)
+    else:
+        slots = list(timetable.parse_pdf_to_slots(pdf, stats=stats))
+        print('Parsed PDF slots:', len(slots), 'stats:', stats)
 
     res = timetable.import_slots_streaming(db, iter(slots))
     print('Import result:', res)
