@@ -1606,6 +1606,8 @@ def _pdf_parse_timetable_table(
     detected_days = set()
     detected_subjects = report.get("extracted_subjects_sample") or []
     detected_time_slots = report.get("detected_time_slots") or []
+    report.setdefault("valid_rows", 0)
+    report.setdefault("skipped_rows", 0)
     if not detected_time_slots:
         for slot in time_slots:
             start = slot.get("start_time") or ""
@@ -1652,16 +1654,19 @@ def _pdf_parse_timetable_table(
                     resolved = _resolve_subject(subject_piece, faculty_map)
                     subject_name = _clean_text(resolved.get("subject_name") or subject_piece)
                     faculty_name = _clean_text(resolved.get("faculty_name") or "")
+                    semester_value = "" if semester is None else semester
                     # Ignore administrative rows that are not real timetable entries
                     admin_tokens = ("PRINCIPAL", "PRINCIPAL-VICE", "HOD", "DEAN", "DIRECTOR")
                     if any(tok.lower() in subject_piece.lower() or tok.lower() in text.lower() for tok in admin_tokens):
                         if report is not None and len(report.get("skipped_admin_rows", [])) < PDF_DIAG_SAMPLE_CAP:
                             report.setdefault("skipped_admin_rows", []).append({"index": row_index, "text": text})
+                        report["skipped_rows"] = int(report.get("skipped_rows", 0) or 0) + 1
+                        logger.info("SKIPPED_EMPTY_ROW reason=admin_tokens row_index=%s text=%s", row_index, text)
                         continue
                     slot = {
                         "branch": branch_name,
                         "section": section_name,
-                        "semester": semester,
+                        "semester": semester_value,
                         "day": day,
                         "start_time": start_time,
                         "end_time": end_time,
@@ -1670,10 +1675,19 @@ def _pdf_parse_timetable_table(
                         "is_lab": int(bool(_row_has_token(subject_piece, "lab", "practical") or _row_has_token(text, "lab", "practical"))),
                         "room": "",
                     }
-                    # If both subject and faculty are missing, skip this row (likely noise)
-                    if not subject_name and not faculty_name:
+                    if not is_valid_timetable_row(slot):
                         if report is not None and len(report.get("skipped_empty_rows", [])) < PDF_DIAG_SAMPLE_CAP:
                             report.setdefault("skipped_empty_rows", []).append({"index": row_index, "text": text})
+                        report["skipped_rows"] = int(report.get("skipped_rows", 0) or 0) + 1
+                        logger.info("SKIPPED_EMPTY_ROW reason=missing_semantic_fields row_index=%s text=%s slot=%s", row_index, text, slot)
+                        continue
+
+                    # If the core timetable fields are still missing, skip the row.
+                    if not day or not start_time or not (branch_name or section_name) or (not subject_name and not faculty_name):
+                        if report is not None and len(report.get("skipped_empty_rows", [])) < PDF_DIAG_SAMPLE_CAP:
+                            report.setdefault("skipped_empty_rows", []).append({"index": row_index, "text": text})
+                        report["skipped_rows"] = int(report.get("skipped_rows", 0) or 0) + 1
+                        logger.info("SKIPPED_EMPTY_ROW reason=required_field_missing row_index=%s text=%s slot=%s", row_index, text, slot)
                         continue
 
                     if subject_name and subject_name not in detected_subjects:
@@ -1707,8 +1721,20 @@ def _pdf_parse_timetable_table(
                     if dup in seen_slots_local:
                         if report is not None and len(report.get("skipped_duplicates", [])) < PDF_DIAG_SAMPLE_CAP:
                             report.setdefault("skipped_duplicates", []).append(dup)
+                        report["skipped_rows"] = int(report.get("skipped_rows", 0) or 0) + 1
                         continue
                     seen_slots_local.add(dup)
+                    report["valid_rows"] = int(report.get("valid_rows", 0) or 0) + 1
+                    logger.info(
+                        "INSERTED_VALID_ROW row_index=%s section=%s day=%s start_time=%s semester=%s subject=%s faculty=%s",
+                        row_index,
+                        slot.get("section"),
+                        slot.get("day"),
+                        slot.get("start_time"),
+                        slot.get("semester"),
+                        slot.get("subject_name"),
+                        slot.get("faculty_name"),
+                    )
                     yield slot
 
     report["detected_days"] = sorted(detected_days)
@@ -1992,6 +2018,16 @@ def _normalize_slot_row(row: Dict[str, str], row_text: str = "") -> Dict[str, st
 def _valid_slot_row(row: Dict[str, str]) -> bool:
     required = ("branch", "section", "day", "start_time", "end_time", "subject_name")
     return all(_clean_text(row.get(field)) for field in required)
+
+
+def is_valid_timetable_row(row):
+    return any([
+        row.get('day'),
+        row.get('start_time'),
+        row.get('subject_name'),
+        row.get('faculty_name'),
+        row.get('section')
+    ])
 
 
 def _split_subjects(subj_raw: str):
@@ -3308,6 +3344,9 @@ def register_routes(app, db_getter=None):
                 success_count = int(n_c.get("inserted", 0) or 0)
                 if success_count <= 0:
                     success_count = int(i_c.get("inserted", 0) or 0)
+                valid_rows = int((pdf_stats or {}).get("valid_rows", 0) or i_c.get("processed", 0) or 0)
+                skipped_rows = int((pdf_stats or {}).get("skipped_rows", 0) or i_c.get("skipped_total", 0) or 0)
+                inserted_rows = int(n_c.get("inserted", 0) or i_c.get("inserted", 0) or 0)
                 session["timetable_manage_banner"] = f"{success_count} timetable rows imported successfully"
                 session["timetable_last_imported_file"] = filename
                 logger.info(
@@ -3317,6 +3356,12 @@ def register_routes(app, db_getter=None):
                     n_c.get("inserted", 0),
                     n_c.get("skipped_total", 0),
                     n_c.get("skip_reasons", {}),
+                )
+                logger.info(
+                    "timetable import final counts valid_rows=%s skipped_rows=%s inserted_rows=%s",
+                    valid_rows,
+                    skipped_rows,
+                    inserted_rows,
                 )
             except TimetablePDFValidationError as e:
                 logger.warning("PDF validation failed: %s", str(e))
@@ -3385,7 +3430,7 @@ def register_routes(app, db_getter=None):
         try:
             if total_count > 0:
                 offset = max(0, (page - 1) * PAGE_SIZE)
-                sql = f"SELECT te.day, te.start_time, te.end_time, te.section, te.semester, te.room, te.is_lab, COALESCE(s.name,'') AS subject_name, COALESCE(t.name,'') AS faculty_name, COALESCE(b.name,'') AS branch FROM timetable_entries te LEFT JOIN subjects s ON te.subject_id = s.id LEFT JOIN teachers t ON te.teacher_id = t.id LEFT JOIN branches b ON te.branch_id = b.id {where_sql} ORDER BY te.day, te.start_time LIMIT %s OFFSET %s"
+                sql = f"SELECT te.day, te.start_time, te.end_time, te.section, COALESCE(CAST(te.semester AS TEXT), '') AS semester, te.room, te.is_lab, COALESCE(s.name,'') AS subject_name, COALESCE(t.name,'') AS faculty_name, COALESCE(b.name,'') AS branch FROM timetable_entries te LEFT JOIN subjects s ON te.subject_id = s.id LEFT JOIN teachers t ON te.teacher_id = t.id LEFT JOIN branches b ON te.branch_id = b.id {where_sql} ORDER BY te.day, te.start_time LIMIT %s OFFSET %s"
                 qparams = list(params) + [PAGE_SIZE, offset]
                 entries = _db_execute(db, sql, tuple(qparams)).fetchall()
                 entries = [dict(r) for r in entries]

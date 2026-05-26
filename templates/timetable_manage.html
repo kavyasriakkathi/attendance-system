@@ -143,7 +143,7 @@
                     <td>{{ row.get('start_time', '') }}{% if row.get('end_time') %} - {{ row.get('end_time') }}{% endif %}</td>
                     <td>{{ row.get('branch') or row.get('branch_name') or row.get('branch_id') or '' }}</td>
                     <td>{{ row.get('section', '') }}</td>
-                    <td>{{ row.get('semester', '') }}</td>
+                    <td>{{ row.semester or '' }}</td>
                     <td>{{ row.get('subject_name') or row.get('subject_id') or '' }}</td>
                     <td>{{ row.get('faculty_name') or row.get('teacher_name') or row.get('teacher_id') or '' }}</td>
                     <td>{{ row.get('room', '') }}</td>
