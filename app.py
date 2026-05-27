@@ -4999,9 +4999,39 @@ def teacher_mark_attendance():
         selected_date = request.args.get("date") or today_str
         period = request.args.get("period", "1")
 
+        # Determine whether attendance is allowed now based on timetable entries
+        try:
+            from datetime import datetime
+            now_dt = datetime.now()
+            current_slot = get_current_class(db, current_branch_id, current_section, current_time=now_dt, teacher_id=teacher.get("teacher_id"))
+            attendance_allowed = False
+            if current_slot:
+                # ensure the slot matches this teacher's subject or teacher id
+                slot_subject_id = row_get(current_slot, "subject_id")
+                slot_teacher_id = row_get(current_slot, "teacher_id")
+                if (slot_teacher_id and str(slot_teacher_id) == str(teacher.get("teacher_id"))) or (
+                    slot_subject_id and str(slot_subject_id) == str(subject_id)
+                ):
+                    attendance_allowed = True
+            else:
+                attendance_allowed = False
+        except Exception:
+            attendance_allowed = False
+
         if request.method == "POST":
             selected_date = request.form.get("date") or today_str
             period = request.form.get("period", "1")
+            # Re-check active slot for POST (prevent forged requests)
+            try:
+                from datetime import datetime
+                now_dt = datetime.now()
+                current_slot = get_current_class(db, current_branch_id, current_section, current_time=now_dt, teacher_id=teacher.get("teacher_id"))
+                if not current_slot:
+                    flash("No active class found at this time. Attendance can only be recorded during scheduled class time.", "error")
+                    return redirect(url_for("teacher_mark_attendance", date=selected_date, period=period))
+            except Exception:
+                flash("Unable to verify timetable for current time.", "error")
+                return redirect(url_for("teacher_mark_attendance", date=selected_date, period=period))
             student_ids = request.form.getlist("student_id")
             if not student_ids:
                 flash("Please select at least one student.", "error")
@@ -5097,6 +5127,8 @@ def teacher_mark_attendance():
             period=period,
             today_date=today_str,
             current_section=current_section,
+            attendance_allowed=attendance_allowed,
+            current_slot=(dict(current_slot) if current_slot else None),
         )
     except Exception as e:
         print(f"[teacher_mark_attendance] ERROR: {repr(e)}")
@@ -5731,6 +5763,269 @@ def build_report_stats(records):
         stats["overall_percentage"] = 0
 
     return stats
+
+
+def _parse_time(t):
+    from datetime import datetime
+    if not t:
+        return None
+    if isinstance(t, (int, float)):
+        # treat as HHMM or epoch - not expected
+        return None
+    t = str(t).strip()
+    for fmt in ("%H:%M", "%H.%M", "%I:%M %p", "%I.%M %p", "%H%M"):
+        try:
+            return datetime.strptime(t, fmt).time()
+        except Exception:
+            continue
+    # fallback: try to extract digits
+    try:
+        hh = int(t.split(":")[0])
+        mm = int(t.split(":")[1]) if ":" in t else 0
+        return datetime.strptime(f"{hh:02d}:{mm:02d}", "%H:%M").time()
+    except Exception:
+        return None
+
+
+def get_current_class(db, branch_id, section, current_time=None, teacher_id=None, subject_id=None):
+    """Return the timetable entry matching current weekday + time for given branch+section.
+
+    Returns a single row dict or None. Expects `timetable_entries` table with
+    columns: day, start_time, end_time, branch_id, section, subject_id, teacher_id, subject_name, teacher_name, room, lab_theory
+    """
+    from datetime import datetime
+    placeholder = get_placeholder()
+    if current_time is None:
+        current_time = datetime.now()
+    weekday = current_time.strftime("%A")
+    time_str = current_time.strftime("%H:%M")
+
+    params = [branch_id, section, weekday, time_str, time_str]
+    sql = (
+        f"SELECT * FROM timetable_entries WHERE branch_id = {placeholder} AND (COALESCE(section,'') = COALESCE({placeholder},''))"
+        f" AND (day = {placeholder} OR lower(day) = lower({placeholder}))"
+        f" AND start_time <= {placeholder} AND end_time > {placeholder}"
+    )
+    if teacher_id:
+        sql += f" AND teacher_id = {placeholder}"
+        params.append(teacher_id)
+    if subject_id:
+        sql += f" AND subject_id = {placeholder}"
+        params.append(subject_id)
+
+    row = db.execute(sql, tuple(params)).fetchone()
+    return row
+
+
+def generate_attendance_periods_for_date(db, date_str):
+    """Generate a list of validated timetable rows (dicts) for the given date string (YYYY-MM-DD).
+
+    Applies validation rules: must have subject, teacher, valid section, not blocked (BREAK/PRINCIPAL), and removes duplicates.
+    """
+    from datetime import datetime
+    placeholder = get_placeholder()
+    try:
+        dt = datetime.fromisoformat(date_str)
+    except Exception:
+        dt = datetime.now()
+    weekday = dt.strftime("%A")
+
+    rows = db.execute(
+        f"SELECT * FROM timetable_entries WHERE (day = {placeholder} OR lower(day) = lower({placeholder})) ORDER BY branch_id, section, start_time",
+        (weekday, weekday),
+    ).fetchall()
+
+    seen = set()
+    valid = []
+    for r in rows:
+        subject_name = row_get(r, "subject_name") or ""
+        teacher_name = row_get(r, "teacher_name") or ""
+        section = row_get(r, "section") or ""
+        # skip blocked rows
+        if not subject_name.strip() or not teacher_name.strip():
+            continue
+        if any(tok in subject_name.upper() for tok in ("BREAK", "PRINCIPAL")):
+            continue
+        # semantic key to avoid duplicates
+        key = (
+            str(row_get(r, "branch_id")),
+            section.strip(),
+            row_get(r, "day"),
+            row_get(r, "start_time"),
+            row_get(r, "end_time"),
+            subject_name.strip().lower(),
+            teacher_name.strip().lower(),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        valid.append({
+            "day": row_get(r, "day"),
+            "start_time": row_get(r, "start_time"),
+            "end_time": row_get(r, "end_time"),
+            "branch_id": row_get(r, "branch_id"),
+            "section": section,
+            "semester": row_get(r, "semester"),
+            "subject_id": row_get(r, "subject_id"),
+            "subject": subject_name,
+            "teacher_id": row_get(r, "teacher_id"),
+            "faculty": teacher_name,
+            "room": row_get(r, "room"),
+            "lab_theory": row_get(r, "lab_theory"),
+        })
+    return valid
+
+
+def validate_timetable_for_branch_section(db, branch_id, section):
+    """Validate timetable entries for a branch+section.
+
+    Checks: no empty subject/faculty, no overlapping periods, valid times.
+    Returns list of problems (empty if OK).
+    """
+    from datetime import datetime
+    placeholder = get_placeholder()
+    rows = db.execute(
+        f"SELECT * FROM timetable_entries WHERE branch_id = {placeholder} AND (COALESCE(section,'') = COALESCE({placeholder},'')) ORDER BY day, start_time",
+        (branch_id, section),
+    ).fetchall()
+    problems = []
+    by_day = {}
+    for r in rows:
+        day = row_get(r, "day") or ""
+        by_day.setdefault(day, []).append(r)
+        if not (row_get(r, "subject_name") or "").strip():
+            problems.append({"type": "empty_subject", "row": r})
+        if not (row_get(r, "teacher_name") or "").strip():
+            problems.append({"type": "empty_teacher", "row": r})
+        st = _parse_time(row_get(r, "start_time"))
+        et = _parse_time(row_get(r, "end_time"))
+        if not st or not et:
+            problems.append({"type": "invalid_time", "row": r})
+        elif st >= et:
+            problems.append({"type": "bad_interval", "row": r})
+
+    # overlapping check
+    for day, day_rows in by_day.items():
+        intervals = []
+        for r in day_rows:
+            st = _parse_time(row_get(r, "start_time"))
+            et = _parse_time(row_get(r, "end_time"))
+            if not st or not et:
+                continue
+            intervals.append((st, et, r))
+        # check pairwise
+        intervals.sort(key=lambda x: x[0])
+        for i in range(len(intervals) - 1):
+            a_st, a_et, a_row = intervals[i]
+            b_st, b_et, b_row = intervals[i + 1]
+            if a_et > b_st:
+                problems.append({"type": "overlap", "a": a_row, "b": b_row})
+    return problems
+
+
+def attendance_summary(db, branch_id=None, subject_id=None, from_date=None, to_date=None):
+    """Compute attendance summary: present %, absent %, per-subject and daily aggregates."""
+    placeholder = get_placeholder()
+    clauses = []
+    params = []
+    if branch_id:
+        clauses.append(f"branch_id = {placeholder}")
+        params.append(branch_id)
+    if subject_id:
+        clauses.append(f"subject_id = {placeholder}")
+        params.append(subject_id)
+    if from_date:
+        clauses.append(f"date >= {placeholder}")
+        params.append(from_date)
+    if to_date:
+        clauses.append(f"date <= {placeholder}")
+        params.append(to_date)
+
+    query = "SELECT date, subject_id, subject_name, status, COUNT(*) as cnt FROM attendance"
+    if clauses:
+        query += " WHERE " + " AND ".join(clauses)
+    query += " GROUP BY date, subject_id, subject_name, status ORDER BY date"
+
+    rows = db.execute(query, tuple(params)).fetchall()
+    # aggregate
+    daily = {}
+    subject_agg = {}
+    total_present = 0
+    total = 0
+    for r in rows:
+        date_key = row_get(r, "date")
+        subj = row_get(r, "subject_name")
+        status = row_get(r, "status")
+        cnt = row_get(r, "cnt") or 0
+        daily.setdefault(date_key, {"present": 0, "total": 0})
+        subject_agg.setdefault(subj, {"present": 0, "total": 0})
+        subject_agg[subj]["total"] += cnt
+        daily[date_key]["total"] += cnt
+        total += cnt
+        if status == "Present":
+            daily[date_key]["present"] += cnt
+            subject_agg[subj]["present"] += cnt
+            total_present += cnt
+
+    # prepare percentages
+    for k, v in daily.items():
+        v["percentage"] = round((v["present"] / v["total"]) * 100, 1) if v["total"] > 0 else 0
+    for k, v in subject_agg.items():
+        v["percentage"] = round((v["present"] / v["total"]) * 100, 1) if v["total"] > 0 else 0
+
+    overall_percentage = round((total_present / total) * 100, 1) if total > 0 else 0
+    return {"daily": daily, "subject": subject_agg, "overall_percentage": overall_percentage}
+
+
+def regenerate_attendance_schedules(db, start_date, days=7):
+    """Regenerate upcoming attendance schedules from timetable entries for `days` days starting at `start_date`.
+
+    This is a read-only regeneration that returns a list of schedule dicts and does not modify existing attendance history.
+    Use this to preview or to generate session templates safely before deciding to persist them.
+    """
+    from datetime import datetime, timedelta
+    try:
+        dt = datetime.fromisoformat(start_date)
+    except Exception:
+        dt = datetime.now()
+    schedules = []
+    for i in range(days):
+        d = dt + timedelta(days=i)
+        schedules.extend(generate_attendance_periods_for_date(db, d.date().isoformat()))
+    return schedules
+
+
+@app.route("/api/get_current_class")
+@login_required
+def api_get_current_class():
+    db = get_db()
+    branch_id = request.args.get("branch_id") or request.args.get("b")
+    section = request.args.get("section") or ""
+    teacher_id = request.args.get("teacher_id")
+    time_str = request.args.get("time")
+    from datetime import datetime
+    try:
+        current_time = datetime.fromisoformat(time_str) if time_str else None
+    except Exception:
+        current_time = None
+    row = get_current_class(db, branch_id, section, current_time=current_time, teacher_id=teacher_id)
+    if not row:
+        return jsonify({"current": None})
+    # convert row to dict
+    out = {k: row[k] for k in row.keys()}
+    return jsonify({"current": out})
+
+
+@app.route("/api/attendance_summary")
+@login_required
+def api_attendance_summary():
+    db = get_db()
+    branch_id = request.args.get("branch_id")
+    subject_id = request.args.get("subject_id")
+    from_date = request.args.get("from_date")
+    to_date = request.args.get("to_date")
+    summary = attendance_summary(db, branch_id=branch_id, subject_id=subject_id, from_date=from_date, to_date=to_date)
+    return jsonify(summary)
 
 
 def build_report_excel(records):
