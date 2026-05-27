@@ -3,7 +3,7 @@ services:
     name: attendance-system
     runtime: python
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn --worker-class eventlet -w 1 --bind 0.0.0.0:$PORT app:app
+    startCommand: python app.py
     envVars:
       - key: DATABASE_URL
         fromDatabase:
