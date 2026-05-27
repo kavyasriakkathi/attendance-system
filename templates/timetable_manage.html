@@ -138,14 +138,11 @@
             </thead>
             <tbody>
                 {% for row in entries %}
+                {% set has_data = row.get('day') or row.get('start_time') or row.get('subject_name') or row.get('faculty_name') %}
+                {% if has_data %}
                 <tr>
                     <td>{{ row.get('day', '') }}</td>
                     <td>{{ row.get('start_time', '') }}{% if row.get('end_time') %} - {{ row.get('end_time') }}{% endif %}</td>
-                    {# Avoid rendering rows that are essentially empty placeholders #}
-                    {% if not (row.get('day') or row.get('start_time') or row.get('subject_name') or row.get('faculty_name')) %}
-                        {# skip empty placeholder row #}
-                        {% continue %}
-                    {% endif %}
                     <td>{{ row.get('branch') or row.get('branch_name') or row.get('branch_id') or '' }}</td>
                     <td>{{ row.get('section', '') }}</td>
                     <td>{{ row.semester or '' }}</td>
@@ -154,6 +151,7 @@
                     <td>{{ row.get('room', '') }}</td>
                     <td>{{ 'Lab' if row.get('is_lab') else 'Theory' }}</td>
                 </tr>
+                {% endif %}
                 {% endfor %}
             </tbody>
         </table>
