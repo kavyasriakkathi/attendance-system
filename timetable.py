@@ -32,7 +32,7 @@ logger = logging.getLogger("app.timetable")
 BATCH_INSERT_SIZE = int(os.environ.get("TIMETABLE_BATCH_SIZE", 5))
 PREVIEW_ROW_CAP = int(os.environ.get("TIMETABLE_PREVIEW_CAP", 0))
 SKIPPED_ROW_SAMPLE_CAP = int(os.environ.get("TIMETABLE_SKIPPED_SAMPLE_CAP", 5))
-TIMETABLE_MAX_TABLES = int(os.environ.get("TIMETABLE_MAX_TABLES", 20))
+TIMETABLE_MAX_TABLES = int(os.environ.get("TIMETABLE_MAX_TABLES", 1))
 TIMETABLE_SINGLE_SECTION_ONLY = os.environ.get("TIMETABLE_SINGLE_SECTION_ONLY", "true").strip().lower() in ("1", "true", "yes", "on")
 ENABLE_IMPORT_TRACEMALLOC = os.environ.get("TIMETABLE_ENABLE_TRACEMALLOC", "false").strip().lower() in ("1", "true", "yes", "on")
 PDF_DIAG_SAMPLE_CAP = int(os.environ.get("TIMETABLE_PDF_DIAG_SAMPLE_CAP", 12))
@@ -815,6 +815,8 @@ def _section_from_text(text: str) -> str:
     text = _clean_text(text)
     if not text:
         return ""
+    if _row_has_token(text, *_DOCX_IGNORE_ROW_TOKENS):
+        return ""
     # Prefer explicit known section patterns like CSE-A, CSE B, CIVIL, MECH
     known = re.search(r"\b(CSE|CSM|ECE|EEE|IT|MECH|CIVIL|AIML|DS)\s*[-_ ]?\s*([A-Z0-9]{1,4})\b", text, flags=re.IGNORECASE)
     if known:
@@ -829,6 +831,23 @@ def _section_from_text(text: str) -> str:
         match = re.search(pattern, text)
         if match:
             return re.sub(r"\s*[-/]\s*", "-", match.group(1).strip().upper())
+    return ""
+
+
+def scan_pdf_section_name(path: str) -> str:
+    if pdfplumber is None:
+        return ""
+    try:
+        with pdfplumber.open(path) as pdf:
+            if not pdf.pages:
+                return ""
+            text = pdf.pages[0].extract_text() or ""
+            for line in text.splitlines():
+                section_name = _section_from_text(line)
+                if section_name:
+                    return section_name
+    except Exception:
+        return ""
     return ""
 
 
@@ -982,10 +1001,26 @@ def _finalize_section_slots(section_state: Dict) -> List[Dict]:
     _merge_faculty_entries(faculty_map, faculty_entries)
     timetable_tables = section_state.get("timetable_tables", [])
     resolved_slots: List[Dict] = []
+    seen_slots = section_state.get("seen_slots") or set()
     for table_info in timetable_tables:
         table_rows = table_info.get("rows") or []
         for slot in _iter_section_table_slots(table_rows, section_state, faculty_map):
+            dup = _dup_key(
+                slot.get("branch"),
+                slot.get("section"),
+                slot.get("semester"),
+                slot.get("day"),
+                slot.get("start_time"),
+                slot.get("end_time"),
+                slot.get("subject_name"),
+                slot.get("faculty_name"),
+                slot.get("room"),
+            )
+            if dup in seen_slots:
+                continue
+            seen_slots.add(dup)
             resolved_slots.append(slot)
+    section_state["seen_slots"] = seen_slots
     return resolved_slots
 
 
@@ -1062,6 +1097,8 @@ def iter_docx_section_slots(
         "table_count": 0,
         "slot_count": 0,
         "seen_slots": set(),
+        "timetable_tables": [],
+        "faculty_entries": [],
     }
     primary_section = ""
     total_tables = 0
@@ -1089,6 +1126,8 @@ def iter_docx_section_slots(
             }
             return []
         section_name = _clean_text(section_state.get("section")) or _clean_text(section_state.get("section_hint")) or f"section_{total_tables}"
+        resolved = _finalize_section_slots(section_state)
+        section_state["slot_count"] = len(resolved)
         if debug_jsonl_path:
             _append_jsonl(
                 debug_jsonl_path,
@@ -1111,8 +1150,6 @@ def iter_docx_section_slots(
             section_state.get("table_count", 0),
             section_state.get("slot_count", 0),
         )
-        # Resolve buffered timetable tables now that faculty_map should be collected
-        resolved = _finalize_section_slots(section_state)
         # Reset
         section_state = {
             "section": "",
@@ -1147,7 +1184,9 @@ def iter_docx_section_slots(
                                 f"Multiple sections detected ({primary_section}, {section_name}). Upload one section per DOCX."
                             )
                     if section_state.get("table_count", 0) > 0 or section_state.get("faculty_map"):
-                        flush_section("new_section")
+                        for slot in flush_section("new_section"):
+                            total_slots += 1
+                            yield slot
                     section_state["section"] = section_name
                     section_state["section_hint"] = section_name
                     section_state["branch"] = _section_branch_name(section_name, section_state.get("doc_base", ""))
@@ -1197,8 +1236,6 @@ def iter_docx_section_slots(
                     logger.info("DOCX raw table preview section=%s rows=%s", section_state.get("section") or section_state.get("section_hint") or f"section_{total_tables}", _docx_preview_rows(table_rows))
                 direct_rows = list(_docx_parse_direct_rows(table_rows, section_state, debug_jsonl_path=debug_jsonl_path))
                 if direct_rows:
-                    # Buffer direct rows as a timetable table for finalization
-                    section_state.setdefault("timetable_tables", []).append({"rows": table_rows})
                     section_state["table_count"] += 1
                     # Resolve now against current faculty_map
                     for slot in direct_rows:
@@ -1291,23 +1328,12 @@ def iter_docx_section_slots(
 
                 if _is_timetable_table(table_rows) or section_state.get("table_count", 0) == 0:
                     section_state["table_count"] += 1
-                    for slot in _iter_section_table_slots(table_rows, section_state, section_state.get("faculty_map") or {}):
-                        # dedupe per-section to avoid duplicates caused by merged cells or parsing overlap
-                        dup = _dup_key(slot.get("branch"), slot.get("section"), slot.get("semester"), slot.get("day"), slot.get("start_time"), slot.get("end_time"), slot.get("subject_name"), slot.get("faculty_name"), slot.get("room"))
-                        if dup in section_state.get("seen_slots", set()):
-                            if debug_jsonl_path:
-                                _append_jsonl(debug_jsonl_path, {"type": "skipped_duplicate", "dup": dup, "slot": slot, "timestamp": time.time()})
-                            continue
-                        section_state.get("seen_slots").add(dup)
-                        section_state["slot_count"] += 1
-                        total_slots += 1
-                        yield slot
+                    section_state.setdefault("timetable_tables", []).append({"rows": table_rows})
                     mem_estimate_kb = (len(table_rows) * 180 + len(section_state.get("faculty_map") or {}) * 80) / 1024.0
                     logger.info(
-                        "timetable table processed section=%s rows=%d slots=%d tables=%d mem_estimate_kb=%.1f",
+                        "timetable table buffered section=%s rows=%d tables=%d mem_estimate_kb=%.1f",
                         section_state.get("section") or section_state.get("section_hint") or f"section_{total_tables}",
                         len(table_rows),
-                        section_state.get("slot_count", 0),
                         section_state.get("table_count", 0),
                         mem_estimate_kb,
                     )
@@ -1324,7 +1350,9 @@ def iter_docx_section_slots(
         logger.exception("DOCX section iterator failed for %s", path)
         raise
 
-    flush_section("eof")
+    for slot in flush_section("eof"):
+        total_slots += 1
+        yield slot
     logger.info("iter_docx_section_slots summary: tables=%d slots=%d failures=%d file=%s", total_tables, total_slots, parse_failures, os.path.basename(path))
 
 
@@ -2183,6 +2211,10 @@ def parse_pdf_to_slots(path: str, stats: Optional[Dict[str, object]] = None) -> 
         raise TimetablePDFValidationError("Faculty mapping table detected but rows could not be parsed. Ensure the columns are Subject Code, Subject Name, and Faculty Name.")
     if faculty_entries:
         report["faculty_mappings_sample"] = faculty_entries[:PDF_DIAG_SAMPLE_CAP]
+
+        if TIMETABLE_SINGLE_SECTION_ONLY and len(unique_sections) > 1:
+            report["validation_errors"].append("Multiple section headers detected. Upload one section per PDF only.")
+            raise TimetablePDFValidationError("Multiple section headers detected. Upload one section per PDF only.")
 
     faculty_map = _faculty_lookup(faculty_entries)
     best_table = max(
@@ -3530,7 +3562,7 @@ def register_routes(app, db_getter=None):
                     section_names = summary.get("section_names") or []
                     if summary.get("table_count", 0) > TIMETABLE_MAX_TABLES:
                         flash(
-                            f"This DOCX contains {summary.get('table_count')} tables. Upload one section per DOCX (CSE-A, CSE-B, etc.) for low-memory imports.",
+                            f"This DOCX contains {summary.get('table_count')} tables. Only one table/section per DOCX is allowed (examples: CSE-A, CSE-B, CSM-B).",
                             "error",
                         )
                         return redirect(url_for("timetable_manage"))
@@ -3538,19 +3570,25 @@ def register_routes(app, db_getter=None):
                         preview = ", ".join(section_names[:4])
                         suffix = "..." if len(section_names) > 4 else ""
                         flash(
-                            f"Multiple sections detected ({preview}{suffix}). Please upload one section per DOCX.",
+                            f"Multiple sections detected ({preview}{suffix}). Upload one section per DOCX only.",
                             "error",
                         )
+                        return redirect(url_for("timetable_manage"))
+                    if TIMETABLE_SINGLE_SECTION_ONLY and not section_names:
+                        flash("No section header detected. The DOCX must include a section header like CSE-A.", "error")
                         return redirect(url_for("timetable_manage"))
                     direct_tables = int(summary.get("direct_timetable_tables", 0) or 0)
                     legacy_timetable_tables = int(summary.get("timetable_tables", 0) or 0)
                     if direct_tables == 0 and legacy_timetable_tables == 0:
                         flash("No timetable tables were detected in this DOCX.", "error")
                         return redirect(url_for("timetable_manage"))
+                    if section_names:
+                        flash(f"Detected section: {section_names[0]}", "info")
+                        logger.info("timetable import detected section=%s tables=%s", section_names[0], summary.get("table_count"))
                     if direct_tables > 0:
                         slots_iter = iter_docx_section_slots(
                             dest,
-                            single_section_only=False,
+                            single_section_only=True,
                             max_tables=TIMETABLE_MAX_TABLES,
                         )
                     else:
@@ -3565,6 +3603,13 @@ def register_routes(app, db_getter=None):
                 elif ext in (".pdf",) and pdfplumber is not None:
                     pdf_stats = {}
                     slots_iter = parse_pdf_to_slots(dest, stats=pdf_stats)
+                    detected_section = (pdf_stats.get("detected_section") or "").strip()
+                    if TIMETABLE_SINGLE_SECTION_ONLY and not detected_section:
+                        flash("No section header detected in the PDF. Upload one section per PDF (example: CSE-A).", "error")
+                        return redirect(url_for("timetable_manage"))
+                    if detected_section:
+                        flash(f"Detected section: {detected_section}", "info")
+                        logger.info("timetable import detected section=%s source=pdf", detected_section)
                 else:
                     flash("Unsupported file type or missing parser dependencies.", "error")
                     return redirect(url_for("timetable_manage"))
@@ -3573,22 +3618,31 @@ def register_routes(app, db_getter=None):
                 inserted_info = import_info.get("raw_insert", {})
                 normalized_info = import_info.get("normalized_insert", {})
                 i_c = inserted_info.get("counters", {}) if isinstance(inserted_info, dict) else {}
+                logger.info(
+                    "timetable import summary parsed=%s inserted=%s skipped=%s",
+                    i_c.get("processed", 0),
+                    i_c.get("inserted", 0),
+                    i_c.get("skipped_total", 0),
+                )
                 if int(i_c.get("processed", 0) or 0) == 0:
                     logger.warning("Timetable import parsed zero rows from file=%s ext=%s", filename, ext)
                     if ext == ".pdf":
                         if pdf_stats and pdf_stats.get("validation_errors"):
                             detail = "; ".join(pdf_stats.get("validation_errors")[:3])
                             flash(f"PDF validation failed: {detail}", "error")
+                            session["timetable_manage_banner"] = f"Import failed: {detail}"
                         else:
                             flash(
                                 "No timetable rows were parsed from the PDF. Ensure the PDF contains a timetable grid with a Day column, time slots, and a faculty mapping table below it.",
                                 "error",
                             )
+                            session["timetable_manage_banner"] = "Import failed: no timetable rows parsed from PDF"
                     else:
                         flash(
                             "No timetable rows were parsed from the uploaded file. Check that the DOCX contains a readable table with branch, section, day, time, and subject columns.",
                             "error",
                         )
+                        session["timetable_manage_banner"] = "Import failed: no timetable rows parsed from DOCX"
                     return redirect(url_for("timetable_manage"))
 
                 # Persist a temporary preview of skipped rows for admin review
@@ -3619,6 +3673,7 @@ def register_routes(app, db_getter=None):
                 inserted_rows = int(n_c.get("inserted", 0) or i_c.get("inserted", 0) or 0)
                 session["timetable_manage_banner"] = f"{success_count} timetable rows imported successfully"
                 session["timetable_last_imported_file"] = filename
+                session["timetable_refresh_normalized"] = "1"
                 logger.info(
                     "timetable import diagnostics raw_inserted=%s raw_skipped=%s normalized_inserted=%s normalized_skipped=%s normalized_skip_reasons=%s",
                     i_c.get("inserted", 0),
@@ -3654,6 +3709,8 @@ def register_routes(app, db_getter=None):
         # legacy `timetable_slots` only when no normalized entries are present.
         success_banner = session.pop("timetable_manage_banner", None)
         last_imported_file = session.get("timetable_last_imported_file")
+        if session.pop("timetable_refresh_normalized", None):
+            logger.info("Refreshing normalized timetable rows for manage view")
         rows = []
         rows_source = "raw"
         try:
