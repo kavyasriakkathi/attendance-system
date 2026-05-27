@@ -3756,19 +3756,21 @@ def register_routes(app, db_getter=None):
         PAGE_SIZE = 25
         q = (request.args.get('q') or request.form.get('q') or '').strip()
 
-        # Build WHERE clause for simple text search across subject, faculty, section, branch, room
+        # Build WHERE clause for simple text search across normalized and legacy timetable fields.
         where_clauses = []
         params = []
         if q:
             like = f"%{q}%"
-            where_clauses.append("(COALESCE(s.name,'') LIKE %s OR COALESCE(t.name,'') LIKE %s OR te.section LIKE %s OR COALESCE(b.name,'') LIKE %s OR te.room LIKE %s)")
-            params.extend([like, like, like, like, like])
+            where_clauses.append(
+                "(COALESCE(s.name,'') LIKE %s OR COALESCE(t.name,'') LIKE %s OR COALESCE(ts.subject_name,'') LIKE %s OR COALESCE(ts.faculty_name,'') LIKE %s OR COALESCE(te.section,'') LIKE %s OR COALESCE(b.name,'') LIKE %s OR COALESCE(ts.branch,'') LIKE %s OR COALESCE(te.room,'') LIKE %s OR COALESCE(CAST(COALESCE(te.semester, ts.semester) AS TEXT), '') LIKE %s)"
+            )
+            params.extend([like, like, like, like, like, like, like, like, like])
 
         where_sql = "WHERE " + " AND ".join(where_clauses) if where_clauses else ""
 
         try:
             # total count of normalized entries
-            count_sql = f"SELECT COUNT(1) AS c FROM timetable_entries te LEFT JOIN subjects s ON te.subject_id = s.id LEFT JOIN teachers t ON te.teacher_id = t.id LEFT JOIN branches b ON te.branch_id = b.id {where_sql}"
+            count_sql = f"SELECT COUNT(1) AS c FROM timetable_entries te LEFT JOIN subjects s ON te.subject_id = s.id LEFT JOIN teachers t ON te.teacher_id = t.id LEFT JOIN branches b ON te.branch_id = b.id LEFT JOIN timetable_slots ts ON LOWER(TRIM(ts.branch)) = LOWER(TRIM(b.name)) AND COALESCE(ts.section, '') = COALESCE(te.section, '') AND COALESCE(CAST(ts.semester AS TEXT), '') = COALESCE(CAST(te.semester AS TEXT), '') AND COALESCE(ts.day, '') = COALESCE(te.day, '') AND COALESCE(ts.start_time, '') = COALESCE(te.start_time, '') AND COALESCE(ts.end_time, '') = COALESCE(te.end_time, '') AND COALESCE(ts.room, '') = COALESCE(te.room, '') {where_sql}"
             total_row = _db_execute(db, count_sql, tuple(params)).fetchone()
             total_count = int(total_row[0] if total_row is not None else 0)
         except Exception:
@@ -3780,7 +3782,7 @@ def register_routes(app, db_getter=None):
         try:
             if total_count > 0:
                 offset = max(0, (page - 1) * PAGE_SIZE)
-                visible_clause = "AND NOT (\n                        COALESCE(te.day, '') = ''\n                        AND COALESCE(te.start_time, '') = ''\n                        AND COALESCE(te.end_time, '') = ''\n                        AND COALESCE(te.section, '') = ''\n                        AND COALESCE(CAST(te.semester AS TEXT), '') = ''\n                        AND COALESCE(te.room, '') = ''\n                        AND COALESCE(s.name, '') = ''\n                        AND COALESCE(t.name, '') = ''\n                        AND COALESCE(b.name, '') = ''\n                      )"
+                visible_clause = "AND NOT (\n                        COALESCE(te.day, '') = ''\n                        AND COALESCE(te.start_time, '') = ''\n                        AND COALESCE(te.end_time, '') = ''\n                        AND COALESCE(te.section, '') = ''\n                        AND COALESCE(CAST(COALESCE(te.semester, ts.semester) AS TEXT), '') = ''\n                        AND COALESCE(te.room, '') = ''\n                        AND COALESCE(s.name, ts.subject_name, '') = ''\n                        AND COALESCE(t.name, ts.faculty_name, '') = ''\n                        AND COALESCE(b.name, ts.branch, '') = ''\n                      )"
                 if not where_sql:
                     visible_clause = visible_clause.replace("AND NOT", "WHERE NOT", 1)
                 sql = f"""
@@ -3789,16 +3791,24 @@ def register_routes(app, db_getter=None):
                         te.start_time,
                         te.end_time,
                         te.section,
-                        te.semester,
+                        COALESCE(te.semester, ts.semester) AS semester,
                         te.room,
                         te.is_lab,
-                        COALESCE(s.name, '') AS subject_name,
-                        COALESCE(t.name, '') AS faculty_name,
-                        COALESCE(b.name, '') AS branch_name
+                        COALESCE(s.name, ts.subject_name, '') AS subject_name,
+                        COALESCE(t.name, ts.faculty_name, '') AS faculty_name,
+                        COALESCE(b.name, ts.branch, '') AS branch_name
                     FROM timetable_entries te
                     LEFT JOIN subjects s ON te.subject_id = s.id
                     LEFT JOIN teachers t ON te.teacher_id = t.id
                     LEFT JOIN branches b ON te.branch_id = b.id
+                    LEFT JOIN timetable_slots ts
+                        ON LOWER(TRIM(ts.branch)) = LOWER(TRIM(b.name))
+                       AND COALESCE(ts.section, '') = COALESCE(te.section, '')
+                       AND COALESCE(CAST(ts.semester AS TEXT), '') = COALESCE(CAST(te.semester AS TEXT), '')
+                       AND COALESCE(ts.day, '') = COALESCE(te.day, '')
+                       AND COALESCE(ts.start_time, '') = COALESCE(te.start_time, '')
+                       AND COALESCE(ts.end_time, '') = COALESCE(te.end_time, '')
+                       AND COALESCE(ts.room, '') = COALESCE(te.room, '')
                     {where_sql}
                                         {visible_clause}
                     ORDER BY te.day, te.start_time

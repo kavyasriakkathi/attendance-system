@@ -138,18 +138,23 @@
             </thead>
             <tbody>
                 {% for row in entries %}
-                {% set has_visible_data = row.get('day') or row.get('start_time') or row.get('end_time') or row.get('branch_name') or row.get('branch') or row.get('section') or row.get('semester') or row.get('subject_name') or row.get('faculty_name') or row.get('room') %}
+                {% set branch_value = row.get('branch_name') or row.get('branch') or '' %}
+                {% set semester_value = row.get('semester') or row.get('sem') or '' %}
+                {% set subject_value = row.get('subject_name') or row.get('subject') or '' %}
+                {% set faculty_value = row.get('faculty_name') or row.get('faculty') or '' %}
+                {% set lab_value = row.get('is_lab') if row.get('is_lab') is not none else row.get('lab_theory') %}
+                {% set has_visible_data = row.get('day') or row.get('start_time') or row.get('end_time') or branch_value or row.get('section') or semester_value or subject_value or faculty_value or row.get('room') %}
                 {% if has_visible_data %}
                 <tr>
                     <td>{{ row.get('day') or '' }}</td>
                     <td>{{ row.get('start_time') or '' }}{% if row.get('end_time') %} - {{ row.get('end_time') }}{% endif %}</td>
-                    <td>{{ row.get('branch_name') or row.get('branch') or '' }}</td>
+                    <td>{{ branch_value }}</td>
                     <td>{{ row.get('section') or '' }}</td>
-                    <td>{{ row.get('semester') or '' }}</td>
-                    <td>{{ row.get('subject_name') or '' }}</td>
-                    <td>{{ row.get('faculty_name') or '' }}</td>
+                    <td>{{ semester_value }}</td>
+                    <td>{{ subject_value }}</td>
+                    <td>{{ faculty_value }}</td>
                     <td>{{ row.get('room') or '' }}</td>
-                    <td>{% if row.get('is_lab') is not none %}{{ 'Lab' if row.get('is_lab') else 'Theory' }}{% endif %}</td>
+                    <td>{% if lab_value is not none %}{{ 'Lab' if lab_value else 'Theory' }}{% endif %}</td>
                 </tr>
                 {% endif %}
                 {% endfor %}
