@@ -3840,7 +3840,22 @@ def register_routes(app, db_getter=None):
                 data.pop(key, None)
             return any(_clean_text(v) for v in data.values())
 
-        rows = [_row_to_dict(row) for row in rows if _has_visible_data(row)]
+        visible_entries = []
+        for row in entries:
+            row_dict = _row_to_dict(row)
+            if _has_visible_data(row_dict):
+                visible_entries.append(row_dict)
+        if len(visible_entries) != len(entries):
+            logger.info(
+                "Filtered empty timetable rows for manage view kept=%s dropped=%s",
+                len(visible_entries),
+                len(entries) - len(visible_entries),
+            )
+        entries = visible_entries
+        rows = list(entries)
+
+        logger.info("Timetable manage fetched %s visible normalized rows", len(entries))
+        logger.info("Timetable manage first 5 rows: %s", entries[:5])
 
         logger.debug("Timetable manage page loaded: normalized_count=%s, raw_count=%s, rows_source=%s", normalized_count, raw_count, rows_source)
 
