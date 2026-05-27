@@ -235,6 +235,18 @@ def _dup_key(*parts) -> str:
     return "|".join(_clean_text(p) for p in parts)
 
 
+def _timetable_semantic_key(row: Dict[str, str]) -> str:
+    return _dup_key(
+        _clean_text(row.get("day")),
+        _clean_text(row.get("start_time")),
+        _clean_text(row.get("end_time")),
+        _clean_text(row.get("branch")),
+        _clean_text(row.get("section")),
+        _clean_text(row.get("subject_name")),
+        _clean_text(row.get("faculty_name")),
+    )
+
+
 def _insert_ignore_sql(db, table: str, columns: List[str]) -> str:
     column_list = ", ".join(columns)
     placeholder_list = ", ".join(["%s"] * len(columns))
@@ -349,7 +361,7 @@ def iter_docx_table_slots(path: str) -> Iterator[Dict]:
     parsed_rows = 0
     skipped_rows = 0
     failed_rows = 0
-    skip_tokens = ("short break", "lunch break", "lib", "sports", "break")
+    skip_tokens = _DOCX_IGNORE_ROW_TOKENS
     for table_index, table in enumerate(doc.tables):
         if not table.rows:
             continue
@@ -577,7 +589,23 @@ _DOCX_DIRECT_HEADER_ALIASES = {
     "lab_theory": ("lab/theory", "lab theory", "type", "category"),
 }
 
-_DOCX_IGNORE_ROW_TOKENS = ("principal-vice", "principal vice", "principal", "hod", "dean")
+_DOCX_IGNORE_ROW_TOKENS = (
+    "principal-vice",
+    "principal vice",
+    "principal",
+    "vice",
+    "hod",
+    "dean",
+    "short break",
+    "short braek",
+    "lunch",
+    "lunch break",
+    "timetable",
+    "siddhartha",
+    "institute",
+    "technology",
+    "sciences",
+)
 
 
 def _docx_row_text(row: Dict) -> str:
@@ -604,6 +632,82 @@ def _docx_collapse_merged_text(value: str) -> str:
     if m:
         return _clean_text(m.group("g"))
     return compact
+
+
+def _normalize_timetable_subject_name(value: str) -> str:
+    text = _clean_text(value)
+    if not text or _contains_blocked_timetable_text(text):
+        return ""
+    normalized_key = _normalize_key(text)
+    alias_map = {
+        "odevc": "Ordinary Differential Equations and Vector Calculus",
+        "bee": "Basic Electrical Engineering",
+    }
+    if normalized_key in alias_map:
+        return alias_map[normalized_key]
+    return text
+
+
+def _merge_timetable_row_values(current: Dict[str, str], previous: Optional[Dict[str, str]]) -> Dict[str, str]:
+    if not previous:
+        return current
+    current_day = _clean_text(current.get("day"))
+    current_start = _clean_text(current.get("start_time"))
+    current_end = _clean_text(current.get("end_time"))
+    if not (current_day and current_start and current_end):
+        return current
+    previous_day = _clean_text(previous.get("day"))
+    previous_start = _clean_text(previous.get("start_time"))
+    previous_end = _clean_text(previous.get("end_time"))
+    if previous_day and current_day != previous_day:
+        return current
+    if previous_start and current_start != previous_start:
+        return current
+    if previous_end and current_end != previous_end:
+        return current
+    previous_branch = _clean_text(previous.get("branch"))
+    previous_section = _clean_text(previous.get("section"))
+    current_branch = _clean_text(current.get("branch"))
+    current_section = _clean_text(current.get("section"))
+    if previous_branch and current_branch and current_branch != previous_branch:
+        return current
+    if previous_section and current_section and current_section != previous_section:
+        return current
+    if not current_branch and previous_branch:
+        current["branch"] = previous_branch
+    if not current_section and previous_section:
+        current["section"] = previous_section
+    if current.get("semester") in (None, "", 0) and previous.get("semester") not in (None, ""):
+        current["semester"] = previous.get("semester")
+    if not _clean_text(current.get("subject_name")) and _clean_text(previous.get("subject_name")):
+        current["subject_name"] = previous.get("subject_name")
+    if not _clean_text(current.get("faculty_name")) and _clean_text(previous.get("faculty_name")):
+        current["faculty_name"] = previous.get("faculty_name")
+    if not _clean_text(current.get("room")) and _clean_text(previous.get("room")):
+        current["room"] = previous.get("room")
+    return current
+
+
+def _is_timetable_continuation_row(current: Dict[str, str], previous: Optional[Dict[str, str]]) -> bool:
+    if not previous:
+        return False
+    if not _clean_text(current.get("day")) or not _clean_text(current.get("start_time")) or not _clean_text(current.get("end_time")):
+        return False
+    if _clean_text(previous.get("day")) and _clean_text(current.get("day")) != _clean_text(previous.get("day")):
+        return False
+    if _clean_text(previous.get("start_time")) and _clean_text(current.get("start_time")) != _clean_text(previous.get("start_time")):
+        return False
+    if _clean_text(previous.get("end_time")) and _clean_text(current.get("end_time")) != _clean_text(previous.get("end_time")):
+        return False
+    if _clean_text(previous.get("section")) and _clean_text(current.get("section")) and _clean_text(current.get("section")) != _clean_text(previous.get("section")):
+        return False
+    if _clean_text(previous.get("branch")) and _clean_text(current.get("branch")) and _clean_text(current.get("branch")) != _clean_text(previous.get("branch")):
+        return False
+    return bool(
+        (not _clean_text(current.get("subject_name")) and _clean_text(previous.get("subject_name")))
+        or (not _clean_text(current.get("faculty_name")) and _clean_text(previous.get("faculty_name")))
+        or (not _clean_text(current.get("room")) and _clean_text(previous.get("room")))
+    )
 
 
 def _docx_header_map(table_rows: List[Dict]) -> tuple[int, Dict[str, int]]:
@@ -653,6 +757,7 @@ def _docx_parse_direct_rows(table_rows: List[Dict], section_state: Dict, debug_j
         "semester": section_state.get("semester"),
         "room": _clean_text(section_state.get("room")),
     }
+    previous_slot: Optional[Dict[str, str]] = None
 
     for row_index, row in enumerate(table_rows[header_idx + 1 :], start=header_idx + 1):
         expanded = row.get("expanded") or []
@@ -713,6 +818,8 @@ def _docx_parse_direct_rows(table_rows: List[Dict], section_state: Dict, debug_j
             "room": room,
         }
 
+        slot = _merge_timetable_row_values(slot, previous_slot)
+
         # Skip rows where core timetable fields are missing
         core_fields = [slot.get("day"), slot.get("start_time"), slot.get("subject_name")]
         if not any(_clean_text(v) for v in core_fields):
@@ -728,6 +835,9 @@ def _docx_parse_direct_rows(table_rows: List[Dict], section_state: Dict, debug_j
         if not _valid_slot_row(slot):
             logger.info("skipped_empty_row table_row=%s reason=invalid_slot slot=%s text=%s", row_index, slot, row_text)
             continue
+
+        if _is_timetable_continuation_row(slot, previous_slot):
+            logger.info("merged_continuation_row table_row=%s slot=%s", row_index, slot)
 
         logger.info(
             "parsed_row table_row=%s day=%s time=%s-%s branch=%s section=%s semester=%s subject=%s faculty=%s room=%s lab=%s",
@@ -754,6 +864,7 @@ def _docx_parse_direct_rows(table_rows: List[Dict], section_state: Dict, debug_j
                     "timestamp": time.time(),
                 },
             )
+        previous_slot = slot
         yield slot
 
 
@@ -874,6 +985,13 @@ def _semester_from_text(text: str) -> Optional[int]:
     text = _clean_text(text)
     match = re.search(r"\b([IVX]+|\d+)\s*[-]?\s*Semester\b", text, flags=re.IGNORECASE)
     if not match:
+        if re.search(r"\b(B\.?\s*TECH|BTECH|TIMETABLE|SEM(?:ESTER)?)\b", text, flags=re.IGNORECASE):
+            shorthand = re.search(r"\b(?:[IVX]+|\d+)\s*[-_/]\s*(\d+)\b", text, flags=re.IGNORECASE)
+            if shorthand:
+                try:
+                    return int(shorthand.group(1))
+                except Exception:
+                    return None
         return None
     value = match.group(1)
     if value.isdigit():
@@ -1032,6 +1150,7 @@ def _iter_section_table_slots(table_rows: List[Dict], section_state: Dict, facul
     semester = section_state.get("semester")
     header_cells = table_rows[0].get("expanded") or []
     day_col = 0
+    previous_slot: Optional[Dict[str, str]] = None
     for idx, header in enumerate(header_cells):
         if "day" in _normalize_key(header):
             day_col = idx
@@ -1068,10 +1187,12 @@ def _iter_section_table_slots(table_rows: List[Dict], section_state: Dict, facul
                     "is_lab": int(bool(_row_has_token(subject_piece, "lab", "practical") or _row_has_token(cell_text, "lab", "practical"))),
                     "room": _clean_text(section_state.get("room", "")),
                 }
+                slot = _merge_timetable_row_values(slot, previous_slot)
                 # Skip if essential semantic fields are missing
-                if not (slot.get("day") and slot.get("start_time") and (slot.get("subject_name") or slot.get("faculty_name"))):
+                if not (slot.get("day") and slot.get("start_time") and slot.get("end_time") and slot.get("section") and slot.get("subject_name") and slot.get("faculty_name")):
                     continue
                 if _valid_slot_row(slot):
+                    previous_slot = slot
                     yield slot
 
 
@@ -1086,11 +1207,12 @@ def iter_docx_section_slots(
         raise RuntimeError("python-docx is not installed. Install with: pip install python-docx")
 
     base_name = os.path.splitext(os.path.basename(path))[0]
+    document_semester = _semester_from_text(base_name)
     section_state = {
         "section": "",
         "section_hint": "",
         "branch": "",
-        "semester": None,
+        "semester": document_semester,
         "doc_base": base_name,
         "room": "",
         "faculty_map": {},
@@ -1155,7 +1277,7 @@ def iter_docx_section_slots(
             "section": "",
             "section_hint": "",
             "branch": "",
-            "semester": None,
+            "semester": document_semester,
             "doc_base": base_name,
             "room": "",
             "faculty_map": {},
@@ -1369,8 +1491,8 @@ _PDF_DAY_ALIASES = {
 _PDF_DAY_RE = re.compile(r"\b(mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?)\b", re.IGNORECASE)
 _PDF_TIME_RANGE_RE = re.compile(r"(\d{1,2}[:\.]\d{2}\s*(?:AM|PM)?)\s*(?:-|to)\s*(\d{1,2}[:\.]\d{2}\s*(?:AM|PM)?)", re.IGNORECASE)
 _PDF_TIME_RANGE_HOUR_RE = re.compile(r"(\d{1,2}\s*(?:AM|PM))\s*(?:-|to)\s*(\d{1,2}\s*(?:AM|PM))", re.IGNORECASE)
-_PDF_DECORATIVE_TOKENS = ("principal", "hod", "head of department", "department", "dean")
-_PDF_BREAK_TOKENS = ("short break", "lunch break", "break", "lunch")
+_PDF_DECORATIVE_TOKENS = ("principal", "hod", "head of department", "department", "dean", "siddhartha", "institute", "technology", "sciences", "timetable")
+_PDF_BREAK_TOKENS = ("short break", "short braek", "lunch break", "break", "lunch")
 _PDF_SECTION_STRICT_RE = re.compile(r"\b((?:CSM|CSE|ECE|EEE|IT|MECH|CIVIL|AIML|DS))(?:\s*[-_/ ]\s*([A-Z0-9]{1,4}))?\b", re.IGNORECASE)
 _PDF_SECTION_CANDIDATE_RE = re.compile(r"\b((?:CSM|CSE|ECE|EEE|IT|MECH|CIVIL|AIML|DS))(?:\s*[-_/ ]\s*([A-Z0-9]{1,4}))?\b", re.IGNORECASE)
 _PDF_SECTION_CONTEXT_TOKENS = ("class", "section", "branch", "dept", "department", "program", "programme", "course")
@@ -1893,6 +2015,7 @@ def _pdf_parse_timetable_table(
 
     # track duplicates to avoid emitting the same logical slot multiple times
     seen_slots_local = set()
+    previous_slot: Optional[Dict[str, str]] = None
 
     col_bounds = _pdf_table_column_bounds(table_info.get("table"), len(header_cells))
     for row_index, row in enumerate(rows[header_idx + 1:], start=header_idx + 1):
@@ -1930,7 +2053,7 @@ def _pdf_parse_timetable_table(
                     faculty_name = _clean_text(resolved.get("faculty_name") or "")
                     semester_value = "" if semester is None else semester
                     # Ignore administrative rows that are not real timetable entries
-                    admin_tokens = ("PRINCIPAL", "PRINCIPAL-VICE", "HOD", "DEAN", "DIRECTOR")
+                    admin_tokens = ("PRINCIPAL", "PRINCIPAL-VICE", "VICE", "HOD", "DEAN", "SIDDHARTHA", "INSTITUTE", "TECHNOLOGY", "SCIENCES")
                     if any(tok.lower() in subject_piece.lower() or tok.lower() in text.lower() for tok in admin_tokens):
                         if report is not None and len(report.get("skipped_admin_rows", [])) < PDF_DIAG_SAMPLE_CAP:
                             report.setdefault("skipped_admin_rows", []).append({"index": row_index, "text": text})
@@ -1949,6 +2072,10 @@ def _pdf_parse_timetable_table(
                         "is_lab": int(bool(_row_has_token(subject_piece, "lab", "practical") or _row_has_token(text, "lab", "practical"))),
                         "room": "",
                     }
+                    slot = _merge_timetable_row_values(slot, previous_slot)
+                    if _row_has_token(text, "short braek", "short break", "lunch break", "lunch", "break"):
+                        report["skipped_rows"] = int(report.get("skipped_rows", 0) or 0) + 1
+                        continue
                     if not is_valid_timetable_row(slot):
                         if report is not None and len(report.get("skipped_empty_rows", [])) < PDF_DIAG_SAMPLE_CAP:
                             report.setdefault("skipped_empty_rows", []).append({"index": row_index, "text": text})
@@ -1991,13 +2118,14 @@ def _pdf_parse_timetable_table(
                             "end_time": slot.get("end_time"),
                             "text": text,
                         })
-                    dup = _dup_key(slot.get("branch"), slot.get("section"), slot.get("semester"), slot.get("day"), slot.get("start_time"), slot.get("end_time"), slot.get("subject_name"), slot.get("faculty_name"), slot.get("room"))
+                    dup = _timetable_semantic_key(slot)
                     if dup in seen_slots_local:
                         if report is not None and len(report.get("skipped_duplicates", [])) < PDF_DIAG_SAMPLE_CAP:
                             report.setdefault("skipped_duplicates", []).append(dup)
                         report["skipped_rows"] = int(report.get("skipped_rows", 0) or 0) + 1
                         continue
                     seen_slots_local.add(dup)
+                    previous_slot = slot
                     report["valid_rows"] = int(report.get("valid_rows", 0) or 0) + 1
                     logger.info(
                         "INSERTED_VALID_ROW row_index=%s section=%s day=%s start_time=%s semester=%s subject=%s faculty=%s",
@@ -2051,7 +2179,7 @@ def parse_pdf_to_slots(path: str, stats: Optional[Dict[str, object]] = None) -> 
 
     base_name = os.path.splitext(os.path.basename(path))[0]
     section_candidates = []
-    semester_hint = None
+    semester_hint = _semester_from_text(base_name)
 
     timetable_tables = []
     faculty_tables = []
@@ -2293,8 +2421,14 @@ def _split_time_value(time_value: str, end_value: str = ""):
 
 def _normalize_slot_row(row: Dict[str, str], row_text: str = "") -> Dict[str, str]:
     normalized = {key: _clean_text(value) for key, value in row.items()}
-    normalized["branch"] = _first_non_empty(normalized, "branch", "dept", "department", "program", "course", "branch name")
-    normalized["section"] = _first_non_empty(normalized, "section", "class", "division", "batch", "group")
+    normalized["branch"] = _normalize_academic_department_code(
+        _first_non_empty(normalized, "branch", "dept", "department", "program", "course", "branch name")
+    )
+    normalized["section"] = _normalize_academic_section_code(
+        _first_non_empty(normalized, "section", "class", "division", "batch", "group")
+    )
+    if not normalized["branch"] and normalized["section"]:
+        normalized["branch"] = _normalize_academic_department_code(normalized["section"].split("-", 1)[0])
     semester_value = _first_non_empty(normalized, "semester", "sem", "term", "year")
     normalized["semester"] = _safe_int(semester_value)
     normalized["day"] = _first_non_empty(normalized, "day", "weekday", "date")
@@ -2307,26 +2441,118 @@ def _normalize_slot_row(row: Dict[str, str], row_text: str = "") -> Dict[str, st
         start_value, end_value = _split_time_value(start_value or time_value, end_value)
     normalized["start_time"] = start_value
     normalized["end_time"] = end_value
-    normalized["subject_name"] = _first_non_empty(normalized, "subject", "course", "paper", "topic", "title")
-    normalized["faculty_name"] = _first_non_empty(normalized, "faculty", "teacher", "instructor", "lecturer", "staff")
+    normalized["subject_name"] = _normalize_timetable_subject_name(
+        _first_non_empty(normalized, "subject", "course", "paper", "topic", "title")
+    )
+    normalized["faculty_name"] = _clean_text(_first_non_empty(normalized, "faculty", "teacher", "instructor", "lecturer", "staff"))
+    if _contains_blocked_timetable_text(normalized["faculty_name"]):
+        normalized["faculty_name"] = ""
     normalized["room"] = _first_non_empty(normalized, "room", "classroom", "hall", "venue", "lab room")
     normalized["is_lab"] = int(bool(_row_has_token(normalized["subject_name"], "lab", "practical") or _row_has_token(row_text, "lab", "practical")))
     return normalized
 
 
 def _valid_slot_row(row: Dict[str, str]) -> bool:
-    required = ("branch", "section", "day", "start_time", "end_time", "subject_name")
-    return all(_clean_text(row.get(field)) for field in required)
+    return _is_valid_academic_timetable_row(row)
+
+
+_TIMETABLE_BLOCKED_TOKENS = (
+    "PRINCIPAL",
+    "PRINCIPAL-VICE",
+    "VICE",
+    "HOD",
+    "DEAN",
+    "TIMETABLE",
+    "SIDDHARTHA",
+    "INSTITUTE",
+    "TECHNOLOGY",
+    "SCIENCES",
+    "SHORT BREAK",
+    "SHORT BRAEK",
+    "LUNCH BREAK",
+    "LUNCH",
+    "BREAK",
+)
+
+_ACADEMIC_DEPARTMENT_CODES = {
+    "AIML",
+    "AIDS",
+    "CIVIL",
+    "CSE",
+    "CSD",
+    "CSM",
+    "DS",
+    "ECE",
+    "EEE",
+    "IT",
+    "MECH",
+}
+
+
+def _contains_blocked_timetable_text(value: str) -> bool:
+    text = _clean_text(value).upper()
+    return bool(text) and any(token in text for token in _TIMETABLE_BLOCKED_TOKENS)
+
+
+def _normalize_academic_department_code(value: str) -> str:
+    text = _clean_text(value).upper()
+    if not text or _contains_blocked_timetable_text(text):
+        return ""
+    match = re.fullmatch(r"([A-Z]{2,5})", text)
+    if match and match.group(1) in _ACADEMIC_DEPARTMENT_CODES:
+        return match.group(1)
+    return ""
+
+
+def _normalize_academic_section_code(value: str) -> str:
+    text = _clean_text(value).upper()
+    if not text or _contains_blocked_timetable_text(text):
+        return ""
+    text = re.sub(r"[\s_/]+", "-", text)
+    text = re.sub(r"-+", "-", text).strip("-")
+    match = re.match(r"^([A-Z]{2,5})-([A-Z0-9]+)$", text)
+    if not match:
+        return ""
+    department_code = match.group(1)
+    if department_code not in _ACADEMIC_DEPARTMENT_CODES:
+        return ""
+    return f"{department_code}-{match.group(2)}"
+
+
+def _is_valid_academic_timetable_row(row: Dict[str, str]) -> bool:
+    branch_value = _clean_text(row.get("branch"))
+    section_value = _clean_text(row.get("section"))
+    subject_value = _normalize_timetable_subject_name(row.get("subject_name"))
+    faculty_value = _clean_text(row.get("faculty_name"))
+    day_value = _clean_text(row.get("day"))
+    start_value = _clean_text(row.get("start_time"))
+    end_value = _clean_text(row.get("end_time"))
+
+    if not (day_value and start_value and end_value):
+        return False
+    if not subject_value or not faculty_value:
+        return False
+    if _contains_blocked_timetable_text(branch_value) or _contains_blocked_timetable_text(section_value):
+        return False
+
+    if not re.fullmatch(r"[A-Z]{2,5}", branch_value):
+        return False
+
+    department_code = _normalize_academic_department_code(branch_value)
+    section_code = _normalize_academic_section_code(section_value)
+    if not section_code:
+        return False
+    if not department_code:
+        department_code = _normalize_academic_department_code(section_code.split("-", 1)[0])
+    if department_code not in _ACADEMIC_DEPARTMENT_CODES:
+        return False
+    if not section_code.startswith(f"{department_code}-"):
+        return False
+    return True
 
 
 def is_valid_timetable_row(row):
-    return any([
-        row.get('day'),
-        row.get('start_time'),
-        row.get('subject_name'),
-        row.get('faculty_name'),
-        row.get('section')
-    ])
+    return _is_valid_academic_timetable_row(row)
 
 
 def _split_subjects(subj_raw: str):
@@ -2811,8 +3037,8 @@ def import_slots_streaming(db, slots_iter: Iterable[Dict]):
             _write_preview_line(preview_path, preview_state, {"index": row_index, "reason": "completely_empty_row", "row": row})
             continue
 
-        # Core validation: require day, start_time and subject_name (or faculty_name as fallback)
-        if not (row.get("day") and row.get("start_time") and (row.get("subject_name") or row.get("faculty_name"))):
+        # Core validation: require a real academic section plus subject and faculty.
+        if not _is_valid_academic_timetable_row(row):
             raw_counters["skipped_total"] += 1
             raw_counters["skipped_invalid"] += 1
             _write_preview_line(preview_path, preview_state, {"index": row_index, "reason": "invalid_row", "row": row})
@@ -2896,14 +3122,13 @@ def import_slots_streaming(db, slots_iter: Iterable[Dict]):
             # Keep unresolved-ID rows distinct by folding normalized subject/faculty text
             # into the in-memory dedupe key while preserving canonical IDs when available.
             norm_key = _dup_key(
-                norm_row["section"],
+                norm_row["branch_id"],
                 norm_row["day"],
                 norm_row["start_time"],
                 norm_row["end_time"],
+                norm_row["section"],
                 norm_row["subject_id"] if norm_row["subject_id"] is not None else f"sub:{_normalize_subject_name(row['subject_name'])}",
                 norm_row["teacher_id"] if norm_row["teacher_id"] is not None else f"teach:{_normalize_teacher_name(row['faculty_name'])}",
-                norm_row["branch_id"],
-                norm_row["room"],
             )
             if norm_key in seen_norm_keys:
                 normalized_counters["skipped_total"] += 1
@@ -3068,11 +3293,11 @@ def import_slots(db, slots: List[Dict]):
 
             logger.info("Processing row %s: raw=%s normalized=%s", row_index, s, row)
 
-            if not _valid_slot_row(row):
+            if not _is_valid_academic_timetable_row(row):
                 counters["skipped_total"] += 1
                 counters["skipped_invalid"] += 1
                 reason = "invalid_row"
-                if not row.get("section"):
+                if not _clean_text(row.get("section")):
                     counters["invalid_section"] += 1
                     reason = "missing_section"
                 logger.info("import_slots skipped row %s: reason=%s normalized=%s", row_index, reason, row)
@@ -3088,13 +3313,13 @@ def import_slots(db, slots: List[Dict]):
                 skipped_rows_omitted = _append_skipped_sample(skipped_rows, skipped_rows_omitted, {"index": row_index, "raw": s, "normalized": row, "reason": reason})
                 continue
 
-            duplicate_where = "COALESCE(branch, '') = COALESCE(%s, '') AND COALESCE(section, '') = COALESCE(%s, '') AND COALESCE(CAST(semester AS TEXT), '') = COALESCE(CAST(%s AS TEXT), '') AND COALESCE(day, '') = COALESCE(%s, '') AND COALESCE(start_time, '') = COALESCE(%s, '') AND COALESCE(end_time, '') = COALESCE(%s, '') AND COALESCE(subject_name, '') = COALESCE(%s, '') AND COALESCE(faculty_name, '') = COALESCE(%s, '') AND COALESCE(room, '') = COALESCE(%s, '')"
+            duplicate_where = "COALESCE(branch, '') = COALESCE(%s, '') AND COALESCE(section, '') = COALESCE(%s, '') AND COALESCE(day, '') = COALESCE(%s, '') AND COALESCE(start_time, '') = COALESCE(%s, '') AND COALESCE(end_time, '') = COALESCE(%s, '') AND COALESCE(subject_name, '') = COALESCE(%s, '') AND COALESCE(faculty_name, '') = COALESCE(%s, '')"
             try:
                 if _row_exists(
                     db,
                     "timetable_slots",
                     duplicate_where,
-                    (row['branch'], row['section'], row['semester'], row['day'], row['start_time'], row['end_time'], row['subject_name'], row['faculty_name'], row['room']),
+                    (row['branch'], row['section'], row['day'], row['start_time'], row['end_time'], row['subject_name'], row['faculty_name']),
                 ):
                     counters["skipped_total"] += 1
                     counters["skipped_duplicate"] += 1
@@ -3220,6 +3445,11 @@ def import_slots_normalized(db, slots: List[Dict]):
             use_tracemalloc = True
         except Exception:
             use_tracemalloc = False
+    branch_cache = {}
+    subject_cache = {}
+    teacher_cache = {}
+    subject_index = _build_subject_lookup_index(db)
+    teacher_index = _build_teacher_lookup_index(db)
     try:
         inserted_since_commit = 0
         for row_index, s in enumerate(slots, start=1):
@@ -3249,7 +3479,7 @@ def import_slots_normalized(db, slots: List[Dict]):
             }
             print("NORMALIZED_ROW", normalized_row)
             logger.info("Processing normalized row %s: raw=%s normalized=%s", row_index, s, normalized_row)
-            if not _valid_slot_row({"branch": bname, "section": sec, "day": day, "start_time": start, "end_time": end, "subject_name": subj_name}):
+            if not _is_valid_academic_timetable_row({"branch": bname, "section": sec, "day": day, "start_time": start, "end_time": end, "subject_name": subj_name, "faculty_name": fac_name}):
                 counters["skipped_total"] += 1
                 counters["skipped_invalid"] += 1
                 counters["invalid_section"] += 1
@@ -3265,48 +3495,48 @@ def import_slots_normalized(db, slots: List[Dict]):
                 skipped_rows_omitted = _append_skipped_sample(skipped_rows, skipped_rows_omitted, {"index": row_index, "raw": s, "normalized": normalized_row, "reason": reason})
                 continue
 
-                branch_key = bname.strip().lower()
-                branch_id = branch_cache.get(branch_key)
-                if branch_id is None:
-                    branch_id = _resolve_or_create_branch_id(db, bname, branch_cache)
-                    branch_cache[branch_key] = branch_id
-                if branch_id is None:
-                    counters["skipped_total"] += 1
-                    counters["skipped_branch"] += 1
-                    reason = "missing_branch"
-                    logger.info("import_slots_normalized skipped unresolved branch for row %s: %s", row_index, normalized_row)
-                    if preview_written < PREVIEW_ROW_CAP:
-                        try:
-                            with open(preview_path, "a", encoding="utf-8") as pf:
-                                pf.write(json.dumps({"index": row_index, "raw": s, "normalized": normalized_row, "reason": reason}, default=str) + "\n")
-                            preview_written += 1
-                        except Exception:
-                            logger.exception("Failed to write normalized branch preview line")
-                    skipped_rows_omitted = _append_skipped_sample(skipped_rows, skipped_rows_omitted, {"index": row_index, "raw": s, "normalized": normalized_row, "reason": reason})
-                    continue
+            branch_key = bname.strip().lower()
+            branch_id = branch_cache.get(branch_key)
+            if branch_id is None:
+                branch_id = _resolve_or_create_branch_id(db, bname, branch_cache)
+                branch_cache[branch_key] = branch_id
+            if branch_id is None:
+                counters["skipped_total"] += 1
+                counters["skipped_branch"] += 1
+                reason = "missing_branch"
+                logger.info("import_slots_normalized skipped unresolved branch for row %s: %s", row_index, normalized_row)
+                if preview_written < PREVIEW_ROW_CAP:
+                    try:
+                        with open(preview_path, "a", encoding="utf-8") as pf:
+                            pf.write(json.dumps({"index": row_index, "raw": s, "normalized": normalized_row, "reason": reason}, default=str) + "\n")
+                        preview_written += 1
+                    except Exception:
+                        logger.exception("Failed to write normalized branch preview line")
+                skipped_rows_omitted = _append_skipped_sample(skipped_rows, skipped_rows_omitted, {"index": row_index, "raw": s, "normalized": normalized_row, "reason": reason})
+                continue
 
-                subject_id = _resolve_subject_id(subj_name, subject_cache, subject_index)
-                if subj_name and subject_id is None:
-                    counters["skipped_unresolved_subject"] += 1
-                    counters["missing_subjects"] += 1
+            subject_id = _resolve_subject_id(subj_name, subject_cache, subject_index)
+            if subj_name and subject_id is None:
+                counters["skipped_unresolved_subject"] += 1
+                counters["missing_subjects"] += 1
 
-                teacher_id = _resolve_teacher_id(fac_name, teacher_cache, teacher_index)
-                if fac_name and teacher_id is None:
-                    counters["skipped_unresolved_teacher"] += 1
-                    counters["missing_teachers"] += 1
+            teacher_id = _resolve_teacher_id(fac_name, teacher_cache, teacher_index)
+            if fac_name and teacher_id is None:
+                counters["skipped_unresolved_teacher"] += 1
+                counters["missing_teachers"] += 1
 
-                entry_row = {
-                    "branch_id": branch_id,
-                    "section": sec,
-                    "semester": sem,
-                    "day": day,
-                    "start_time": start,
-                    "end_time": end,
-                    "subject_id": subject_id,
-                    "teacher_id": teacher_id,
-                    "is_lab": is_lab,
-                    "room": room,
-                }
+            entry_row = {
+                "branch_id": branch_id,
+                "section": sec,
+                "semester": sem,
+                "day": day,
+                "start_time": start,
+                "end_time": end,
+                "subject_id": subject_id,
+                "teacher_id": teacher_id,
+                "is_lab": is_lab,
+                "room": room,
+            }
             try:
                 logger.info(
                     "Normalized values | branch=%s subject=%s faculty=%s section=%s day=%s time=%s-%s room=%s",
@@ -3570,6 +3800,7 @@ def register_routes(app, db_getter=None):
                 try:
                     db = get_db()
                     _db_execute(db, "DELETE FROM timetable_slots")
+                    _db_execute(db, "DELETE FROM timetable_entries")
                     try:
                         db.commit()
                     except Exception:
