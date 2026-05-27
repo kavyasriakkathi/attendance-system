@@ -2047,6 +2047,7 @@ def parse_pdf_to_slots(path: str, stats: Optional[Dict[str, object]] = None) -> 
     report.setdefault("faculty_mappings_count", 0)
     report.setdefault("validation_errors", [])
     report.setdefault("raw_table_samples", [])
+    report.setdefault("detected_sections", [])
 
     base_name = os.path.splitext(os.path.basename(path))[0]
     section_candidates = []
@@ -2054,9 +2055,21 @@ def parse_pdf_to_slots(path: str, stats: Optional[Dict[str, object]] = None) -> 
 
     timetable_tables = []
     faculty_tables = []
+    page_sections_by_index: Dict[int, List[str]] = {}
+    timetable_tables_by_page: Dict[int, List[Dict]] = {}
+    faculty_tables_by_page: Dict[int, List[Dict]] = {}
+    page_order: List[int] = []
 
     with pdfplumber.open(path) as pdf:
         for page_index, page in enumerate(pdf.pages):
+            page_order.append(page_index)
+            page_sections: List[str] = []
+
+            def _remember_sections(sections: List[str]) -> None:
+                for section in sections:
+                    if section and section not in page_sections:
+                        page_sections.append(section)
+
             tables = _pdf_find_tables(page)
             report["tables_detected"] += len(tables)
 
@@ -2077,12 +2090,12 @@ def parse_pdf_to_slots(path: str, stats: Optional[Dict[str, object]] = None) -> 
 
             header_lines = [l for l in header_text.splitlines() if l.strip()]
             if header_text:
-                section_candidates.extend(
-                    _pdf_collect_section_candidates([header_text], report, source=f"header_block_page_{page_index + 1}")
-                )
-            section_candidates.extend(
-                _pdf_collect_section_candidates(header_lines, report, source="header_region")
-            )
+                header_sections = _pdf_collect_section_candidates([header_text], report, source=f"header_block_page_{page_index + 1}")
+                section_candidates.extend(header_sections)
+                _remember_sections(header_sections)
+            header_region_sections = _pdf_collect_section_candidates(header_lines, report, source="header_region")
+            section_candidates.extend(header_region_sections)
+            _remember_sections(header_region_sections)
             if header_text:
                 header_samples = report.get("header_text_samples") or []
                 excerpt = _pdf_excerpt(header_text)
@@ -2094,12 +2107,12 @@ def parse_pdf_to_slots(path: str, stats: Optional[Dict[str, object]] = None) -> 
             page_lines = [l for l in page_text.splitlines() if l.strip()]
             title_lines = page_lines[: min(20, len(page_lines))]
             if title_lines:
-                section_candidates.extend(
-                    _pdf_collect_section_candidates(["\n".join(title_lines)], report, source=f"title_block_page_{page_index + 1}")
-                )
-            section_candidates.extend(
-                _pdf_collect_section_candidates(title_lines, report, source=f"title_page_{page_index + 1}")
-            )
+                title_block_sections = _pdf_collect_section_candidates(["\n".join(title_lines)], report, source=f"title_block_page_{page_index + 1}")
+                section_candidates.extend(title_block_sections)
+                _remember_sections(title_block_sections)
+            title_page_sections = _pdf_collect_section_candidates(title_lines, report, source=f"title_page_{page_index + 1}")
+            section_candidates.extend(title_page_sections)
+            _remember_sections(title_page_sections)
             if title_lines:
                 title_samples = report.get("title_text_samples") or []
                 for title_line in title_lines[:3]:
@@ -2108,19 +2121,20 @@ def parse_pdf_to_slots(path: str, stats: Optional[Dict[str, object]] = None) -> 
                         title_samples.append(excerpt)
                 report["title_text_samples"] = title_samples[:PDF_DIAG_SAMPLE_CAP]
 
-            section_candidates.extend(
-                _pdf_collect_section_candidates(page_lines, report, source=f"nearby_label_page_{page_index + 1}", require_context=True)
-            )
+            nearby_sections = _pdf_collect_section_candidates(page_lines, report, source=f"nearby_label_page_{page_index + 1}", require_context=True)
+            section_candidates.extend(nearby_sections)
+            _remember_sections(nearby_sections)
 
             table_text_samples = report.get("faculty_text_samples") or []
             if not section_candidates:
-                section_candidates.extend(
-                    _pdf_collect_section_candidates(page_lines, report, source=f"page_body_fallback_page_{page_index + 1}")
-                )
+                fallback_sections = _pdf_collect_section_candidates(page_lines, report, source=f"page_body_fallback_page_{page_index + 1}")
+                section_candidates.extend(fallback_sections)
+                _remember_sections(fallback_sections)
             _pdf_collect_rejected_candidates(page_text, report)
             if semester_hint is None:
                 semester_hint = _semester_from_text(page_text)
             for info in tables:
+                info["page_index"] = page_index
                 rows = _pdf_table_extract_matrix(info["table"])
                 if not rows:
                     continue
@@ -2138,26 +2152,31 @@ def parse_pdf_to_slots(path: str, stats: Optional[Dict[str, object]] = None) -> 
                             table_text_samples.append(row_text)
                 if row_samples:
                     report["faculty_text_samples"] = table_text_samples[:PDF_DIAG_SAMPLE_CAP]
-                    section_candidates.extend(
-                        _pdf_collect_section_candidates(row_samples, report, source=f"table_rows_page_{page_index + 1}")
-                    )
+                    table_row_sections = _pdf_collect_section_candidates(row_samples, report, source=f"table_rows_page_{page_index + 1}")
+                    section_candidates.extend(table_row_sections)
+                    _remember_sections(table_row_sections)
                 header_idx, header_cells = _pdf_locate_timetable_header(rows)
                 info["header_idx"] = header_idx
                 info["header_cells"] = header_cells
                 if _pdf_is_faculty_table_rows(rows):
                     if row_samples:
-                        section_candidates.extend(
-                            _pdf_collect_section_candidates(row_samples, report, source=f"faculty_table_page_{page_index + 1}")
-                        )
+                        faculty_row_sections = _pdf_collect_section_candidates(row_samples, report, source=f"faculty_table_page_{page_index + 1}")
+                        section_candidates.extend(faculty_row_sections)
+                        _remember_sections(faculty_row_sections)
                     faculty_tables.append(info)
+                    faculty_tables_by_page.setdefault(page_index, []).append(info)
                     continue
                 if header_idx >= 0:
                     if row_samples:
-                        section_candidates.extend(
-                            _pdf_collect_section_candidates(row_samples, report, source=f"timetable_table_page_{page_index + 1}")
-                        )
+                        timetable_row_sections = _pdf_collect_section_candidates(row_samples, report, source=f"timetable_table_page_{page_index + 1}")
+                        section_candidates.extend(timetable_row_sections)
+                        _remember_sections(timetable_row_sections)
                     timetable_tables.append(info)
+                    timetable_tables_by_page.setdefault(page_index, []).append(info)
                     continue
+
+            if page_sections:
+                page_sections_by_index[page_index] = page_sections
 
     unique_sections = []
     for section in section_candidates:
@@ -2170,18 +2189,8 @@ def parse_pdf_to_slots(path: str, stats: Optional[Dict[str, object]] = None) -> 
             report["validation_errors"].append(f"Header text excerpt: {report['header_text_samples'][0]}")
         raise TimetablePDFValidationError("Section name not detected. Ensure the PDF header includes the section (e.g., CSE-A).")
 
-    if TIMETABLE_SINGLE_SECTION_ONLY and len(unique_sections) > 1:
-        preview = ", ".join(unique_sections[:4])
-        suffix = "..." if len(unique_sections) > 4 else ""
-        report["validation_errors"].append(
-            f"Multiple sections detected ({preview}{suffix})."
-        )
-        raise TimetablePDFValidationError(
-            f"Multiple sections detected in PDF ({preview}{suffix}). Please upload one section per PDF."
-        )
-
     section_name = unique_sections[0] if unique_sections else (base_section or base_name)
-    branch_name = _section_branch_name(section_name, base_name)
+    report["detected_sections"] = unique_sections[:PDF_DIAG_SAMPLE_CAP]
     report["detected_section"] = section_name
     logger.debug(
         "PDF section resolved raw=%s normalized=%s source=%s attempts=%d",
@@ -2212,18 +2221,30 @@ def parse_pdf_to_slots(path: str, stats: Optional[Dict[str, object]] = None) -> 
     if faculty_entries:
         report["faculty_mappings_sample"] = faculty_entries[:PDF_DIAG_SAMPLE_CAP]
 
-        if TIMETABLE_SINGLE_SECTION_ONLY and len(unique_sections) > 1:
-            report["validation_errors"].append("Multiple section headers detected. Upload one section per PDF only.")
-            raise TimetablePDFValidationError("Multiple section headers detected. Upload one section per PDF only.")
-
     faculty_map = _faculty_lookup(faculty_entries)
-    best_table = max(
-        timetable_tables,
-        key=lambda t: _pdf_score_timetable_table(t.get("rows") or [], t.get("header_idx", -1)),
-    )
+    last_section_name = section_name
+    emitted_slots = 0
+    for page_index in page_order:
+        page_timetable_tables = timetable_tables_by_page.get(page_index) or []
+        if not page_timetable_tables:
+            continue
+        page_sections = page_sections_by_index.get(page_index) or []
+        if page_sections:
+            last_section_name = page_sections[0]
+        page_section_name = last_section_name or section_name or base_name
+        page_branch_name = _section_branch_name(page_section_name, base_name)
+        page_faculty_entries: List[Dict] = []
+        for table_info in faculty_tables_by_page.get(page_index) or []:
+            page_faculty_entries.extend(_pdf_parse_faculty_rows(table_info.get("rows") or []))
+        page_faculty_map = _faculty_lookup(page_faculty_entries) if page_faculty_entries else faculty_map
+        if page_faculty_entries:
+            _merge_faculty_entries(page_faculty_map, faculty_entries)
+        for table_info in page_timetable_tables:
+            for slot in _pdf_parse_timetable_table(table_info, page_section_name, page_branch_name, semester_hint, page_faculty_map, report):
+                emitted_slots += 1
+                yield slot
 
-    for slot in _pdf_parse_timetable_table(best_table, section_name, branch_name, semester_hint, faculty_map, report):
-        yield slot
+    report["parsed_slot_count"] = emitted_slots
 
 
 def _row_exists(db, table: str, where_clause: str, params: tuple) -> bool:
@@ -3603,13 +3624,6 @@ def register_routes(app, db_getter=None):
                 elif ext in (".pdf",) and pdfplumber is not None:
                     pdf_stats = {}
                     slots_iter = parse_pdf_to_slots(dest, stats=pdf_stats)
-                    detected_section = (pdf_stats.get("detected_section") or "").strip()
-                    if TIMETABLE_SINGLE_SECTION_ONLY and not detected_section:
-                        flash("No section header detected in the PDF. Upload one section per PDF (example: CSE-A).", "error")
-                        return redirect(url_for("timetable_manage"))
-                    if detected_section:
-                        flash(f"Detected section: {detected_section}", "info")
-                        logger.info("timetable import detected section=%s source=pdf", detected_section)
                 else:
                     flash("Unsupported file type or missing parser dependencies.", "error")
                     return redirect(url_for("timetable_manage"))
@@ -3624,6 +3638,16 @@ def register_routes(app, db_getter=None):
                     i_c.get("inserted", 0),
                     i_c.get("skipped_total", 0),
                 )
+                if ext == ".pdf":
+                    detected_sections = [section for section in (pdf_stats.get("detected_sections") or []) if section]
+                    if detected_sections:
+                        if len(detected_sections) == 1:
+                            flash(f"Detected section: {detected_sections[0]}", "info")
+                        else:
+                            preview_sections = ", ".join(detected_sections[:6])
+                            suffix = "..." if len(detected_sections) > 6 else ""
+                            flash(f"Detected sections: {preview_sections}{suffix}", "info")
+                        logger.info("timetable import detected sections=%s source=pdf", detected_sections)
                 if int(i_c.get("processed", 0) or 0) == 0:
                     logger.warning("Timetable import parsed zero rows from file=%s ext=%s", filename, ext)
                     if ext == ".pdf":
