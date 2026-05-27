@@ -138,17 +138,20 @@
             </thead>
             <tbody>
                 {% for row in entries %}
+                {% set has_visible_data = row.get('day') or row.get('start_time') or row.get('end_time') or row.get('branch_name') or row.get('branch') or row.get('section') or row.get('semester') or row.get('subject_name') or row.get('faculty_name') or row.get('room') %}
+                {% if has_visible_data %}
                 <tr>
-                    <td>{{ row.get('day') or '-' }}</td>
-                    <td>{{ row.get('start_time') or '-' }}{% if row.get('end_time') %} - {{ row.get('end_time') }}{% endif %}</td>
-                    <td>{{ row.get('branch') or row.get('branch_name') or row.get('branch_id') or '-' }}</td>
-                    <td>{{ row.get('section') or '-' }}</td>
-                    <td>{{ row.get('semester') or '-' }}</td>
-                    <td>{{ row.get('subject_name') or '-' }}</td>
-                    <td>{{ row.get('faculty_name') or '-' }}</td>
-                    <td>{{ row.get('room') or '-' }}</td>
-                    <td>{{ 'Lab' if row.get('is_lab') else 'Theory' }}</td>
+                    <td>{{ row.get('day') or '' }}</td>
+                    <td>{{ row.get('start_time') or '' }}{% if row.get('end_time') %} - {{ row.get('end_time') }}{% endif %}</td>
+                    <td>{{ row.get('branch_name') or row.get('branch') or '' }}</td>
+                    <td>{{ row.get('section') or '' }}</td>
+                    <td>{{ row.get('semester') or '' }}</td>
+                    <td>{{ row.get('subject_name') or '' }}</td>
+                    <td>{{ row.get('faculty_name') or '' }}</td>
+                    <td>{{ row.get('room') or '' }}</td>
+                    <td>{% if row.get('is_lab') is not none %}{{ 'Lab' if row.get('is_lab') else 'Theory' }}{% endif %}</td>
                 </tr>
+                {% endif %}
                 {% endfor %}
             </tbody>
         </table>

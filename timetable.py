@@ -2800,6 +2800,8 @@ def import_slots_streaming(db, slots_iter: Iterable[Dict]):
             "is_lab": int(bool(slot_in.get("is_lab"))),
             "room": _clean_text(slot_in.get("room")),
         }
+        print("NORMALIZED_ROW", row)
+        logger.info("Streaming normalized row %s: %s", row_index, row)
         raw_counters["processed"] += 1
 
         # If the row is completely empty, skip immediately
@@ -3245,6 +3247,7 @@ def import_slots_normalized(db, slots: List[Dict]):
                 "is_lab": is_lab,
                 "room": room,
             }
+            print("NORMALIZED_ROW", normalized_row)
             logger.info("Processing normalized row %s: raw=%s normalized=%s", row_index, s, normalized_row)
             if not _valid_slot_row({"branch": bname, "section": sec, "day": day, "start_time": start, "end_time": end, "subject_name": subj_name}):
                 counters["skipped_total"] += 1
@@ -3261,11 +3264,65 @@ def import_slots_normalized(db, slots: List[Dict]):
                         logger.exception("Failed to write normalized skipped preview line")
                 skipped_rows_omitted = _append_skipped_sample(skipped_rows, skipped_rows_omitted, {"index": row_index, "raw": s, "normalized": normalized_row, "reason": reason})
                 continue
+
+                branch_key = bname.strip().lower()
+                branch_id = branch_cache.get(branch_key)
+                if branch_id is None:
+                    branch_id = _resolve_or_create_branch_id(db, bname, branch_cache)
+                    branch_cache[branch_key] = branch_id
+                if branch_id is None:
+                    counters["skipped_total"] += 1
+                    counters["skipped_branch"] += 1
+                    reason = "missing_branch"
+                    logger.info("import_slots_normalized skipped unresolved branch for row %s: %s", row_index, normalized_row)
+                    if preview_written < PREVIEW_ROW_CAP:
+                        try:
+                            with open(preview_path, "a", encoding="utf-8") as pf:
+                                pf.write(json.dumps({"index": row_index, "raw": s, "normalized": normalized_row, "reason": reason}, default=str) + "\n")
+                            preview_written += 1
+                        except Exception:
+                            logger.exception("Failed to write normalized branch preview line")
+                    skipped_rows_omitted = _append_skipped_sample(skipped_rows, skipped_rows_omitted, {"index": row_index, "raw": s, "normalized": normalized_row, "reason": reason})
+                    continue
+
+                subject_id = _resolve_subject_id(subj_name, subject_cache, subject_index)
+                if subj_name and subject_id is None:
+                    counters["skipped_unresolved_subject"] += 1
+                    counters["missing_subjects"] += 1
+
+                teacher_id = _resolve_teacher_id(fac_name, teacher_cache, teacher_index)
+                if fac_name and teacher_id is None:
+                    counters["skipped_unresolved_teacher"] += 1
+                    counters["missing_teachers"] += 1
+
+                entry_row = {
+                    "branch_id": branch_id,
+                    "section": sec,
+                    "semester": sem,
+                    "day": day,
+                    "start_time": start,
+                    "end_time": end,
+                    "subject_id": subject_id,
+                    "teacher_id": teacher_id,
+                    "is_lab": is_lab,
+                    "room": room,
+                }
             try:
+                logger.info(
+                    "Normalized values | branch=%s subject=%s faculty=%s section=%s day=%s time=%s-%s room=%s",
+                    bname,
+                    subj_name,
+                    fac_name,
+                    sec,
+                    day,
+                    start,
+                    end,
+                    room,
+                )
                 _db_execute(
                     db,
                     _insert_ignore_sql(db, "timetable_entries", ["branch_id", "section", "semester", "day", "start_time", "end_time", "subject_id", "teacher_id", "is_lab", "room"]),
-                    (row['branch_id'], row['section'], row['semester'], row['day'], row['start_time'], row['end_time'], row['subject_id'], row['teacher_id'], row['is_lab'], row['room']),
+                    (entry_row['branch_id'], entry_row['section'], entry_row['semester'], entry_row['day'], entry_row['start_time'], entry_row['end_time'], entry_row['subject_id'], entry_row['teacher_id'], entry_row['is_lab'], entry_row['room']),
                 )
                 counters["inserted"] += 1
                 inserted_since_commit += 1
@@ -3298,31 +3355,6 @@ def import_slots_normalized(db, slots: List[Dict]):
                 skipped_rows_omitted = _append_skipped_sample(skipped_rows, skipped_rows_omitted, {"index": row_index, "raw": s, "normalized": normalized_row, "reason": "insert_exception"})
                 raise
 
-            teacher_id = None
-            try:
-                row = _db_execute(db, "SELECT id FROM teachers WHERE LOWER(name)=LOWER(%s) LIMIT 1", (fac_name,)).fetchone()
-                teacher_id = row[0] if row and not hasattr(row, 'keys') else (row['id'] if row else None)
-            except Exception:
-                teacher_id = None
-
-            if branch_id is None:
-                branch_id = _resolve_or_create_branch_id(db, bname or sec or row.get("branch", ""), branch_cache)
-                branch_cache[branch_key] = branch_id
-            if branch_id is None:
-                counters["skipped_total"] += 1
-                counters["skipped_branch"] += 1
-                reason = "missing_branch"
-                logger.info("import_slots_normalized skipped unresolved branch for row %s: %s", row_index, normalized_row)
-                skipped_rows_omitted = _append_skipped_sample(skipped_rows, skipped_rows_omitted, {"index": row_index, "raw": s, "normalized": normalized_row, "reason": reason})
-                continue
-
-            if subject_id is None:
-                counters["skipped_unresolved_subject"] += 1
-                counters["missing_subjects"] += 1
-            if teacher_id is None:
-                counters["skipped_unresolved_teacher"] += 1
-                counters["missing_teachers"] += 1
-
             if subject_id is None or teacher_id is None:
                 logger.info(
                     "import_slots_normalized inserting with unresolved subject/teacher branch=%s subject=%s teacher=%s row_index=%s",
@@ -3332,31 +3364,24 @@ def import_slots_normalized(db, slots: List[Dict]):
                     row_index,
                 )
 
-            row = {
-                'branch_id': branch_id,
-                'section': sec,
-                'semester': sem,
-                'day': day,
-                'start_time': start or "",
-                'end_time': end or "",
-                'subject_id': subject_id,
-                'teacher_id': teacher_id,
-                'is_lab': is_lab,
-                'room': room,
-            }
-            logger.info("import_slots_normalized inserting (row_index=%s): %s", row_index, row)
+            if subject_id is None and subj_name:
+                logger.info("import_slots_normalized missing subject mapping row_index=%s subject=%s", row_index, subj_name)
+            if teacher_id is None and fac_name:
+                logger.info("import_slots_normalized missing teacher mapping row_index=%s faculty=%s", row_index, fac_name)
+
+            logger.info("import_slots_normalized inserting (row_index=%s): %s", row_index, entry_row)
             duplicate_where = "COALESCE(CAST(branch_id AS TEXT), '') = COALESCE(CAST(%s AS TEXT), '') AND COALESCE(section, '') = COALESCE(%s, '') AND COALESCE(CAST(semester AS TEXT), '') = COALESCE(CAST(%s AS TEXT), '') AND COALESCE(day, '') = COALESCE(%s, '') AND COALESCE(start_time, '') = COALESCE(%s, '') AND COALESCE(end_time, '') = COALESCE(%s, '') AND COALESCE(CAST(subject_id AS TEXT), '') = COALESCE(CAST(%s AS TEXT), '') AND COALESCE(CAST(teacher_id AS TEXT), '') = COALESCE(CAST(%s AS TEXT), '') AND COALESCE(room, '') = COALESCE(%s, '')"
             try:
                 if _row_exists(
                     db,
                     "timetable_entries",
                     duplicate_where,
-                    (row['branch_id'], row['section'], row['semester'], row['day'], row['start_time'], row['end_time'], row['subject_id'], row['teacher_id'], row['room']),
+                    (entry_row['branch_id'], entry_row['section'], entry_row['semester'], entry_row['day'], entry_row['start_time'], entry_row['end_time'], entry_row['subject_id'], entry_row['teacher_id'], entry_row['room']),
                 ):
                     counters["skipped_total"] += 1
                     counters["skipped_duplicate"] += 1
                     reason = "duplicate"
-                    logger.info("import_slots_normalized skipped duplicate row %s: %s", row_index, row)
+                    logger.info("import_slots_normalized skipped duplicate row %s: %s", row_index, entry_row)
                     skipped_rows_omitted = _append_skipped_sample(skipped_rows, skipped_rows_omitted, {"index": row_index, "raw": s, "normalized": normalized_row, "reason": reason})
                     continue
             except Exception:
@@ -3367,19 +3392,10 @@ def import_slots_normalized(db, slots: List[Dict]):
                 raise
 
             try:
-                logger.info(
-                    "Normalized values | subject=%s teacher=%s section=%s day=%s time=%s-%s",
-                    subj_name,
-                    fac_name,
-                    sec,
-                    day,
-                    start,
-                    end,
-                )
                 _db_execute(
                     db,
                     _insert_ignore_sql(db, "timetable_entries", ["branch_id", "section", "semester", "day", "start_time", "end_time", "subject_id", "teacher_id", "is_lab", "room"]),
-                    (row['branch_id'], row['section'], row['semester'], row['day'], row['start_time'], row['end_time'], row['subject_id'], row['teacher_id'], row['is_lab'], row['room']),
+                    (entry_row['branch_id'], entry_row['section'], entry_row['semester'], entry_row['day'], entry_row['start_time'], entry_row['end_time'], entry_row['subject_id'], entry_row['teacher_id'], entry_row['is_lab'], entry_row['room']),
                 )
                 counters["inserted"] += 1
             except Exception:
@@ -3764,10 +3780,30 @@ def register_routes(app, db_getter=None):
         try:
             if total_count > 0:
                 offset = max(0, (page - 1) * PAGE_SIZE)
-                # If a subject/teacher couldn't be resolved to a canonical id, fall
-                # back to the original raw text stored in timetable_slots so the
-                # management UI shows readable values instead of blanks.
-                sql = f"SELECT te.day, te.start_time, te.end_time, te.section, COALESCE(CAST(te.semester AS TEXT), '') AS semester, te.room, te.is_lab, COALESCE(s.name, (SELECT subject_name FROM timetable_slots ts WHERE ts.section = te.section AND ts.day = te.day AND ts.start_time = te.start_time LIMIT 1), '') AS subject_name, COALESCE(t.name, (SELECT faculty_name FROM timetable_slots ts WHERE ts.section = te.section AND ts.day = te.day AND ts.start_time = te.start_time LIMIT 1), '') AS faculty_name, COALESCE(b.name,'') AS branch FROM timetable_entries te LEFT JOIN subjects s ON te.subject_id = s.id LEFT JOIN teachers t ON te.teacher_id = t.id LEFT JOIN branches b ON te.branch_id = b.id {where_sql} ORDER BY te.day, te.start_time LIMIT %s OFFSET %s"
+                visible_clause = "AND NOT (\n                        COALESCE(te.day, '') = ''\n                        AND COALESCE(te.start_time, '') = ''\n                        AND COALESCE(te.end_time, '') = ''\n                        AND COALESCE(te.section, '') = ''\n                        AND COALESCE(CAST(te.semester AS TEXT), '') = ''\n                        AND COALESCE(te.room, '') = ''\n                        AND COALESCE(s.name, '') = ''\n                        AND COALESCE(t.name, '') = ''\n                        AND COALESCE(b.name, '') = ''\n                      )"
+                if not where_sql:
+                    visible_clause = visible_clause.replace("AND NOT", "WHERE NOT", 1)
+                sql = f"""
+                    SELECT
+                        te.day,
+                        te.start_time,
+                        te.end_time,
+                        te.section,
+                        te.semester,
+                        te.room,
+                        te.is_lab,
+                        COALESCE(s.name, '') AS subject_name,
+                        COALESCE(t.name, '') AS faculty_name,
+                        COALESCE(b.name, '') AS branch_name
+                    FROM timetable_entries te
+                    LEFT JOIN subjects s ON te.subject_id = s.id
+                    LEFT JOIN teachers t ON te.teacher_id = t.id
+                    LEFT JOIN branches b ON te.branch_id = b.id
+                    {where_sql}
+                                        {visible_clause}
+                    ORDER BY te.day, te.start_time
+                    LIMIT %s OFFSET %s
+                """
                 qparams = list(params) + [PAGE_SIZE, offset]
                 entries = _db_execute(db, sql, tuple(qparams)).fetchall()
                 entries = [dict(r) for r in entries]
@@ -3821,7 +3857,8 @@ def register_routes(app, db_getter=None):
             data = _row_to_dict(value)
             for key in ("id", "created_at"):
                 data.pop(key, None)
-            return any(_clean_text(v) for v in data.values())
+            semantic_keys = ("day", "start_time", "end_time", "branch", "section", "semester", "subject_name", "faculty_name", "room")
+            return any(_clean_text(data.get(key)) for key in semantic_keys)
 
         visible_entries = []
         for row in entries:
