@@ -33,7 +33,7 @@ BATCH_INSERT_SIZE = int(os.environ.get("TIMETABLE_BATCH_SIZE", 5))
 PREVIEW_ROW_CAP = int(os.environ.get("TIMETABLE_PREVIEW_CAP", 0))
 SKIPPED_ROW_SAMPLE_CAP = int(os.environ.get("TIMETABLE_SKIPPED_SAMPLE_CAP", 5))
 TIMETABLE_MAX_TABLES = int(os.environ.get("TIMETABLE_MAX_TABLES", 1))
-TIMETABLE_SINGLE_SECTION_ONLY = os.environ.get("TIMETABLE_SINGLE_SECTION_ONLY", "true").strip().lower() in ("1", "true", "yes", "on")
+TIMETABLE_SINGLE_SECTION_ONLY = os.environ.get("TIMETABLE_SINGLE_SECTION_ONLY", "false").strip().lower() in ("1", "true", "yes", "on")
 ENABLE_IMPORT_TRACEMALLOC = os.environ.get("TIMETABLE_ENABLE_TRACEMALLOC", "false").strip().lower() in ("1", "true", "yes", "on")
 PDF_DIAG_SAMPLE_CAP = int(os.environ.get("TIMETABLE_PDF_DIAG_SAMPLE_CAP", 12))
 PDF_TABLE_SETTINGS = (
@@ -3579,25 +3579,8 @@ def register_routes(app, db_getter=None):
                 slots_iter = None
                 pdf_stats = None
                 if ext in (".docx",) and docx is not None:
-                    summary = scan_docx_structure(dest, max_tables=TIMETABLE_MAX_TABLES + 1)
+                    summary = scan_docx_structure(dest, max_tables=None)
                     section_names = summary.get("section_names") or []
-                    if summary.get("table_count", 0) > TIMETABLE_MAX_TABLES:
-                        flash(
-                            f"This DOCX contains {summary.get('table_count')} tables. Only one table/section per DOCX is allowed (examples: CSE-A, CSE-B, CSM-B).",
-                            "error",
-                        )
-                        return redirect(url_for("timetable_manage"))
-                    if TIMETABLE_SINGLE_SECTION_ONLY and len(section_names) > 1:
-                        preview = ", ".join(section_names[:4])
-                        suffix = "..." if len(section_names) > 4 else ""
-                        flash(
-                            f"Multiple sections detected ({preview}{suffix}). Upload one section per DOCX only.",
-                            "error",
-                        )
-                        return redirect(url_for("timetable_manage"))
-                    if TIMETABLE_SINGLE_SECTION_ONLY and not section_names:
-                        flash("No section header detected. The DOCX must include a section header like CSE-A.", "error")
-                        return redirect(url_for("timetable_manage"))
                     direct_tables = int(summary.get("direct_timetable_tables", 0) or 0)
                     legacy_timetable_tables = int(summary.get("timetable_tables", 0) or 0)
                     if direct_tables == 0 and legacy_timetable_tables == 0:
@@ -3609,8 +3592,8 @@ def register_routes(app, db_getter=None):
                     if direct_tables > 0:
                         slots_iter = iter_docx_section_slots(
                             dest,
-                            single_section_only=True,
-                            max_tables=TIMETABLE_MAX_TABLES,
+                            single_section_only=False,
+                            max_tables=None,
                         )
                     else:
                         if summary.get("faculty_tables", 0) == 0:
@@ -3618,8 +3601,8 @@ def register_routes(app, db_getter=None):
                             return redirect(url_for("timetable_manage"))
                         slots_iter = iter_docx_section_slots(
                             dest,
-                            single_section_only=TIMETABLE_SINGLE_SECTION_ONLY,
-                            max_tables=TIMETABLE_MAX_TABLES,
+                            single_section_only=False,
+                            max_tables=None,
                         )
                 elif ext in (".pdf",) and pdfplumber is not None:
                     pdf_stats = {}
