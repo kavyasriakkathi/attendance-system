@@ -231,6 +231,98 @@ def _clean_text(value) -> str:
     return (str(value).strip() if value is not None else "")
 
 
+def _normalize_display_text(value: str) -> str:
+    text = _clean_text(value)
+    if not text:
+        return ""
+    text = re.sub(r"[‐‑‒–—―]", "-", text)
+    text = re.sub(r"\s+", " ", text)
+    text = text.replace("_", " ")
+    text = text.strip(" ,;:/|-")
+    if not text:
+        return ""
+    parts = []
+    for token in text.split(" "):
+        if not token:
+            continue
+        if re.fullmatch(r"[A-Z0-9]{2,6}", token):
+            parts.append(token.upper())
+            continue
+        if re.fullmatch(r"[A-Z]\.", token):
+            parts.append(token.upper())
+            continue
+        if "-" in token:
+            parts.append("-".join(piece[:1].upper() + piece[1:].lower() if piece and not re.fullmatch(r"[A-Z0-9]{2,6}", piece) else piece.upper() for piece in token.split("-")))
+            continue
+        parts.append(token[:1].upper() + token[1:].lower())
+    return re.sub(r"\s+", " ", " ".join(parts)).strip()
+
+
+def _normalize_timetable_branch_name(value: str, row_text: str = "") -> str:
+    text = _clean_text(value)
+    if not text:
+        text = _clean_text(row_text)
+    if not text or _contains_blocked_timetable_text(text):
+        return ""
+    text = re.sub(r"[‐‑‒–—―]", "-", text)
+    text = re.sub(r"[\s_/]+", " ", text).strip()
+    match = re.search(r"\b(CSM|CSE|ECE|EEE|IT|MECH|CIVIL|AIML|AIDS|DS)\b", text, flags=re.IGNORECASE)
+    if match:
+        return match.group(1).upper()
+    normalized = _normalize_academic_department_code(text.replace(" ", ""))
+    if normalized:
+        return normalized
+    return ""
+
+
+def _normalize_timetable_section_name(value: str, branch_value: str = "", row_text: str = "") -> str:
+    text = _clean_text(value)
+    if not text:
+        text = _clean_text(row_text)
+    if not text or _contains_blocked_timetable_text(text):
+        return ""
+    text = re.sub(r"[‐‑‒–—―]", "-", text)
+    text = re.sub(r"[\s_/]+", "-", text)
+    text = re.sub(r"-+", "-", text).strip("-")
+    if not text:
+        return ""
+
+    match = re.fullmatch(r"(CSM|CSE|ECE|EEE|IT|MECH|CIVIL|AIML|AIDS|DS)[- ]([A-Z0-9]{1,4})", text, flags=re.IGNORECASE)
+    if match:
+        return f"{match.group(1).upper()}-{match.group(2).upper()}"
+
+    branch = _normalize_timetable_branch_name(branch_value)
+    if branch and re.fullmatch(r"[A-Z0-9]{1,4}", text, flags=re.IGNORECASE):
+        return f"{branch}-{text.upper()}"
+    if branch and re.fullmatch(r"(?:I|II|III|IV|V|VI|VII|VIII|IX|X)(?:-\d{1,2})?", text, flags=re.IGNORECASE):
+        return f"{branch}-{text.upper()}"
+
+    generic = re.fullmatch(r"([A-Z0-9]{1,8})", text, flags=re.IGNORECASE)
+    if generic:
+        return generic.group(1).upper()
+    return text.upper()
+
+
+def _normalize_timetable_faculty_name(value: str) -> str:
+    text = _clean_text(value)
+    if not text or _contains_blocked_timetable_text(text):
+        return ""
+    text = re.sub(r"[‐‑‒–—―]", "-", text)
+    text = re.sub(r"[\s_/]+", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return _normalize_display_text(text)
+
+
+def _normalize_timetable_lab_theory(value: str, row_text: str = "") -> str:
+    text = _clean_text(value)
+    haystack = f"{text} {row_text}".strip()
+    if _row_has_token(haystack, "lab", "practical"):
+        return "LAB"
+    if _row_has_token(haystack, "theory"):
+        return "THEORY"
+    return _normalize_display_text(text)
+
+
 def _dup_key(*parts) -> str:
     return "|".join(_clean_text(p) for p in parts)
 
@@ -362,6 +454,7 @@ def iter_docx_table_slots(path: str) -> Iterator[Dict]:
     skipped_rows = 0
     failed_rows = 0
     skip_tokens = _DOCX_IGNORE_ROW_TOKENS
+    seen_slots = set()
     for table_index, table in enumerate(doc.tables):
         if not table.rows:
             continue
@@ -371,24 +464,34 @@ def iter_docx_table_slots(path: str) -> Iterator[Dict]:
             row_text = " | ".join(values)
             row_map = {headers[i]: values[i] for i in range(min(len(headers), len(values))) if headers[i]}
             try:
-                normalized = _normalize_slot_row(row_map, row_text=row_text)
+                normalized = _normalize_timetable_row(_normalize_slot_row(row_map, row_text=row_text), row_text=row_text)
                 subject_raw = normalized["subject_name"]
                 faculty_raw = normalized["faculty_name"]
                 if _row_has_token(subject_raw, *skip_tokens) or _row_has_token(faculty_raw, *skip_tokens) or _row_has_token(row_text, *skip_tokens):
+                    logger.info("skipped_empty_row table=%s row=%s reason=blocked_tokens text=%s", table_index, row_index, row_text)
                     skipped_rows += 1
                     continue
                 if not _valid_slot_row(normalized):
+                    logger.info("skipped_empty_row table=%s row=%s reason=invalid_slot slot=%s text=%s", table_index, row_index, normalized, row_text)
                     skipped_rows += 1
                     continue
                 subjects = _split_subjects(subject_raw)
                 if not subjects:
+                    logger.info("skipped_empty_row table=%s row=%s reason=no_subjects text=%s", table_index, row_index, row_text)
                     skipped_rows += 1
                     continue
                 for subject in subjects:
                     slot = dict(normalized)
                     slot["subject_name"] = _clean_text(subject)
                     slot["is_lab"] = int(bool(_row_has_token(subject, "lab", "practical") or normalized["is_lab"]))
+                    dup = _timetable_semantic_key(slot)
+                    if dup in seen_slots:
+                        logger.info("skipped_duplicate_row table=%s row=%s dup=%s slot=%s", table_index, row_index, dup, slot)
+                        skipped_rows += 1
+                        continue
+                    seen_slots.add(dup)
                     if not _valid_slot_row(slot):
+                        logger.info("skipped_empty_row table=%s row=%s reason=invalid_split_slot slot=%s", table_index, row_index, slot)
                         skipped_rows += 1
                         continue
                     parsed_rows += 1
@@ -472,6 +575,7 @@ def iter_docx_grid_slots(path: str) -> Iterator[Dict]:
                         "is_lab": int(bool(_row_has_token(s_text, "lab", "practical") or _row_has_token(cell_text, "lab", "practical"))),
                         "room": "",
                     }
+                    slot = _normalize_timetable_row(slot, row_text=cell_text)
                     if _valid_slot_row(slot):
                         emitted += 1
                         yield slot
@@ -572,6 +676,13 @@ def _docx_expand_rows(table_elem) -> List[Dict]:
                 expanded.append(text)
                 logical_col += 1
         if row_cells:
+            if previous_expanded:
+                target_len = max(len(expanded), len(previous_expanded))
+                if len(expanded) < target_len:
+                    expanded.extend([""] * (target_len - len(expanded)))
+                for idx in range(min(len(expanded), len(previous_expanded))):
+                    if not expanded[idx] and previous_expanded[idx]:
+                        expanded[idx] = previous_expanded[idx]
             rows.append({"cells": row_cells, "expanded": expanded})
             previous_expanded = expanded
     return rows
@@ -645,7 +756,32 @@ def _normalize_timetable_subject_name(value: str) -> str:
     }
     if normalized_key in alias_map:
         return alias_map[normalized_key]
-    return text
+    text = re.sub(r"[‐‑‒–—―]", "-", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return _normalize_display_text(text)
+
+
+def _normalize_timetable_row(row: Dict[str, str], row_text: str = "", previous: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    normalized = {key: _clean_text(value) for key, value in row.items()}
+    normalized["branch"] = _normalize_timetable_branch_name(normalized.get("branch"), row_text=row_text)
+    normalized["section"] = _normalize_timetable_section_name(normalized.get("section"), branch_value=normalized.get("branch"), row_text=row_text)
+    if not normalized["branch"] and normalized["section"] and "-" in normalized["section"]:
+        normalized["branch"] = _normalize_timetable_branch_name(normalized["section"].split("-", 1)[0], row_text=row_text)
+    normalized["semester"] = _safe_int(normalized.get("semester") or _semester_from_text(f"{normalized.get('semester', '')} {row_text}"))
+    normalized["day"] = _normalize_display_text(normalized.get("day"))
+    start_time, end_time = _split_time_value(normalized.get("start_time"), normalized.get("end_time"))
+    if not start_time and not end_time:
+        start_time, end_time = _split_time_range(normalized.get("time") or row_text)
+    normalized["start_time"] = start_time
+    normalized["end_time"] = end_time
+    normalized["subject_name"] = _normalize_timetable_subject_name(normalized.get("subject_name") or row.get("subject_name"))
+    normalized["faculty_name"] = _normalize_timetable_faculty_name(normalized.get("faculty_name") or normalized.get("faculty") or row.get("faculty_name"))
+    normalized["room"] = _normalize_display_text(normalized.get("room"))
+    normalized["lab_theory"] = _normalize_timetable_lab_theory(normalized.get("lab_theory") or row.get("lab_theory") or row.get("type") or row.get("category"), row_text=row_text)
+    normalized["is_lab"] = int(bool(normalized.get("is_lab")) or _row_has_token(normalized["lab_theory"], "lab", "practical") or _row_has_token(row_text, "lab", "practical") or _row_has_token(normalized["subject_name"], "lab", "practical"))
+    if previous:
+        normalized = _merge_timetable_row_values(normalized, previous)
+    return normalized
 
 
 def _merge_timetable_row_values(current: Dict[str, str], previous: Optional[Dict[str, str]]) -> Dict[str, str]:
@@ -758,6 +894,7 @@ def _docx_parse_direct_rows(table_rows: List[Dict], section_state: Dict, debug_j
         "room": _clean_text(section_state.get("room")),
     }
     previous_slot: Optional[Dict[str, str]] = None
+    seen_slots = section_state.get("seen_slots") or set()
 
     for row_index, row in enumerate(table_rows[header_idx + 1 :], start=header_idx + 1):
         expanded = row.get("expanded") or []
@@ -816,12 +953,14 @@ def _docx_parse_direct_rows(table_rows: List[Dict], section_state: Dict, debug_j
             "faculty_name": faculty_name,
             "is_lab": int(bool(_row_has_token(lab_text, "lab") or _row_has_token(subject_name, "lab", "practical") or _row_has_token(row_text, "lab"))),
             "room": room,
+            "lab_theory": lab_text,
         }
 
         slot = _merge_timetable_row_values(slot, previous_slot)
+        slot = _normalize_timetable_row(slot, row_text=row_text, previous=previous_slot)
 
         # Skip rows where core timetable fields are missing
-        core_fields = [slot.get("day"), slot.get("start_time"), slot.get("subject_name")]
+        core_fields = [slot.get("day"), slot.get("start_time"), slot.get("end_time"), slot.get("section"), slot.get("subject_name")]
         if not any(_clean_text(v) for v in core_fields):
             logger.info("skipped_empty_row table_row=%s reason=missing_core_fields slot=%s", row_index, {k: slot.get(k) for k in ("day", "start_time", "subject_name", "faculty_name")})
             if debug_jsonl_path:
@@ -835,6 +974,12 @@ def _docx_parse_direct_rows(table_rows: List[Dict], section_state: Dict, debug_j
         if not _valid_slot_row(slot):
             logger.info("skipped_empty_row table_row=%s reason=invalid_slot slot=%s text=%s", row_index, slot, row_text)
             continue
+
+        dup = _timetable_semantic_key(slot)
+        if dup in seen_slots:
+            logger.info("skipped_duplicate_row table_row=%s dup=%s slot=%s", row_index, dup, slot)
+            continue
+        seen_slots.add(dup)
 
         if _is_timetable_continuation_row(slot, previous_slot):
             logger.info("merged_continuation_row table_row=%s slot=%s", row_index, slot)
@@ -928,12 +1073,18 @@ def _section_from_text(text: str) -> str:
         return ""
     if _row_has_token(text, *_DOCX_IGNORE_ROW_TOKENS):
         return ""
+    text = re.sub(r"[‐‑‒–—―]", "-", text)
     # Prefer explicit known section patterns like CSE-A, CSE B, CIVIL, MECH
     known = re.search(r"\b(CSE|CSM|ECE|EEE|IT|MECH|CIVIL|AIML|DS)\s*[-_ ]?\s*([A-Z0-9]{1,4})\b", text, flags=re.IGNORECASE)
     if known:
         dept = known.group(1).upper()
         sec = (known.group(2) or "").upper().strip()
         return (dept + ("-" + sec if sec else "")).strip("-")
+    generic = re.search(r"\b(?:section|class|division|div|group)\s*[:\-]?\s*([A-Z0-9]{1,6}(?:\s*[-_/]\s*[A-Z0-9]{1,4})?)\b", text, flags=re.IGNORECASE)
+    if generic:
+        candidate = _normalize_display_text(generic.group(1))
+        if candidate:
+            return candidate.upper().replace(" ", "-")
     patterns = [
         r"\b([A-Z]{2,}[A-Z0-9]*(?:\s*[-/]\s*[A-Z0-9]{1,4})+)\b",
         r"\b([A-Z]{2,}[A-Z0-9]*\s*[-]\s*[A-Z0-9]{1,4})\b",
@@ -1151,6 +1302,7 @@ def _iter_section_table_slots(table_rows: List[Dict], section_state: Dict, facul
     header_cells = table_rows[0].get("expanded") or []
     day_col = 0
     previous_slot: Optional[Dict[str, str]] = None
+    seen_slots = section_state.get("seen_slots") or set()
     for idx, header in enumerate(header_cells):
         if "day" in _normalize_key(header):
             day_col = idx
@@ -1186,14 +1338,24 @@ def _iter_section_table_slots(table_rows: List[Dict], section_state: Dict, facul
                     "faculty_name": faculty_name,
                     "is_lab": int(bool(_row_has_token(subject_piece, "lab", "practical") or _row_has_token(cell_text, "lab", "practical"))),
                     "room": _clean_text(section_state.get("room", "")),
+                    "lab_theory": "LAB" if _row_has_token(cell_text, "lab", "practical") else "",
                 }
                 slot = _merge_timetable_row_values(slot, previous_slot)
+                slot = _normalize_timetable_row(slot, row_text=cell_text, previous=previous_slot)
                 # Skip if essential semantic fields are missing
                 if not (slot.get("day") and slot.get("start_time") and slot.get("end_time") and slot.get("section") and slot.get("subject_name") and slot.get("faculty_name")):
                     continue
-                if _valid_slot_row(slot):
-                    previous_slot = slot
-                    yield slot
+                if not _valid_slot_row(slot):
+                    logger.info("skipped_invalid_section_slot section=%s day=%s time=%s-%s subject=%s faculty=%s", slot.get("section"), slot.get("day"), slot.get("start_time"), slot.get("end_time"), slot.get("subject_name"), slot.get("faculty_name"))
+                    continue
+                dup = _timetable_semantic_key(slot)
+                if dup in seen_slots:
+                    logger.info("skipped_duplicate_section_slot section=%s dup=%s", slot.get("section"), dup)
+                    continue
+                seen_slots.add(dup)
+                previous_slot = slot
+                section_state["seen_slots"] = seen_slots
+                yield slot
 
 
 def iter_docx_section_slots(
@@ -1437,7 +1599,7 @@ def iter_docx_section_slots(
                             continue
                         if _normalize_key(sub_code) in {"sub code", "subject code"} or _normalize_key(subject_name) == "subject name":
                             continue
-                        entries.append({"sub_code": sub_code, "subject_name": subject_name, "faculty_name": faculty_name})
+                        entries.append({"sub_code": sub_code, "subject_name": _normalize_timetable_subject_name(subject_name), "faculty_name": _normalize_timetable_faculty_name(faculty_name)})
                     _merge_faculty_entries(section_state["faculty_map"], entries)
                     section_state.setdefault("faculty_entries", []).extend(entries)
                     section_state["table_count"] += 1
@@ -1794,7 +1956,7 @@ def _pdf_parse_faculty_rows(rows: List[List[str]]) -> List[Dict]:
             continue
         if _normalize_key(sub_code) in {"sub code", "subject code"}:
             continue
-        entries.append({"sub_code": sub_code, "subject_name": subject_name, "faculty_name": faculty_name})
+        entries.append({"sub_code": sub_code, "subject_name": _normalize_timetable_subject_name(subject_name), "faculty_name": _normalize_timetable_faculty_name(faculty_name)})
     return entries
 
 
@@ -2022,12 +2184,14 @@ def _pdf_parse_timetable_table(
         if not row:
             continue
         if not any(_clean_text(cell) for cell in row):
+            logger.info("SKIPPED_EMPTY_ROW reason=blank_pdf_row row_index=%s", row_index)
             continue
         if len(row) < len(header_cells):
             row = row + [""] * (len(header_cells) - len(row))
         day_raw = _clean_text(row[day_col]) if day_col < len(row) else ""
         day, _ = _extract_pdf_day(day_raw)
         if not day:
+            logger.info("SKIPPED_EMPTY_ROW reason=missing_day row_index=%s text=%s", row_index, " | ".join(row))
             continue
         detected_days.add(day)
 
@@ -2071,9 +2235,12 @@ def _pdf_parse_timetable_table(
                         "faculty_name": faculty_name,
                         "is_lab": int(bool(_row_has_token(subject_piece, "lab", "practical") or _row_has_token(text, "lab", "practical"))),
                         "room": "",
+                        "lab_theory": "LAB" if _row_has_token(subject_piece, "lab", "practical") or _row_has_token(text, "lab", "practical") else "",
                     }
                     slot = _merge_timetable_row_values(slot, previous_slot)
+                    slot = _normalize_timetable_row(slot, row_text=text, previous=previous_slot)
                     if _row_has_token(text, "short braek", "short break", "lunch break", "lunch", "break"):
+                        logger.info("SKIPPED_EMPTY_ROW reason=break_row row_index=%s text=%s", row_index, text)
                         report["skipped_rows"] = int(report.get("skipped_rows", 0) or 0) + 1
                         continue
                     if not is_valid_timetable_row(slot):
@@ -2421,17 +2588,20 @@ def _split_time_value(time_value: str, end_value: str = ""):
 
 def _normalize_slot_row(row: Dict[str, str], row_text: str = "") -> Dict[str, str]:
     normalized = {key: _clean_text(value) for key, value in row.items()}
-    normalized["branch"] = _normalize_academic_department_code(
-        _first_non_empty(normalized, "branch", "dept", "department", "program", "course", "branch name")
+    normalized["branch"] = _normalize_timetable_branch_name(
+        _first_non_empty(normalized, "branch", "dept", "department", "program", "course", "branch name"),
+        row_text=row_text,
     )
-    normalized["section"] = _normalize_academic_section_code(
-        _first_non_empty(normalized, "section", "class", "division", "batch", "group")
+    normalized["section"] = _normalize_timetable_section_name(
+        _first_non_empty(normalized, "section", "class", "division", "batch", "group"),
+        branch_value=normalized["branch"],
+        row_text=row_text,
     )
     if not normalized["branch"] and normalized["section"]:
-        normalized["branch"] = _normalize_academic_department_code(normalized["section"].split("-", 1)[0])
+        normalized["branch"] = _normalize_timetable_branch_name(normalized["section"].split("-", 1)[0], row_text=row_text)
     semester_value = _first_non_empty(normalized, "semester", "sem", "term", "year")
     normalized["semester"] = _safe_int(semester_value)
-    normalized["day"] = _first_non_empty(normalized, "day", "weekday", "date")
+    normalized["day"] = _normalize_display_text(_first_non_empty(normalized, "day", "weekday", "date"))
     time_value = _first_non_empty(normalized, "time", "slot", "period", "session")
     start_value = _first_non_empty(normalized, "start", "start time", "from", "begin")
     end_value = _first_non_empty(normalized, "end", "end time", "to", "until", "finish")
@@ -2444,11 +2614,10 @@ def _normalize_slot_row(row: Dict[str, str], row_text: str = "") -> Dict[str, st
     normalized["subject_name"] = _normalize_timetable_subject_name(
         _first_non_empty(normalized, "subject", "course", "paper", "topic", "title")
     )
-    normalized["faculty_name"] = _clean_text(_first_non_empty(normalized, "faculty", "teacher", "instructor", "lecturer", "staff"))
-    if _contains_blocked_timetable_text(normalized["faculty_name"]):
-        normalized["faculty_name"] = ""
-    normalized["room"] = _first_non_empty(normalized, "room", "classroom", "hall", "venue", "lab room")
-    normalized["is_lab"] = int(bool(_row_has_token(normalized["subject_name"], "lab", "practical") or _row_has_token(row_text, "lab", "practical")))
+    normalized["faculty_name"] = _normalize_timetable_faculty_name(_first_non_empty(normalized, "faculty", "teacher", "instructor", "lecturer", "staff"))
+    normalized["room"] = _normalize_display_text(_first_non_empty(normalized, "room", "classroom", "hall", "venue", "lab room"))
+    normalized["lab_theory"] = _normalize_timetable_lab_theory(_first_non_empty(normalized, "lab_theory", "lab theory", "type", "category"), row_text=row_text)
+    normalized["is_lab"] = int(bool(_row_has_token(normalized["subject_name"], "lab", "practical") or _row_has_token(row_text, "lab", "practical") or _row_has_token(normalized["lab_theory"], "lab", "practical")))
     return normalized
 
 
@@ -3450,6 +3619,7 @@ def import_slots_normalized(db, slots: List[Dict]):
     teacher_cache = {}
     subject_index = _build_subject_lookup_index(db)
     teacher_index = _build_teacher_lookup_index(db)
+    seen_norm_keys = set()
     try:
         inserted_since_commit = 0
         for row_index, s in enumerate(slots, start=1):
@@ -3537,6 +3707,61 @@ def import_slots_normalized(db, slots: List[Dict]):
                 "is_lab": is_lab,
                 "room": room,
             }
+            norm_key = _dup_key(
+                entry_row["branch_id"],
+                entry_row["section"],
+                entry_row["semester"],
+                entry_row["day"],
+                entry_row["start_time"],
+                entry_row["end_time"],
+                entry_row["subject_id"] if entry_row["subject_id"] is not None else _normalize_subject_name(subj_name),
+                entry_row["teacher_id"] if entry_row["teacher_id"] is not None else _normalize_teacher_name(fac_name),
+                entry_row["room"],
+            )
+            if norm_key in seen_norm_keys:
+                counters["skipped_total"] += 1
+                counters["skipped_duplicate"] += 1
+                reason = "in_memory_duplicate"
+                logger.info("import_slots_normalized skipped duplicate row %s: %s", row_index, entry_row)
+                if preview_written < PREVIEW_ROW_CAP:
+                    try:
+                        with open(preview_path, "a", encoding="utf-8") as pf:
+                            pf.write(json.dumps({"index": row_index, "raw": s, "normalized": normalized_row, "reason": reason}, default=str) + "\n")
+                        preview_written += 1
+                    except Exception:
+                        logger.exception("Failed to write normalized duplicate preview line")
+                skipped_rows_omitted = _append_skipped_sample(skipped_rows, skipped_rows_omitted, {"index": row_index, "raw": s, "normalized": normalized_row, "reason": reason})
+                continue
+
+            duplicate_where = "COALESCE(CAST(branch_id AS TEXT), '') = COALESCE(CAST(%s AS TEXT), '') AND COALESCE(section, '') = COALESCE(%s, '') AND COALESCE(CAST(semester AS TEXT), '') = COALESCE(CAST(%s AS TEXT), '') AND COALESCE(day, '') = COALESCE(%s, '') AND COALESCE(start_time, '') = COALESCE(%s, '') AND COALESCE(end_time, '') = COALESCE(%s, '') AND COALESCE(CAST(subject_id AS TEXT), '') = COALESCE(CAST(%s AS TEXT), '') AND COALESCE(CAST(teacher_id AS TEXT), '') = COALESCE(CAST(%s AS TEXT), '') AND COALESCE(room, '') = COALESCE(%s, '')"
+            try:
+                if _row_exists(
+                    db,
+                    "timetable_entries",
+                    duplicate_where,
+                    (entry_row['branch_id'], entry_row['section'], entry_row['semester'], entry_row['day'], entry_row['start_time'], entry_row['end_time'], entry_row['subject_id'], entry_row['teacher_id'], entry_row['room']),
+                ):
+                    counters["skipped_total"] += 1
+                    counters["skipped_duplicate"] += 1
+                    reason = "db_duplicate"
+                    logger.info("import_slots_normalized skipped duplicate row %s: %s", row_index, entry_row)
+                    if preview_written < PREVIEW_ROW_CAP:
+                        try:
+                            with open(preview_path, "a", encoding="utf-8") as pf:
+                                pf.write(json.dumps({"index": row_index, "raw": s, "normalized": normalized_row, "reason": reason}, default=str) + "\n")
+                            preview_written += 1
+                        except Exception:
+                            logger.exception("Failed to write normalized duplicate preview line")
+                    skipped_rows_omitted = _append_skipped_sample(skipped_rows, skipped_rows_omitted, {"index": row_index, "raw": s, "normalized": normalized_row, "reason": reason})
+                    continue
+            except Exception:
+                counters["normalization_failures"] += 1
+                logger.exception("Duplicate check failed at row %s | row=%s", row_index, normalized_row)
+                logger.error(traceback.format_exc())
+                skipped_rows_omitted = _append_skipped_sample(skipped_rows, skipped_rows_omitted, {"index": row_index, "raw": s, "normalized": normalized_row, "reason": "dup_check_exception"})
+                raise
+
+            seen_norm_keys.add(norm_key)
             try:
                 logger.info(
                     "Normalized values | branch=%s subject=%s faculty=%s section=%s day=%s time=%s-%s room=%s",
@@ -3555,21 +3780,6 @@ def import_slots_normalized(db, slots: List[Dict]):
                     (entry_row['branch_id'], entry_row['section'], entry_row['semester'], entry_row['day'], entry_row['start_time'], entry_row['end_time'], entry_row['subject_id'], entry_row['teacher_id'], entry_row['is_lab'], entry_row['room']),
                 )
                 counters["inserted"] += 1
-                inserted_since_commit += 1
-                if inserted_since_commit >= BATCH_INSERT_SIZE:
-                    try:
-                        db.commit()
-                        batch_commit_counts += 1
-                        try:
-                            with open(preview_path, "a", encoding="utf-8") as pf:
-                                pf.write(json.dumps({"type": "batch_commit_normalized", "batch_count": inserted_since_commit, "inserted_total": counters.get("inserted"), "timestamp": time.time()}, default=str) + "\n")
-                        except Exception:
-                            logger.exception("Failed to write normalized batch commit diagnostic")
-                    except Exception:
-                        logger.exception("DB commit failed during batch commit in import_slots_normalized")
-                    inserted_since_commit = 0
-                if row_index % progress_log_interval == 0:
-                    logger.info("import_slots_normalized progress: processed=%d inserted=%d skipped=%d", row_index, counters.get("inserted"), counters.get("skipped_total"))
             except Exception:
                 counters["failures"] += 1
                 counters["normalization_failures"] += 1
@@ -3585,6 +3795,22 @@ def import_slots_normalized(db, slots: List[Dict]):
                 skipped_rows_omitted = _append_skipped_sample(skipped_rows, skipped_rows_omitted, {"index": row_index, "raw": s, "normalized": normalized_row, "reason": "insert_exception"})
                 raise
 
+            inserted_since_commit += 1
+            if inserted_since_commit >= BATCH_INSERT_SIZE:
+                try:
+                    db.commit()
+                    batch_commit_counts += 1
+                    try:
+                        with open(preview_path, "a", encoding="utf-8") as pf:
+                            pf.write(json.dumps({"type": "batch_commit_normalized", "batch_count": inserted_since_commit, "inserted_total": counters.get("inserted"), "timestamp": time.time()}, default=str) + "\n")
+                    except Exception:
+                        logger.exception("Failed to write normalized batch commit diagnostic")
+                except Exception:
+                    logger.exception("DB commit failed during batch commit in import_slots_normalized")
+                inserted_since_commit = 0
+            if row_index % progress_log_interval == 0:
+                logger.info("import_slots_normalized progress: processed=%d inserted=%d skipped=%d", row_index, counters.get("inserted"), counters.get("skipped_total"))
+
             if subject_id is None or teacher_id is None:
                 logger.info(
                     "import_slots_normalized inserting with unresolved subject/teacher branch=%s subject=%s teacher=%s row_index=%s",
@@ -3598,28 +3824,6 @@ def import_slots_normalized(db, slots: List[Dict]):
                 logger.info("import_slots_normalized missing subject mapping row_index=%s subject=%s", row_index, subj_name)
             if teacher_id is None and fac_name:
                 logger.info("import_slots_normalized missing teacher mapping row_index=%s faculty=%s", row_index, fac_name)
-
-            logger.info("import_slots_normalized inserting (row_index=%s): %s", row_index, entry_row)
-            duplicate_where = "COALESCE(CAST(branch_id AS TEXT), '') = COALESCE(CAST(%s AS TEXT), '') AND COALESCE(section, '') = COALESCE(%s, '') AND COALESCE(CAST(semester AS TEXT), '') = COALESCE(CAST(%s AS TEXT), '') AND COALESCE(day, '') = COALESCE(%s, '') AND COALESCE(start_time, '') = COALESCE(%s, '') AND COALESCE(end_time, '') = COALESCE(%s, '') AND COALESCE(CAST(subject_id AS TEXT), '') = COALESCE(CAST(%s AS TEXT), '') AND COALESCE(CAST(teacher_id AS TEXT), '') = COALESCE(CAST(%s AS TEXT), '') AND COALESCE(room, '') = COALESCE(%s, '')"
-            try:
-                if _row_exists(
-                    db,
-                    "timetable_entries",
-                    duplicate_where,
-                    (entry_row['branch_id'], entry_row['section'], entry_row['semester'], entry_row['day'], entry_row['start_time'], entry_row['end_time'], entry_row['subject_id'], entry_row['teacher_id'], entry_row['room']),
-                ):
-                    counters["skipped_total"] += 1
-                    counters["skipped_duplicate"] += 1
-                    reason = "duplicate"
-                    logger.info("import_slots_normalized skipped duplicate row %s: %s", row_index, entry_row)
-                    skipped_rows_omitted = _append_skipped_sample(skipped_rows, skipped_rows_omitted, {"index": row_index, "raw": s, "normalized": normalized_row, "reason": reason})
-                    continue
-            except Exception:
-                counters["normalization_failures"] += 1
-                logger.exception("Duplicate check failed at row %s | row=%s", row_index, normalized_row)
-                logger.error(traceback.format_exc())
-                skipped_rows_omitted = _append_skipped_sample(skipped_rows, skipped_rows_omitted, {"index": row_index, "raw": s, "normalized": normalized_row, "reason": "dup_check_exception"})
-                raise
 
             try:
                 _db_execute(
