@@ -25,6 +25,18 @@ app = Flask(__name__)
 # Email sending is handled by the `send_email` helper defined later in the file.
 
 
+@app.context_processor
+def inject_endpoint_helpers():
+    """Expose a safe endpoint checker for templates.
+
+    This prevents BuildError crashes in templates when optional routes are not
+    registered (for example, timetable routes during startup issues).
+    """
+    return {
+        "has_endpoint": lambda endpoint_name: endpoint_name in app.view_functions,
+    }
+
+
 # One-time schema init guard (per process). This prevents a missing-table crash
 # after switching from SQLite to PostgreSQL, while keeping overhead low.
 _DB_INIT_DONE = False
@@ -2867,6 +2879,15 @@ with app.app_context():
     except Exception as e:
         print(f"Database initialization failed: {repr(e)}")
         print(traceback.format_exc())
+
+# Register timetable routes at import time so they are available under WSGI
+# servers (e.g., Gunicorn/Render), not only when running __main__.
+try:
+    from timetable import register_routes as _register_timetable_routes
+    _register_timetable_routes(app, get_db)
+    print("Timetable routes registered")
+except Exception as e:
+    print(f"[INFO] timetable routes registration skipped: {repr(e)}")
 
 @app.route("/admin/notify-low-attendance", methods=["POST"])
 @login_required
