@@ -280,6 +280,7 @@ def _dashboard_default_context():
         "monthly_percentages": [],
         "current_active_period": None,
         "upcoming_timetable": [],
+        "recent_activity": [],
         "database_info": {
             "storage": "PostgreSQL" if str(app.config.get("DATABASE", "")).startswith("postgres") else "SQLite",
             "path": app.config.get("DATABASE", ""),
@@ -1055,6 +1056,22 @@ def dashboard():
         except Exception as timetable_err:
             print(f"[dashboard] timetable lookup failed: {repr(timetable_err)}")
 
+        # Recent activity feed (last 10 attendance records)
+        recent_activity = _safe_rows("""
+            SELECT
+                a.date,
+                s.name AS student_name,
+                a.status,
+                sub.name AS subject_name,
+                b.name AS branch_name
+            FROM attendance a
+            LEFT JOIN students s ON a.student_id = s.id
+            LEFT JOIN subjects sub ON a.subject_id = sub.id
+            LEFT JOIN branches b ON a.branch_id = b.id
+            ORDER BY a.id DESC
+            LIMIT 10
+        """)
+
         dashboard_context.update({
             "branch_count": branch_count,
             "student_count": student_count,
@@ -1080,6 +1097,7 @@ def dashboard():
             "monthly_percentages": [item["percentage"] for item in chart_data],
             "current_active_period": current_active_period,
             "upcoming_timetable": upcoming_timetable,
+            "recent_activity": recent_activity,
         })
 
         db.close()
