@@ -755,17 +755,46 @@ def dashboard():
     try:
         db = get_db()
         placeholder = get_placeholder()
-        branch_count = db.execute("SELECT COUNT(*) FROM branches").fetchone()[0]
-        student_count = db.execute("SELECT COUNT(*) FROM students").fetchone()[0]
-        subject_count = db.execute("SELECT COUNT(*) FROM subjects").fetchone()[0]
-        attendance_count = db.execute("SELECT COUNT(*) FROM attendance").fetchone()[0]
 
-        attendance_stats = db.execute("""
-            SELECT
-                COUNT(CASE WHEN status='Present' THEN 1 END) as present_count,
-                COUNT(*) as total_count
-            FROM attendance
-        """).fetchone()
+        def _safe_scalar(sql, params=(), default=0):
+            try:
+                row = db.execute(sql, params).fetchone()
+                if row is None:
+                    return default
+                if isinstance(row, tuple):
+                    return row[0] if row else default
+                # sqlite3.Row / dict-like rows
+                try:
+                    keys = list(row.keys())
+                    return row_get(row, keys[0], default)
+                except Exception:
+                    return row[0] if row else default
+            except Exception as e:
+                print(f"[dashboard] query failed scalar: {repr(e)} | sql={sql}")
+                return default
+
+        def _safe_rows(sql, params=()):
+            try:
+                return db.execute(sql, params).fetchall()
+            except Exception as e:
+                print(f"[dashboard] query failed rows: {repr(e)} | sql={sql}")
+                return []
+
+        branch_count = int(_safe_scalar("SELECT COUNT(*) FROM branches", default=0) or 0)
+        student_count = int(_safe_scalar("SELECT COUNT(*) FROM students", default=0) or 0)
+        subject_count = int(_safe_scalar("SELECT COUNT(*) FROM subjects", default=0) or 0)
+        attendance_count = int(_safe_scalar("SELECT COUNT(*) FROM attendance", default=0) or 0)
+
+        attendance_stats = None
+        try:
+            attendance_stats = db.execute("""
+                SELECT
+                    COUNT(CASE WHEN status='Present' THEN 1 END) as present_count,
+                    COUNT(*) as total_count
+                FROM attendance
+            """).fetchone()
+        except Exception as e:
+            print(f"[dashboard] attendance stats query failed: {repr(e)}")
 
         total_classes = 0
         present_count = 0
@@ -781,7 +810,7 @@ def dashboard():
         if total_classes > 0:
             overall_percentage = round((present_count / total_classes) * 100, 1)
 
-        subject_data = db.execute(
+        subject_data = _safe_rows(
             """
             SELECT
                 subjects.name AS name,
@@ -796,12 +825,12 @@ def dashboard():
             GROUP BY subjects.id, subjects.name
             ORDER BY subjects.name
             """
-        ).fetchall()
+        )
 
         subject_chart_labels = [row_get(r, "name") for r in subject_data]
         subject_chart_percentages = [float(row_get(r, "percentage") or 0) for r in subject_data]
         
-        branch_data = db.execute("""
+        branch_data = _safe_rows("""
             SELECT
                 branches.name AS branch_name,
                 branches.location AS location,
@@ -818,15 +847,14 @@ def dashboard():
             LEFT JOIN attendance ON branches.id = attendance.branch_id
             GROUP BY branches.id, branches.name, branches.location
             ORDER BY branches.name
-        """).fetchall()
+        """)
 
         # Build last-7-days chart data
         chart_dates = [date.today() - timedelta(days=i) for i in range(6, -1, -1)]
         chart_date_values = [d.isoformat() for d in chart_dates]
         chart_data = []
         if chart_date_values:
-            placeholder = get_placeholder()
-            chart_rows = db.execute(
+            chart_rows = _safe_rows(
                 f"""
                 SELECT
                     date,
@@ -837,7 +865,7 @@ def dashboard():
                 GROUP BY date
                 """,
                 tuple(chart_date_values),
-            ).fetchall()
+            )
             chart_map = {row_get(r, "date"): r for r in chart_rows}
             for date_str in chart_date_values:
                 row = chart_map.get(date_str)
@@ -881,7 +909,7 @@ def dashboard():
     except Exception as e:
         print(f"[dashboard] CRITICAL ERROR: {repr(e)}")
         print(traceback.format_exc())
-        flash("Dashboard is temporarily unavailable due to a database error.", "error")
+        flash("Dashboard loaded with limited data due to a database issue.", "warning")
         return render_template("dashboard.html", error_mode=True)
     finally:
         if db:
