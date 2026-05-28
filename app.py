@@ -253,6 +253,94 @@ def set_setting(db, key, value):
         )
 
 
+def _dashboard_default_context():
+    render_env = bool(os.environ.get("RENDER") or os.environ.get("RENDER_INTERNAL_HOSTNAME"))
+    return {
+        "branch_count": 0,
+        "student_count": 0,
+        "subject_count": 0,
+        "attendance_count": 0,
+        "total_classes": 0,
+        "present_count": 0,
+        "absent_count": 0,
+        "overall_percentage": 0,
+        "today_percentage": 0,
+        "active_classes_today": 0,
+        "low_attendance_alerts": 0,
+        "total_teachers": 0,
+        "total_semesters": 0,
+        "subject_data": [],
+        "subject_chart_labels": [],
+        "subject_chart_percentages": [],
+        "branch_data": [],
+        "chart_data": [],
+        "trend_labels": [],
+        "trend_percentages": [],
+        "monthly_labels": [],
+        "monthly_percentages": [],
+        "current_active_period": None,
+        "upcoming_timetable": [],
+        "database_info": {
+            "storage": "PostgreSQL" if str(app.config.get("DATABASE", "")).startswith("postgres") else "SQLite",
+            "path": app.config.get("DATABASE", ""),
+        },
+        "mail_info": {
+            "configured": is_mail_configured(),
+            "server": app.config.get("MAIL_SERVER"),
+            "port": app.config.get("MAIL_PORT"),
+            "username": app.config.get("MAIL_USERNAME"),
+            "tls": app.config.get("MAIL_USE_TLS"),
+            "render_env": render_env,
+        },
+        "persistence_warning": render_env and not str(app.config.get("DATABASE", "")).startswith("postgres"),
+        "error_mode": False,
+    }
+
+
+def _table_columns(db, table_name):
+    """Return a set of columns for a table, or an empty set if the table is missing."""
+    try:
+        if str(app.config.get("DATABASE", "")).startswith("postgres"):
+            rows = db.execute(
+                "SELECT column_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = %s ORDER BY ordinal_position",
+                (table_name,),
+            ).fetchall()
+            return {row_get(row, "column_name") for row in rows if row_get(row, "column_name")}
+        rows = db.execute(f"PRAGMA table_info({table_name})").fetchall()
+        return {row_get(row, "name") for row in rows if row_get(row, "name")}
+    except Exception:
+        return set()
+
+
+def _validate_dashboard_schema(db):
+    """Log missing dashboard-critical tables/columns without stopping startup."""
+    required = {
+        "branches": {"id", "name"},
+        "students": {"id", "name", "enrollment", "branch_id"},
+        "subjects": {"id", "name", "branch_id"},
+        "attendance": {"id", "student_id", "branch_id", "subject_id", "date", "status"},
+        "settings": {"id", "key", "value"},
+        "timetable_entries": {"id", "branch_id", "section", "day", "start_time", "end_time", "subject_id", "teacher_id"},
+        "teachers": {"id", "name"},
+    }
+    missing_tables = []
+    missing_columns = {}
+
+    for table_name, required_columns in required.items():
+        cols = _table_columns(db, table_name)
+        if not cols:
+            missing_tables.append(table_name)
+            continue
+        missing = sorted(required_columns - cols)
+        if missing:
+            missing_columns[table_name] = missing
+
+    if missing_tables or missing_columns:
+        print(f"[schema] dashboard missing tables={missing_tables} missing_columns={missing_columns}")
+
+    return {"missing_tables": missing_tables, "missing_columns": missing_columns}
+
+
 def send_email(subject, recipient, body, attachments=None):
     # If credentials are not configured, allow a local dev fallback when explicitly enabled
     dev_fallback_enabled = os.environ.get("MAIL_DEV_FALLBACK", "False").lower() in ("1", "true", "yes")
@@ -801,6 +889,7 @@ def index():
 def dashboard():
     """Main admin dashboard with stats and charts."""
     db = None
+    dashboard_context = _dashboard_default_context()
     try:
         db = get_db()
         placeholder = get_placeholder()
@@ -923,43 +1012,85 @@ def dashboard():
                 percentage = round((present_count / total_count) * 100, 1) if total_count else 0
                 chart_data.append({"date": date_str, "percentage": percentage})
 
-        db.close()
-        database_info = {
-            "storage": "PostgreSQL" if app.config["DATABASE"].startswith("postgresql") else "SQLite",
-            "path": app.config["DATABASE"],
-        }
-        mail_info = {
-            "configured": is_mail_configured(),
-            "server": app.config["MAIL_SERVER"],
-            "port": app.config["MAIL_PORT"],
-            "username": app.config["MAIL_USERNAME"],
-            "tls": app.config["MAIL_USE_TLS"],
-            "render_env": bool(os.environ.get("RENDER") or os.environ.get("RENDER_INTERNAL_HOSTNAME")),
-        }
+        today_percentage = round((present_count / total_classes) * 100, 1) if total_classes > 0 else 0
+        today_day = date.today().strftime("%A")
+        active_classes_today = int(_safe_scalar(
+            f"SELECT COUNT(*) FROM timetable_entries WHERE LOWER(TRIM(day)) = LOWER(TRIM({placeholder}))",
+            (today_day,),
+            default=0,
+        ) or 0)
 
-        return render_template(
-            "dashboard.html",
-            branch_count=branch_count,
-            student_count=student_count,
-            subject_count=subject_count,
-            attendance_count=attendance_count,
-            total_classes=total_classes,
-            present_count=present_count,
-            absent_count=absent_count,
-            overall_percentage=overall_percentage,
-            subject_data=subject_data,
-            subject_chart_labels=subject_chart_labels,
-            subject_chart_percentages=subject_chart_percentages,
-            branch_data=branch_data,
-            chart_data=chart_data,
-            database_info=database_info,
-            mail_info=mail_info,
-        )
+        total_teachers = int(_safe_scalar("SELECT COUNT(*) FROM teachers", default=0) or 0)
+        try:
+            total_semesters = int(_safe_scalar(
+                "SELECT COUNT(DISTINCT current_semester) FROM students WHERE current_semester IS NOT NULL",
+                default=0,
+            ) or 0)
+        except Exception:
+            total_semesters = 0
+
+        try:
+            attendance_threshold = int(get_setting(db, "low_attendance_threshold", app.config["LOW_ATTENDANCE_THRESHOLD"]))
+        except Exception:
+            attendance_threshold = int(app.config["LOW_ATTENDANCE_THRESHOLD"])
+
+        low_alerts_q = f"""
+            SELECT COUNT(*) AS c FROM (
+                SELECT s.id
+                FROM students s
+                LEFT JOIN attendance a ON a.student_id = s.id
+                GROUP BY s.id
+                HAVING COUNT(a.id) > 0
+                   AND ROUND(SUM(CASE WHEN a.status = 'Present' THEN 1 ELSE 0 END) * 100.0 / COUNT(a.id), 1) < {placeholder}
+            ) sub
+        """
+        low_attendance_alerts = int(_safe_scalar(low_alerts_q, (attendance_threshold,), default=0) or 0)
+
+        current_active_period = None
+        upcoming_timetable = []
+        try:
+            import timetable as _timetable
+            current_active_period = _timetable.get_global_active_class(db)
+            upcoming_timetable = _timetable.get_upcoming_classes(db, "", "", limit=4)
+        except Exception as timetable_err:
+            print(f"[dashboard] timetable lookup failed: {repr(timetable_err)}")
+
+        dashboard_context.update({
+            "branch_count": branch_count,
+            "student_count": student_count,
+            "subject_count": subject_count,
+            "attendance_count": attendance_count,
+            "total_classes": total_classes,
+            "present_count": present_count,
+            "absent_count": absent_count,
+            "overall_percentage": overall_percentage,
+            "today_percentage": today_percentage,
+            "active_classes_today": active_classes_today,
+            "low_attendance_alerts": low_attendance_alerts,
+            "total_teachers": total_teachers,
+            "total_semesters": total_semesters,
+            "subject_data": subject_data,
+            "subject_chart_labels": subject_chart_labels,
+            "subject_chart_percentages": subject_chart_percentages,
+            "branch_data": branch_data,
+            "chart_data": chart_data,
+            "trend_labels": chart_date_values,
+            "trend_percentages": [item["percentage"] for item in chart_data],
+            "monthly_labels": chart_date_values,
+            "monthly_percentages": [item["percentage"] for item in chart_data],
+            "current_active_period": current_active_period,
+            "upcoming_timetable": upcoming_timetable,
+        })
+
+        db.close()
+        return render_template("dashboard.html", **dashboard_context)
     except Exception as e:
         print(f"[dashboard] CRITICAL ERROR: {repr(e)}")
         print(traceback.format_exc())
         flash("Dashboard loaded with limited data due to a database issue.", "warning")
-        return render_template("dashboard.html", error_mode=True)
+        error_dashboard_context = dict(dashboard_context)
+        error_dashboard_context["error_mode"] = True
+        return render_template("dashboard.html", **error_dashboard_context)
     finally:
         if db:
             try: db.close()
@@ -3037,6 +3168,17 @@ with app.app_context():
         # Best-effort schema initialization at startup (won't crash the app).
         init_db()
         print("Database initialized successfully")
+
+        db = None
+        try:
+            db = get_db()
+            _validate_dashboard_schema(db)
+        finally:
+            if db:
+                try:
+                    db.close()
+                except Exception:
+                    pass
     except Exception as e:
         print(f"Database initialization failed: {repr(e)}")
         print(traceback.format_exc())

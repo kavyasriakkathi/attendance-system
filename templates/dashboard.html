@@ -282,8 +282,8 @@ document.addEventListener('DOMContentLoaded', function() {
     <div class="stat-box" id="lowAttendanceCard" style="border-bottom: 4px solid var(--danger-color); background: linear-gradient(135deg,#fff5f5 0%,#fff0f0 100%); cursor: pointer; transition: all 0.3s ease;" onmouseover="this.style.boxShadow='0 8px 16px rgba(239, 71, 111, 0.15)'" onmouseout="this.style.boxShadow='var(--shadow-sm)'">
         <i class="fa-solid fa-triangle-exclamation" style="font-size: 1.5rem; color: var(--text-secondary); margin-bottom: 15px;"></i>
         <h3>Low Attendance Alerts</h3>
-        <p class="count">{{ low_attendance_alerts }}</p>
-        {% if low_attendance_alerts > 0 %}
+        <p class="count">{{ low_attendance_alerts | default(0) }}</p>
+        {% if low_attendance_alerts is defined and low_attendance_alerts %}
         <p style="font-size: 0.75rem; color: var(--text-secondary); margin-top: 10px; display: flex; align-items: center; gap: 5px;">
             <i class="fa-solid fa-click"></i> Click to view details
         </p>
@@ -791,7 +791,7 @@ document.head.appendChild(style);
 document.addEventListener('DOMContentLoaded', function() {
     const lowAttendanceCard = document.getElementById('lowAttendanceCard');
     const lowAttendanceModal = document.getElementById('lowAttendanceModal');
-    const lowAttendanceCount = {{ low_attendance_alerts }};
+    const lowAttendanceCount = {{ low_attendance_alerts | default(0) | tojson }};
     const semestersCard = document.querySelector('.semesters-card');
     const semestersHelpBtn = document.querySelector('.semesters-help-btn');
     
