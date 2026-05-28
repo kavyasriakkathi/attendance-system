@@ -772,22 +772,23 @@ def get_current_active_classes(db):
     return active_classes
 
 
-@app.route("/api/active-classes", methods=["GET"])
-def api_active_classes():
-    db = None
-    try:
-        db = get_db()
-        classes = get_current_active_classes(db)
-        return jsonify({"success": True, "active_classes": classes, "count": len(classes)})
-    except Exception as e:
-        print(f"Error fetching active classes: {e}")
-        return jsonify({"success": False, "error": str(e)}), 500
-    finally:
-        if db:
-            try:
-                db.close()
-            except Exception:
-                pass
+if "api_active_classes" not in app.view_functions:
+    @app.route("/api/active-classes", methods=["GET"])
+    def api_active_classes():
+        db = None
+        try:
+            db = get_db()
+            classes = get_current_active_classes(db)
+            return jsonify({"success": True, "active_classes": classes, "count": len(classes)})
+        except Exception as e:
+            print(f"Error fetching active classes: {e}")
+            return jsonify({"success": False, "error": str(e)}), 500
+        finally:
+            if db:
+                try:
+                    db.close()
+                except Exception:
+                    pass
 
 
 @app.route("/")

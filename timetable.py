@@ -3920,6 +3920,22 @@ def get_current_slot(db, branch: str, section: str, now: Optional[datetime] = No
 def register_routes(app, db_getter=None):
     globals()["get_db"] = db_getter
 
+    # Idempotency guard: avoid Flask endpoint/path collisions if this
+    # registration function is called more than once in a process.
+    if getattr(app, "_timetable_routes_registered", False):
+        return
+    existing = {
+        "timetable_home",
+        "timetable_manage",
+        "timetable_faculty_schedules",
+        "timetable_admin_bulk_resolve",
+    }
+    if any(ep in app.view_functions for ep in existing):
+        logger.warning("Skipping timetable route registration because endpoints already exist")
+        app._timetable_routes_registered = True
+        return
+    app._timetable_routes_registered = True
+
     @app.route("/timetable")
     def timetable_home():
         db = None
