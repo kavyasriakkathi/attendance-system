@@ -25,6 +25,22 @@ app = Flask(__name__)
 # Email sending is handled by the `send_email` helper defined later in the file.
 
 
+def _safe_url_build_error_handler(error, endpoint, values):
+    """Prevent template crashes when optional endpoints are unavailable.
+
+    Returning a harmless target keeps pages renderable on production deployments
+    even when some feature routes are not present in the loaded app module.
+    """
+    try:
+        print(f"[WARN] Missing endpoint during url_for: endpoint={endpoint} values={values}")
+    except Exception:
+        pass
+    return "#"
+
+
+app.url_build_error_handlers.append(_safe_url_build_error_handler)
+
+
 @app.context_processor
 def inject_endpoint_helpers():
     """Expose a safe endpoint checker for templates.
