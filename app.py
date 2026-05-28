@@ -3346,5 +3346,73 @@ def internal_error(error):
 def not_found_error(error):
     return "<h1>404 Not Found</h1><p>The page you requested does not exist.</p>", 404
 
+def get_current_active_classes(db):
+    """
+    Returns currently running classes based on the current day and time.
+    Excludes SHORT BREAK and handles overlapping periods safely.
+    """
+    now = datetime.now()
+    current_day = now.strftime("%A")
+    current_time_str = now.strftime("%H:%M")
+    
+    # Query timetable_entries to find entries where current_time is between start_time and end_time
+    # and day matches current_day, excluding SHORT BREAK.
+    query = """
+        SELECT 
+            te.section,
+            s.name as subject_name,
+            t.name as faculty_name,
+            te.room,
+            te.start_time,
+            te.end_time,
+            b.name as branch_name
+        FROM timetable_entries te
+        LEFT JOIN subjects s ON te.subject_id = s.id
+        LEFT JOIN teachers t ON te.teacher_id = t.id
+        LEFT JOIN branches b ON te.branch_id = b.id
+        WHERE LOWER(TRIM(te.day)) = LOWER(TRIM(%s))
+          AND te.start_time <= %s
+          AND te.end_time > %s
+          AND (s.name IS NULL OR UPPER(TRIM(s.name)) != 'SHORT BREAK')
+    """
+    
+    placeholder = get_placeholder()
+    query = query.replace("%s", placeholder)
+    
+    rows = db.execute(query, (current_day, current_time_str, current_time_str)).fetchall()
+    
+    active_classes = []
+    for row in rows:
+        active_classes.append({
+            "section": row_get(row, "section", ""),
+            "subject": row_get(row, "subject_name", ""),
+            "faculty": row_get(row, "faculty_name", ""),
+            "room": row_get(row, "room", ""),
+            "start_time": row_get(row, "start_time", ""),
+            "end_time": row_get(row, "end_time", ""),
+            "branch": row_get(row, "branch_name", "")
+        })
+        
+    return active_classes
+
+
+@app.route("/api/active-classes", methods=["GET"])
+def api_active_classes():
+    db = None
+    try:
+        db = get_db()
+        classes = get_current_active_classes(db)
+        return jsonify({"success": True, "active_classes": classes, "count": len(classes)})
+    except Exception as e:
+        print(f"Error fetching active classes: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+    finally:
+        if db:
+            try:
+                db.close()
+            except Exception:
+                pass
+
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
