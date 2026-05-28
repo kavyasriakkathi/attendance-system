@@ -1,4 +1,5 @@
 import os
+import re
 from datetime import date, timedelta, datetime
 from io import BytesIO
 import sqlite3
@@ -228,6 +229,113 @@ def _coerce_int(v):
         return int(v)
     except Exception:
         return None
+
+
+def _normalize_lookup_key(value):
+    text = "" if value is None else str(value)
+    return "".join(ch.lower() for ch in text.strip() if ch.isalnum())
+
+
+_ACRONYM_STOPWORDS = {"and", "of", "the", "for", "with", "to", "in", "on", "at", "by", "from"}
+
+
+def _build_acronym(tokens):
+    letters = [token[0] for token in tokens if token and token.lower() not in _ACRONYM_STOPWORDS and token[0].isalnum()]
+    return "".join(letters).lower()
+
+
+def _text_variants(value):
+    cleaned = "" if value is None else str(value).strip()
+    normalized = _normalize_lookup_key(cleaned)
+    tokens = [token for token in re.split(r"[^A-Za-z0-9]+", cleaned) if token]
+    variants = {cleaned.lower(), normalized}
+    if tokens:
+        variants.add("".join(tokens).lower())
+        acronym = _build_acronym(tokens)
+        if acronym:
+            variants.add(acronym.lower())
+        variants.update(token.lower() for token in tokens)
+        variants.add(tokens[-1].lower())
+    return {variant for variant in variants if variant}
+
+
+def _subject_variants(value):
+    cleaned = "" if value is None else str(value).strip()
+    variants = set(_text_variants(cleaned))
+    if cleaned:
+        letters = [ch for ch in cleaned if ch.isalpha()]
+        if letters and cleaned.replace(" ", "").isalpha():
+            variants.add("".join(letters).lower())
+    return variants
+
+
+def _section_variants(value):
+    cleaned = "" if value is None else str(value).strip()
+    variants = {cleaned.lower(), _normalize_lookup_key(cleaned)}
+    parts = [part.strip() for part in re.split(r"[^A-Za-z0-9]+", cleaned) if part.strip()]
+    if parts:
+        variants.add(parts[-1].lower())
+        variants.add(_normalize_lookup_key(parts[-1]))
+        if len(parts) == 1:
+            variants.update(_text_variants(parts[0]))
+    return {variant for variant in variants if variant}
+
+
+def _day_variants(value):
+    cleaned = "" if value is None else str(value).strip()
+    normalized = _normalize_lookup_key(cleaned)
+    variants = {cleaned.lower(), normalized}
+    if normalized:
+        variants.add(normalized[:3])
+    day_aliases = {
+        "mon": "monday",
+        "monday": "monday",
+        "tue": "tuesday",
+        "tues": "tuesday",
+        "tuesday": "tuesday",
+        "wed": "wednesday",
+        "wednesday": "wednesday",
+        "thu": "thursday",
+        "thur": "thursday",
+        "thurs": "thursday",
+        "thursday": "thursday",
+        "fri": "friday",
+        "friday": "friday",
+        "sat": "saturday",
+        "saturday": "saturday",
+        "sun": "sunday",
+        "sunday": "sunday",
+    }
+    if normalized in day_aliases:
+        variants.add(day_aliases[normalized])
+    if normalized[:3] in day_aliases:
+        variants.add(day_aliases[normalized[:3]])
+    return {variant for variant in variants if variant}
+
+
+def _variants_match(left, right, variant_builder=_text_variants):
+    left_variants = variant_builder(left)
+    right_variants = variant_builder(right)
+    if left_variants & right_variants:
+        return True
+    left_key = _normalize_lookup_key(left)
+    right_key = _normalize_lookup_key(right)
+    if left_key and right_key:
+        if left_key in right_key or right_key in left_key:
+            return True
+    return False
+
+
+def _subject_matches(left, right):
+    return _variants_match(left, right, _subject_variants)
+
+
+def _section_matches(left, right):
+    return _variants_match(left, right, _section_variants)
+
+
+def _day_matches(left, right):
+    return _variants_match(left, right, _day_variants)
 
 
 def get_setting(db, key, default=None):
@@ -2283,13 +2391,48 @@ def _resolve_timetable_slots(db, branch_id="", subject_id="", selected_date=None
         except Exception:
             selected_date_obj = date.today()
 
-    weekday = selected_date_obj.strftime("%A")
     current_time = _attendance_pick_time(time_override)
+    weekday = selected_date_obj.strftime("%A")
+    weekday_short = selected_date_obj.strftime("%a")
     branch_id_val = _coerce_int(branch_id)
     subject_id_val = _coerce_int(subject_id)
     section_val = (section or "").strip()
     period_val = (period or "").strip()
     placeholder = get_placeholder()
+
+    branch_name = ""
+    subject_name = ""
+    try:
+        if branch_id_val is not None:
+            branch_row = db.execute(
+                f"SELECT name FROM branches WHERE id = {placeholder}",
+                (branch_id_val,),
+            ).fetchone()
+            branch_name = row_get(branch_row, "name", "") or ""
+    except Exception:
+        branch_name = ""
+
+    try:
+        if subject_id_val is not None:
+            subject_row = db.execute(
+                f"SELECT name FROM subjects WHERE id = {placeholder}",
+                (subject_id_val,),
+            ).fetchone()
+            subject_name = row_get(subject_row, "name", "") or ""
+    except Exception:
+        subject_name = ""
+
+    print(
+        "[attendance] resolve slots",
+        f"branch_id={branch_id_val}",
+        f"branch={branch_name or branch_id}",
+        f"section={section_val or '<empty>'}",
+        f"subject_id={subject_id_val}",
+        f"subject={subject_name or subject_id}",
+        f"weekday={weekday}",
+        f"weekday_short={weekday_short}",
+        f"period={period_val or '<empty>'}",
+    )
 
     sql = (
         "SELECT te.id AS timetable_entry_id, te.branch_id, te.section, te.subject_id, te.teacher_id, te.day, "
@@ -2299,18 +2442,12 @@ def _resolve_timetable_slots(db, branch_id="", subject_id="", selected_date=None
         "LEFT JOIN subjects s ON te.subject_id = s.id "
         "LEFT JOIN teachers t ON te.teacher_id = t.id "
         "LEFT JOIN branches b ON te.branch_id = b.id "
-        "WHERE LOWER(TRIM(COALESCE(te.day, ''))) = LOWER(TRIM({}))"
-    ).format(placeholder)
-    params = [weekday]
+        "WHERE 1=1"
+    )
+    params = []
     if branch_id_val is not None:
         sql += f" AND te.branch_id = {placeholder}"
         params.append(branch_id_val)
-    if subject_id_val is not None:
-        sql += f" AND te.subject_id = {placeholder}"
-        params.append(subject_id_val)
-    if section_val:
-        sql += f" AND LOWER(TRIM(COALESCE(te.section, ''))) = LOWER(TRIM({placeholder}))"
-        params.append(section_val)
     sql += " ORDER BY te.start_time, te.end_time, te.id"
 
     rows = []
@@ -2319,13 +2456,46 @@ def _resolve_timetable_slots(db, branch_id="", subject_id="", selected_date=None
     except Exception as exc:
         print(f"[attendance] timetable_entries slots lookup failed: {repr(exc)}")
 
+    print(f"[attendance] timetable_entries raw row count={len(rows)}")
+
+    selected_subject_key = subject_name or (subject_id or "")
+    selected_subject_variants = _subject_variants(selected_subject_key) if selected_subject_key else set()
+    selected_section_variants = _section_variants(section_val) if section_val else set()
+    selected_day_variants = _day_variants(weekday)
+
+    filtered_rows = []
+    for row in rows:
+        row_day = row_get(row, "day") or ""
+        row_subject_name = row_get(row, "subject_name") or ""
+        row_section = row_get(row, "section") or ""
+        row_branch_name = row_get(row, "branch_name") or ""
+
+        day_ok = _day_matches(row_day, weekday) or _day_matches(row_day, weekday_short)
+        if not day_ok:
+            continue
+
+        if branch_name and row_branch_name and not _variants_match(branch_name, row_branch_name):
+            continue
+
+        if selected_subject_variants and not _subject_matches(selected_subject_key, row_subject_name):
+            row_subject_id = row_get(row, "subject_id")
+            if str(row_subject_id) != str(subject_id_val):
+                continue
+
+        if selected_section_variants and not _section_matches(section_val, row_section):
+            continue
+
+        filtered_rows.append(row)
+
+    print(f"[attendance] timetable_entries matched row count={len(filtered_rows)}")
+
     slots = []
     seen = set()
     active_index = None
     selected_index = None
     is_today = selected_date_obj == date.today()
 
-    for row in rows:
+    for row in filtered_rows:
         start_time = (row_get(row, "start_time") or "").strip()
         end_time = (row_get(row, "end_time") or "").strip()
         if not start_time or not end_time:
@@ -2333,16 +2503,16 @@ def _resolve_timetable_slots(db, branch_id="", subject_id="", selected_date=None
 
         faculty_name = row_get(row, "faculty_name") or ""
         room = row_get(row, "room") or ""
-        subject_name = row_get(row, "subject_name") or ""
-        branch_name = row_get(row, "branch_name") or ""
-        section_name = row_get(row, "section") or section_val
+        row_subject_name = row_get(row, "subject_name") or ""
+        row_branch_name = row_get(row, "branch_name") or ""
+        row_section = row_get(row, "section") or section_val
         dedupe_key = (
             start_time,
             end_time,
-            (subject_name or "").strip().lower(),
-            (faculty_name or "").strip().lower(),
-            (room or "").strip().lower(),
-            (section_name or "").strip().lower(),
+            _normalize_lookup_key(row_subject_name),
+            _normalize_lookup_key(faculty_name),
+            _normalize_lookup_key(room),
+            _normalize_lookup_key(row_section),
             row_get(row, "branch_id"),
         )
         if dedupe_key in seen:
@@ -2353,10 +2523,10 @@ def _resolve_timetable_slots(db, branch_id="", subject_id="", selected_date=None
             "period": len(slots) + 1,
             "timetable_entry_id": row_get(row, "timetable_entry_id"),
             "branch_id": row_get(row, "branch_id") or branch_id_val,
-            "branch_name": branch_name,
-            "section": section_name,
+            "branch_name": row_branch_name,
+            "section": row_section,
             "subject_id": row_get(row, "subject_id") or subject_id_val,
-            "subject_name": subject_name,
+            "subject_name": row_subject_name,
             "faculty_name": faculty_name,
             "room": room,
             "start_time": start_time,
@@ -2380,6 +2550,8 @@ def _resolve_timetable_slots(db, branch_id="", subject_id="", selected_date=None
 
     selected_slot = slots[selected_index] if selected_index is not None and selected_index < len(slots) else None
     active_slot = slots[active_index] if active_index is not None and active_index < len(slots) else None
+
+    print(f"[attendance] timetable_entries final slot count={len(slots)} selected={'yes' if selected_slot else 'no'} active={'yes' if active_slot else 'no'}")
 
     return {
         "slots": slots,
