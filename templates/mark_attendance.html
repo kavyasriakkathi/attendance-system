@@ -1,128 +1,161 @@
 {% extends "layout.html" %}
 {% block head %}
-<script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
 <script>
-function getRealtimeSocket() {
-    if (!window.__attendanceRealtimeSocket) {
-        window.__attendanceRealtimeSocket = io({
-        <div>
-            <label>Section</label>
-            <input type="text" name="section" id="section_input" value="" placeholder="e.g. A" />
-        </div>
-            transports: ['websocket'],
-            upgrade: false,
-            reconnection: true,
-            reconnectionDelay: 1000,
-            reconnectionDelayMax: 5000,
-            timeout: 20000,
-        });
-    }
-    return window.__attendanceRealtimeSocket;
-}
 document.addEventListener('DOMContentLoaded', function() {
-    // Auto-detect current period when date/section/subject are provided
-    const sectionInput = document.getElementById('section_input');
+    const branchSelect = document.querySelector('select[name="branch_id"]');
     const subjectSelect = document.querySelector('select[name="subject_id"]');
     const dateInput = document.querySelector('input[name="date"]');
-    const branchSelect = document.querySelector('select[name="branch_id"]');
+    const sectionInput = document.getElementById('section_input');
+    const loadBtn = document.getElementById('load_students_btn');
+    const periodWrap = document.getElementById('timetable_period_wrap');
+    const badgesWrap = document.getElementById('timetable_badges');
+    const noteEl = document.getElementById('schedule_note');
+    let timer = null;
+    let slotsCache = [];
 
-    function detectAndLoad() {
-        const section = sectionInput ? sectionInput.value.trim() : '';
-        const subject = subjectSelect ? subjectSelect.value : '';
-        const date = dateInput ? dateInput.value : '';
-        if (!subject || !date || !section) return;
-        const q = new URLSearchParams({ date, section, subject });
-        fetch('/api/current-period?' + q.toString())
-            .then(r => r.json())
-            .then(data => {
-                if (data.error) return;
-                if (data.branch_id && branchSelect) {
-                    branchSelect.value = data.branch_id;
-                }
-                if (data.subject_id) {
-                    // redirect to the attendance page to auto-load students
-                    const params = new URLSearchParams({ branch_id: data.branch_id, subject_id: data.subject_id, date: date });
-                    if (data.already_marked) {
-                        alert('Attendance already exists for this subject/date. You can still view or update it.');
-                    }
-                    window.location = '/attendance?' + params.toString();
-                }
-            }).catch(() => {});
-    }
-
-    // Trigger detection when subject/section/date change
-    if (subjectSelect) subjectSelect.addEventListener('change', detectAndLoad);
-    if (sectionInput) sectionInput.addEventListener('change', detectAndLoad);
-    if (dateInput) dateInput.addEventListener('change', detectAndLoad);
-});
-
-
-document.addEventListener('DOMContentLoaded', function() {
-    const socket = getRealtimeSocket();
-
-    socket.on('connect', function() {
-        console.log('Connected to real-time attendance system');
-    });
-
-    socket.on('attendance_saved', function(data) {
-        // Show success notification
-        showNotification('Attendance saved successfully!', 'success');
-
-        // If we're on the same branch/subject, refresh the existing dates
-        const currentBranch = new URLSearchParams(window.location.search).get('branch_id');
-        const currentSubject = new URLSearchParams(window.location.search).get('subject_id');
-
-        if (currentBranch == data.branch_id && currentSubject == data.subject_id) {
-            // Refresh the page to show updated existing dates
-            setTimeout(() => {
-                window.location.reload();
-            }, 1000);
-        }
-    });
-
-    socket.on('status', function(data) {
-        console.log('Status:', data.message);
-    });
-
-    function showNotification(message, type) {
-        const existing = document.querySelector('.notification');
+    function showToast(message, type) {
+        const existing = document.querySelector('.attendance-toast');
         if (existing) existing.remove();
 
-        const notification = document.createElement('div');
-        notification.className = `notification ${type}`;
-        notification.style.cssText = `
-            position: fixed;
-            top: 20px;
-            right: 20px;
-            padding: 15px 20px;
-            border-radius: 5px;
-            color: white;
-            font-weight: bold;
-            z-index: 1000;
-            animation: slideIn 0.3s ease-out;
+        const toast = document.createElement('div');
+        toast.className = `attendance-toast ${type}`;
+        toast.textContent = message;
+        toast.style.cssText = 'position:fixed;top:20px;right:20px;z-index:2000;padding:12px 16px;border-radius:12px;color:#fff;font-weight:700;box-shadow:0 10px 25px rgba(15,23,42,.18);max-width:320px;';
+        toast.style.background = type === 'success' ? '#16a34a' : type === 'warning' ? '#d97706' : '#dc2626';
+        document.body.appendChild(toast);
+        setTimeout(() => toast.remove(), 3200);
+    }
+
+    function slotLabel(slot) {
+        const subject = slot.subject_name || '';
+        const faculty = slot.faculty_name || '';
+        const room = slot.room || '';
+        return `${slot.start_time} - ${slot.end_time}${subject ? ` (${subject})` : ''}${faculty ? ` • ${faculty}` : ''}${room ? ` • Room ${room}` : ''}`;
+    }
+
+    function updateBadges(slot) {
+        if (!badgesWrap) return;
+        if (!slot) {
+            badgesWrap.innerHTML = '<span class="badge muted">No active timetable</span>';
+            return;
+        }
+        badgesWrap.innerHTML = `
+            <span class="badge">Period: ${slot.period}</span>
+            <span class="badge">Subject: ${slot.subject_name || ''}</span>
+            <span class="badge">Faculty: ${slot.faculty_name || ''}</span>
+            <span class="badge">Room: ${slot.room || ''}</span>
+            <span class="badge">${slot.start_time || ''} - ${slot.end_time || ''}</span>
         `;
+    }
 
-        notification.style.backgroundColor = type === 'success' ? '#4CAF50' : '#f44336';
-        notification.textContent = message;
-        document.body.appendChild(notification);
+    function renderPeriods(data) {
+        slotsCache = Array.isArray(data && data.slots) ? data.slots : [];
+        window.__attendanceSlots = slotsCache;
 
-        setTimeout(() => {
-            notification.style.animation = 'slideOut 0.3s ease-in';
-            setTimeout(() => notification.remove(), 300);
-        }, 3000);
+        if (noteEl) {
+            if (!slotsCache.length) {
+                noteEl.textContent = 'No matching timetable found';
+            } else if (data.unique_slot && data.selected_slot) {
+                noteEl.textContent = 'Single timetable slot found. Period auto-selected.';
+            } else if (data.active_slot) {
+                noteEl.textContent = 'Current Active Class';
+            } else {
+                noteEl.textContent = 'Matching timetable periods loaded';
+            }
+        }
+
+        if (!periodWrap) return;
+
+        if (!slotsCache.length) {
+            periodWrap.innerHTML = '<div class="slot-empty">No timetable matches the selected class, subject, and date.</div>';
+            if (loadBtn) loadBtn.disabled = true;
+            updateBadges(null);
+            return;
+        }
+
+        if (slotsCache.length === 1) {
+            const slot = slotsCache[0];
+            periodWrap.innerHTML = `<input type="hidden" name="period" id="period_hidden" value="${slot.period}"><div class="slot-empty" style="border-style:solid;border-color:#c7d2fe;background:#eef2ff;">${slotLabel(slot)}</div>`;
+            if (loadBtn) loadBtn.disabled = false;
+            updateBadges(slot);
+            return;
+        }
+
+        const selectedPeriod = data.selected_slot ? String(data.selected_slot.period) : '';
+        const options = slotsCache.map(slot => {
+            const selected = String(slot.period) === selectedPeriod || (!selectedPeriod && slot.is_active);
+            return `<option value="${slot.period}" ${selected ? 'selected' : ''}>${slotLabel(slot)}</option>`;
+        }).join('');
+        periodWrap.innerHTML = `<select name="period" id="period_select" required>${options}</select>`;
+        const periodSelect = document.getElementById('period_select');
+        const applySelectedBadge = () => {
+            const current = slotsCache.find(slot => String(slot.period) === String(periodSelect.value)) || slotsCache[0];
+            updateBadges(current);
+        };
+        if (periodSelect) {
+            periodSelect.addEventListener('change', applySelectedBadge);
+            applySelectedBadge();
+        }
+        if (loadBtn) loadBtn.disabled = false;
+    }
+
+    function fetchPeriods() {
+        const branch = branchSelect ? branchSelect.value.trim() : '';
+        const subject = subjectSelect ? subjectSelect.value.trim() : '';
+        const date = dateInput ? dateInput.value.trim() : '';
+        const section = sectionInput ? sectionInput.value.trim() : '';
+        if (!branch || !subject || !date) {
+            renderPeriods({ slots: [] });
+            return;
+        }
+
+        if (loadBtn) loadBtn.disabled = true;
+        if (noteEl) noteEl.textContent = 'Loading timetable...';
+        if (periodWrap) periodWrap.innerHTML = '<div class="slot-empty">Loading timetable...</div>';
+
+        const query = new URLSearchParams({ branch_id: branch, subject_id: subject, date });
+        if (section) query.set('section', section);
+
+        fetch('/api/timetable-slots?' + query.toString())
+            .then(response => response.json())
+            .then(data => {
+                renderPeriods(data || {});
+                if (data && data.selected_slot && data.unique_slot) {
+                    showToast('One timetable slot found and selected automatically.', 'success');
+                }
+            })
+            .catch(error => {
+                console.error('Failed to fetch timetable slots', error);
+                renderPeriods({ slots: [] });
+                showToast('Failed to load timetable slots.', 'error');
+            });
+    }
+
+    function queueFetch() {
+        if (timer) clearTimeout(timer);
+        timer = setTimeout(fetchPeriods, 120);
+    }
+
+    if (branchSelect) branchSelect.addEventListener('change', queueFetch);
+    if (subjectSelect) subjectSelect.addEventListener('change', queueFetch);
+    if (dateInput) dateInput.addEventListener('change', queueFetch);
+    if (sectionInput) sectionInput.addEventListener('change', queueFetch);
+
+    if (branchSelect && subjectSelect && dateInput && branchSelect.value && subjectSelect.value && dateInput.value) {
+        fetchPeriods();
+    } else {
+        renderPeriods({ slots: [] });
     }
 });
 
 const style = document.createElement('style');
 style.textContent = `
-    @keyframes slideIn {
-        from { transform: translateX(100%); opacity: 0; }
-        to { transform: translateX(0); opacity: 1; }
-    }
-    @keyframes slideOut {
-        from { transform: translateX(0); opacity: 1; }
-        to { transform: translateX(100%); opacity: 0; }
-    }
+    .badge { display:inline-block; padding:6px 10px; background:#eef2ff; color:#0f172a; border-radius:999px; font-weight:700; font-size:0.85rem; }
+    .badge.muted { background:#f1f5f9; color:#64748b; }
+    .card { padding: 16px; border-radius: 16px; background: #ffffff; box-shadow: 0 1px 2px rgba(0,0,0,0.04); margin-bottom: 12px; }
+    .form-row > div { min-width: 180px; }
+    .slot-empty { padding: 10px 12px; border-radius: 12px; background: #f8fafc; border: 1px dashed #cbd5e1; color: #475569; }
+    @media (max-width: 800px) { .form-row { display:block; } .form-row > div { width:100%; } }
 `;
 document.head.appendChild(style);
 </script>
@@ -157,16 +190,48 @@ document.head.appendChild(style);
             <input type="date" name="date" value="{{ selected_date }}" max="{{ today_date }}" required />
         </div>
         <div>
+            <label>Section</label>
+            <input type="text" name="section" id="section_input" value="{{ section }}" placeholder="e.g. A" />
+        </div>
+        <div>
+            <label>Schedule</label>
+            <div id="schedule_note">{{ schedule_message or '' }}</div>
+        </div>
+        <div>
+            <label>Active Timetable</label>
+            <div id="timetable_badges" style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+                {% if selected_period %}
+                <span class="badge">Period: {{ selected_period.period }}</span>
+                <span class="badge">Subject: {{ selected_period.subject_name }}</span>
+                <span class="badge">Faculty: {{ selected_period.faculty }}</span>
+                <span class="badge">Room: {{ selected_period.room }}</span>
+                <span class="badge">{{ selected_period.start_time }} - {{ selected_period.end_time }}</span>
+                {% elif current_active_period %}
+                <span class="badge">Period: {{ current_active_period.period }}</span>
+                <span class="badge">Subject: {{ current_active_period.subject_name }}</span>
+                <span class="badge">Faculty: {{ current_active_period.faculty }}</span>
+                <span class="badge">Room: {{ current_active_period.room }}</span>
+                <span class="badge">{{ current_active_period.start_time }} - {{ current_active_period.end_time }}</span>
+                {% else %}
+                <span class="badge muted">No active timetable</span>
+                {% endif %}
+            </div>
+        </div>
+        <div>
             <label>Period</label>
-            <select name="period" required onchange="this.form.submit()">
-                {% for p in range(1, 9) %}
-                <option value="{{ p }}" {% if period|string == p|string %}selected{% endif %}>Period {{ p }}</option>
-                {% endfor %}
-            </select>
+            <div id="timetable_period_wrap">
+                {% if selected_period %}
+                <input type="hidden" name="period" id="period_hidden" value="{{ period or selected_period.period }}" />
+                <div class="slot-empty" style="border-style:solid;border-color:#c7d2fe;background:#eef2ff;">{{ selected_period.start_time }} - {{ selected_period.end_time }} ({{ selected_period.subject_name }})</div>
+                {% else %}
+                <div class="slot-empty">Choose branch, subject, and date to load timetable periods.</div>
+                {% endif %}
+            </div>
         </div>
         {% if branch_id %}
         <div style="display: flex; flex-direction: column; gap: 8px;">
-            <button type="submit">Load Students</button>
+            <button id="load_students_btn" type="submit" disabled>Load Students</button>
+            <div id="timetable_spinner" style="display:none; align-self:center;">Loading…</div>
             {% if subject_id %}
             <a href="{{ url_for('mark_attendance', branch_id=branch_id, subject_id=subject_id, date=prev_date, period=period) }}" class="button small" style="text-align: center; background: var(--text-secondary);">← Previous Day</a>
             {% endif %}
@@ -253,11 +318,14 @@ document.head.appendChild(style);
             </table>
         </div>
         <div style="display: flex; gap: 10px; flex-wrap: wrap; align-items: center;">
-            <button type="submit">Save Attendance</button>
+            <button type="submit" {% if not can_mark_attendance %}disabled title="Cannot mark attendance: schedule mismatch or outside active slot"{% endif %}>Save Attendance</button>
             <a href="{{ url_for('generate_qr', branch_id=branch_id, subject_id=subject_id, date=selected_date, period=period) }}" class="button" style="background-color: #2196F3; text-decoration: none; display: inline-flex; align-items: center; justify-content: center;">Generate QR Code</a>
             <button id="copyAttendanceLinkBtn" type="button" class="button" style="background-color: #4CAF50;">Copy Attendance Scan URL</button>
             <span id="copyStatus" style="color: #4CAF50; display: none; font-weight: bold;">Link copied!</span>
         </div>
+        {% if not can_mark_attendance %}
+        <div class="flash warning" style="margin-top:12px;">Attendance cannot be marked: {{ schedule_message }}</div>
+        {% endif %}
     </form>
 </div>
 {% endif %}
