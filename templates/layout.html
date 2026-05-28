@@ -31,8 +31,12 @@
             <a class="nav-link" href="{{ url_for('students') }}"><i class="fa-solid fa-users"></i> Students</a>
             <a class="nav-link" href="{{ url_for('branches') }}"><i class="fa-solid fa-building"></i> Depts</a>
             <a class="nav-link" href="{{ url_for('subjects') }}"><i class="fa-solid fa-book-open"></i> Subjects</a>
+            {% if has_endpoint('manage_teachers') %}
             <a class="nav-link" href="{{ url_for('manage_teachers') }}"><i class="fa-solid fa-user-tie"></i> Teachers</a>
+            {% endif %}
+            {% if has_endpoint('admin_academic') %}
             <a class="nav-link" href="{{ url_for('admin_academic') }}"><i class="fa-solid fa-graduation-cap"></i> Academic</a>
+            {% endif %}
             <a class="nav-link" href="{{ url_for('mark_attendance') }}"><i class="fa-solid fa-calendar-check"></i> Attendance</a>
             <a class="nav-link" href="{{ url_for('department_dashboard') }}"><i class="fa-solid fa-chart-pie"></i> Summary</a>
             <a class="nav-link" href="{{ url_for('attendance_report') }}"><i class="fa-solid fa-file-invoice"></i> Reports</a>
@@ -40,14 +44,24 @@
             <a class="nav-link" href="{{ url_for('settings') }}"><i class="fa-solid fa-gear"></i> Settings</a>
             <a class="logout" href="{{ url_for('logout') }}"><i class="fa-solid fa-right-from-bracket"></i></a>
             {% elif session.role == 'teacher' %}
+            {% if has_endpoint('teacher_dashboard') %}
             <a class="nav-link" href="{{ url_for('teacher_dashboard') }}"><i class="fa-solid fa-gauge"></i> Dashboard</a>
+            {% endif %}
             {% if has_endpoint('timetable_home') %}
             <a class="nav-link" href="{{ url_for('timetable_home') }}"><i class="fa-solid fa-calendar-days"></i> Timetable</a>
             {% endif %}
+            {% if has_endpoint('teacher_mark_attendance') %}
             <a class="nav-link" href="{{ url_for('teacher_mark_attendance') }}"><i class="fa-solid fa-calendar-check"></i> Attendance</a>
+            {% endif %}
+            {% if has_endpoint('teacher_attendance_records') %}
             <a class="nav-link" href="{{ url_for('teacher_attendance_records') }}"><i class="fa-solid fa-clipboard-list"></i> Records</a>
+            {% endif %}
+            {% if has_endpoint('teacher_select_branch') %}
             <a class="nav-link" href="{{ url_for('teacher_select_branch') }}"><i class="fa-solid fa-building"></i> Branch</a>
+            {% endif %}
+            {% if has_endpoint('teacher_select_subject') %}
             <a class="nav-link" href="{{ url_for('teacher_select_subject') }}"><i class="fa-solid fa-book"></i> Subject</a>
+            {% endif %}
             <a class="logout" href="{{ url_for('logout') }}"><i class="fa-solid fa-right-from-bracket"></i></a>
             {% else %}
             <a class="logout" href="{{ url_for('logout') }}"><i class="fa-solid fa-right-from-bracket"></i></a>
@@ -70,12 +84,18 @@
         <a class="nav-link" href="{{ url_for('department_dashboard') }}"><i class="fa-solid fa-chart-pie"></i><span>Summary</span></a>
         <a class="nav-link" href="{{ url_for('logout') }}"><i class="fa-solid fa-right-from-bracket"></i><span>Logout</span></a>
         {% elif session.role == 'teacher' %}
+        {% if has_endpoint('teacher_dashboard') %}
         <a class="nav-link" href="{{ url_for('teacher_dashboard') }}"><i class="fa-solid fa-house"></i><span>Home</span></a>
+        {% endif %}
         {% if has_endpoint('timetable_home') %}
         <a class="nav-link" href="{{ url_for('timetable_home') }}"><i class="fa-solid fa-calendar-days"></i><span>Timetable</span></a>
         {% endif %}
+        {% if has_endpoint('teacher_mark_attendance') %}
         <a class="nav-link" href="{{ url_for('teacher_mark_attendance') }}"><i class="fa-solid fa-calendar-check"></i><span>Attend</span></a>
+        {% endif %}
+        {% if has_endpoint('teacher_attendance_records') %}
         <a class="nav-link" href="{{ url_for('teacher_attendance_records') }}"><i class="fa-solid fa-clipboard-list"></i><span>Records</span></a>
+        {% endif %}
         <a class="nav-link" href="{{ url_for('logout') }}"><i class="fa-solid fa-right-from-bracket"></i><span>Logout</span></a>
         {% endif %}
     </nav>

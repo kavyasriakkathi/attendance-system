@@ -674,6 +674,74 @@ def logout():
     return redirect(url_for("login"))
 
 
+def get_current_active_classes(db):
+    """
+    Returns currently running classes based on the current day and time.
+    Excludes SHORT BREAK and handles overlapping periods safely.
+    """
+    now = datetime.now()
+    current_day = now.strftime("%A")
+    current_time_str = now.strftime("%H:%M")
+    
+    # Query timetable_entries to find entries where current_time is between start_time and end_time
+    # and day matches current_day, excluding SHORT BREAK.
+    query = """
+        SELECT 
+            te.section,
+            s.name as subject_name,
+            t.name as faculty_name,
+            te.room,
+            te.start_time,
+            te.end_time,
+            b.name as branch_name
+        FROM timetable_entries te
+        LEFT JOIN subjects s ON te.subject_id = s.id
+        LEFT JOIN teachers t ON te.teacher_id = t.id
+        LEFT JOIN branches b ON te.branch_id = b.id
+        WHERE LOWER(TRIM(te.day)) = LOWER(TRIM(%s))
+          AND te.start_time <= %s
+          AND te.end_time > %s
+          AND (s.name IS NULL OR UPPER(TRIM(s.name)) != 'SHORT BREAK')
+    """
+    
+    placeholder = get_placeholder()
+    query = query.replace("%s", placeholder)
+    
+    rows = db.execute(query, (current_day, current_time_str, current_time_str)).fetchall()
+    
+    active_classes = []
+    for row in rows:
+        active_classes.append({
+            "section": row_get(row, "section", ""),
+            "subject": row_get(row, "subject_name", ""),
+            "faculty": row_get(row, "faculty_name", ""),
+            "room": row_get(row, "room", ""),
+            "start_time": row_get(row, "start_time", ""),
+            "end_time": row_get(row, "end_time", ""),
+            "branch": row_get(row, "branch_name", "")
+        })
+        
+    return active_classes
+
+
+@app.route("/api/active-classes", methods=["GET"])
+def api_active_classes():
+    db = None
+    try:
+        db = get_db()
+        classes = get_current_active_classes(db)
+        return jsonify({"success": True, "active_classes": classes, "count": len(classes)})
+    except Exception as e:
+        print(f"Error fetching active classes: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+    finally:
+        if db:
+            try:
+                db.close()
+            except Exception:
+                pass
+
+
 @app.route("/")
 def index():
     return render_template("index.html")
@@ -2912,6 +2980,286 @@ if "timetable_home" not in app.view_functions:
     def timetable_home():
         flash("Timetable module is unavailable right now. Please try again shortly.", "warning")
         return redirect(url_for("dashboard"))
+
+
+# Compatibility endpoints for templates that expect teacher/admin management
+# routes from the fuller app variant. These are only added when missing so
+# they won't override existing blueprint or route implementations.
+if "manage_teachers" not in app.view_functions:
+    @app.route("/admin/teachers", methods=["GET", "POST"])
+    @login_required
+    def manage_teachers():
+        if session.get("role") != "admin":
+            abort(403)
+
+        db = get_db()
+        placeholder = get_placeholder()
+        try:
+            if request.method == "POST":
+                action = (request.form.get("action") or "").strip()
+                teacher_id = (request.form.get("teacher_id") or "").strip()
+                if action == "add":
+                    username = (request.form.get("username") or "").strip()
+                    password = (request.form.get("password") or "").strip()
+                    if username and password:
+                        db.execute(
+                            f"INSERT INTO users (username, password, role) VALUES ({placeholder}, {placeholder}, {placeholder})",
+                            (username, generate_password_hash(password), "teacher"),
+                        )
+                        db.commit()
+                        flash("Teacher account created.", "success")
+                    else:
+                        flash("Username and password are required.", "error")
+                elif action == "delete" and teacher_id.isdigit():
+                    db.execute(f"DELETE FROM users WHERE id = {placeholder} AND role = {placeholder}", (int(teacher_id), "teacher"))
+                    db.commit()
+                    flash("Teacher deleted.", "success")
+                elif action == "reset_password" and teacher_id.isdigit():
+                    new_password = (request.form.get("new_password") or "").strip()
+                    if len(new_password) < 4:
+                        flash("Password must be at least 4 characters.", "error")
+                    else:
+                        db.execute(
+                            f"UPDATE users SET password = {placeholder} WHERE id = {placeholder} AND role = {placeholder}",
+                            (generate_password_hash(new_password), int(teacher_id), "teacher"),
+                        )
+                        db.commit()
+                        flash("Teacher password reset.", "success")
+                elif action == "edit" and teacher_id.isdigit():
+                    username = (request.form.get("username") or "").strip()
+                    if username:
+                        db.execute(
+                            f"UPDATE users SET username = {placeholder} WHERE id = {placeholder} AND role = {placeholder}",
+                            (username, int(teacher_id), "teacher"),
+                        )
+                        db.commit()
+                        flash("Teacher updated.", "success")
+
+            teachers = db.execute(
+                f"SELECT id, username, NULL AS name, NULL AS subject_name FROM users WHERE role = {placeholder} ORDER BY id DESC",
+                ("teacher",),
+            ).fetchall()
+            subjects = db.execute("SELECT id, name FROM subjects ORDER BY name").fetchall()
+            branches = db.execute("SELECT id, name FROM branches ORDER BY name").fetchall()
+
+            teacher_branches_map = {row_get(t, "id"): [] for t in teachers}
+            teacher_subjects_map = {row_get(t, "id"): [] for t in teachers}
+
+            return render_template(
+                "admin_teachers.html",
+                teachers=teachers,
+                subjects=subjects,
+                branches=branches,
+                teacher_branches_map=teacher_branches_map,
+                teacher_subjects_map=teacher_subjects_map,
+            )
+        finally:
+            try:
+                db.close()
+            except Exception:
+                pass
+
+
+if "admin_academic" not in app.view_functions:
+    @app.route("/admin/academic", methods=["GET", "POST"])
+    @login_required
+    def admin_academic():
+        if session.get("role") != "admin":
+            abort(403)
+
+        db = get_db()
+        try:
+            students = []
+            stats = []
+            try:
+                students = db.execute(
+                    "SELECT id, name, enrollment, current_year, current_semester FROM students ORDER BY name"
+                ).fetchall()
+                stats = db.execute(
+                    "SELECT current_year, current_semester, COUNT(*) AS count FROM students GROUP BY current_year, current_semester ORDER BY current_year, current_semester"
+                ).fetchall()
+            except Exception:
+                # Older schema may not have academic columns.
+                students = []
+                stats = []
+            return render_template("admin_academic.html", students=students, stats=stats)
+        finally:
+            try:
+                db.close()
+            except Exception:
+                pass
+
+
+if "delete_subject" not in app.view_functions:
+    @app.route("/delete_subject", methods=["POST"])
+    @login_required
+    def delete_subject():
+        if session.get("role") != "admin":
+            abort(403)
+        subject_id = request.form.get("subject_id") or request.form.get("id")
+        if not (subject_id and str(subject_id).isdigit()):
+            flash("Invalid subject id.", "error")
+            return redirect(url_for("subjects"))
+        db = get_db()
+        placeholder = get_placeholder()
+        try:
+            db.execute(f"DELETE FROM subjects WHERE id = {placeholder}", (int(subject_id),))
+            db.commit()
+            flash("Subject deleted.", "success")
+        except Exception as e:
+            db.rollback()
+            flash(f"Unable to delete subject: {repr(e)}", "error")
+        finally:
+            try:
+                db.close()
+            except Exception:
+                pass
+        return redirect(url_for("subjects"))
+
+
+if "delete_student" not in app.view_functions:
+    @app.route("/delete_student", methods=["POST"])
+    @login_required
+    def delete_student():
+        if session.get("role") != "admin":
+            abort(403)
+        student_id = request.form.get("student_id") or request.form.get("id")
+        if not (student_id and str(student_id).isdigit()):
+            flash("Invalid student id.", "error")
+            return redirect(url_for("students"))
+        db = get_db()
+        placeholder = get_placeholder()
+        try:
+            db.execute(f"DELETE FROM attendance WHERE student_id = {placeholder}", (int(student_id),))
+            db.execute(f"DELETE FROM users WHERE student_id = {placeholder}", (int(student_id),))
+            db.execute(f"DELETE FROM students WHERE id = {placeholder}", (int(student_id),))
+            db.commit()
+            flash("Student deleted.", "success")
+        except Exception as e:
+            db.rollback()
+            flash(f"Unable to delete student: {repr(e)}", "error")
+        finally:
+            try:
+                db.close()
+            except Exception:
+                pass
+        return redirect(url_for("students"))
+
+
+if "bulk_delete_students" not in app.view_functions:
+    @app.route("/bulk_delete_students", methods=["POST"])
+    @login_required
+    def bulk_delete_students():
+        if session.get("role") != "admin":
+            abort(403)
+        ids = request.form.getlist("student_ids")
+        valid_ids = [int(x) for x in ids if str(x).isdigit()]
+        if not valid_ids:
+            flash("No students selected.", "warning")
+            return redirect(url_for("students"))
+        db = get_db()
+        placeholder = get_placeholder()
+        try:
+            marks = ",".join([placeholder] * len(valid_ids))
+            db.execute(f"DELETE FROM attendance WHERE student_id IN ({marks})", tuple(valid_ids))
+            db.execute(f"DELETE FROM users WHERE student_id IN ({marks})", tuple(valid_ids))
+            db.execute(f"DELETE FROM students WHERE id IN ({marks})", tuple(valid_ids))
+            db.commit()
+            flash(f"Deleted {len(valid_ids)} students.", "success")
+        except Exception as e:
+            db.rollback()
+            flash(f"Bulk delete failed: {repr(e)}", "error")
+        finally:
+            try:
+                db.close()
+            except Exception:
+                pass
+        return redirect(url_for("students"))
+
+
+if "delete_all_students" not in app.view_functions:
+    @app.route("/delete_all_students", methods=["POST"])
+    @login_required
+    def delete_all_students():
+        if session.get("role") != "admin":
+            abort(403)
+        db = get_db()
+        try:
+            db.execute("DELETE FROM attendance")
+            db.execute("DELETE FROM users WHERE role = 'student'")
+            db.execute("DELETE FROM students")
+            db.commit()
+            flash("All students deleted.", "success")
+        except Exception as e:
+            db.rollback()
+            flash(f"Delete all failed: {repr(e)}", "error")
+        finally:
+            try:
+                db.close()
+            except Exception:
+                pass
+        return redirect(url_for("students"))
+
+
+if "teacher_dashboard" not in app.view_functions:
+    @app.route("/teacher/dashboard")
+    @login_required
+    def teacher_dashboard():
+        if session.get("role") != "teacher":
+            flash("Teacher access required.", "warning")
+            return redirect(url_for("dashboard"))
+        flash("Teacher dashboard is not fully enabled in this deployment.", "warning")
+        return redirect(url_for("mark_attendance"))
+
+
+if "teacher_select_branch" not in app.view_functions:
+    @app.route("/teacher/select-branch", methods=["GET", "POST"])
+    @login_required
+    def teacher_select_branch():
+        return redirect(url_for("teacher_dashboard"))
+
+
+if "teacher_select_subject" not in app.view_functions:
+    @app.route("/teacher/select-subject", methods=["GET", "POST"])
+    @login_required
+    def teacher_select_subject():
+        return redirect(url_for("teacher_dashboard"))
+
+
+if "teacher_mark_attendance" not in app.view_functions:
+    @app.route("/teacher/attendance", methods=["GET", "POST"])
+    @login_required
+    def teacher_mark_attendance():
+        return redirect(url_for("mark_attendance"))
+
+
+if "teacher_attendance_records" not in app.view_functions:
+    @app.route("/teacher/records")
+    @login_required
+    def teacher_attendance_records():
+        return redirect(url_for("attendance_report"))
+
+
+if "timetable_manage" not in app.view_functions:
+    @app.route("/timetable/manage")
+    @login_required
+    def timetable_manage():
+        return redirect(url_for("timetable_home"))
+
+
+if "timetable_faculty_schedules" not in app.view_functions:
+    @app.route("/timetable/faculty-schedules")
+    @login_required
+    def timetable_faculty_schedules():
+        return redirect(url_for("timetable_home"))
+
+
+if "timetable_admin_bulk_resolve" not in app.view_functions:
+    @app.route("/timetable/admin/bulk-resolve", methods=["POST"])
+    @login_required
+    def timetable_admin_bulk_resolve():
+        flash("Bulk resolve is unavailable in this deployment.", "warning")
+        return redirect(url_for("timetable_home"))
 
 @app.route("/admin/notify-low-attendance", methods=["POST"])
 @login_required
