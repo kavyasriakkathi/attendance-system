@@ -521,6 +521,31 @@ def init_db(db=None):
         CREATE UNIQUE INDEX IF NOT EXISTS idx_attendance_student_subject_date
         ON attendance(student_id, subject_id, date);
         """)
+
+        db.execute("""
+        CREATE TABLE IF NOT EXISTS attendance_sessions (
+            id SERIAL PRIMARY KEY,
+            timetable_entry_id INTEGER,
+            faculty_name TEXT,
+            section TEXT,
+            subject_name TEXT,
+            date TEXT NOT NULL,
+            start_time TEXT,
+            end_time TEXT,
+            is_closed INTEGER DEFAULT 0,
+            UNIQUE(section, subject_name, date, start_time, end_time)
+        );
+        """)
+
+        db.execute("""
+        CREATE TABLE IF NOT EXISTS attendance_records (
+            id SERIAL PRIMARY KEY,
+            session_id INTEGER NOT NULL REFERENCES attendance_sessions(id) ON DELETE CASCADE,
+            student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+            status TEXT NOT NULL,
+            UNIQUE(session_id, student_id)
+        );
+        """)
     else:
         # SQLite
         db.executescript("""
@@ -571,6 +596,29 @@ def init_db(db=None):
 
         CREATE UNIQUE INDEX IF NOT EXISTS idx_attendance_student_subject_date
         ON attendance(student_id, subject_id, date);
+
+        CREATE TABLE IF NOT EXISTS attendance_sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timetable_entry_id INTEGER,
+            faculty_name TEXT,
+            section TEXT,
+            subject_name TEXT,
+            date TEXT NOT NULL,
+            start_time TEXT,
+            end_time TEXT,
+            is_closed INTEGER DEFAULT 0,
+            UNIQUE(section, subject_name, date, start_time, end_time)
+        );
+
+        CREATE TABLE IF NOT EXISTS attendance_records (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id INTEGER NOT NULL,
+            student_id INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            FOREIGN KEY(session_id) REFERENCES attendance_sessions(id) ON DELETE CASCADE,
+            FOREIGN KEY(student_id) REFERENCES students(id) ON DELETE CASCADE,
+            UNIQUE(session_id, student_id)
+        );
         """)
 
     # ✅ Admin check
@@ -3346,65 +3394,136 @@ def internal_error(error):
 def not_found_error(error):
     return "<h1>404 Not Found</h1><p>The page you requested does not exist.</p>", 404
 
-def get_current_active_classes(db):
-    """
-    Returns currently running classes based on the current day and time.
-    Excludes SHORT BREAK and handles overlapping periods safely.
-    """
-    now = datetime.now()
-    current_day = now.strftime("%A")
-    current_time_str = now.strftime("%H:%M")
-    
-    # Query timetable_entries to find entries where current_time is between start_time and end_time
-    # and day matches current_day, excluding SHORT BREAK.
-    query = """
-        SELECT 
-            te.section,
-            s.name as subject_name,
-            t.name as faculty_name,
-            te.room,
-            te.start_time,
-            te.end_time,
-            b.name as branch_name
-        FROM timetable_entries te
-        LEFT JOIN subjects s ON te.subject_id = s.id
-        LEFT JOIN teachers t ON te.teacher_id = t.id
-        LEFT JOIN branches b ON te.branch_id = b.id
-        WHERE LOWER(TRIM(te.day)) = LOWER(TRIM(%s))
-          AND te.start_time <= %s
-          AND te.end_time > %s
-          AND (s.name IS NULL OR UPPER(TRIM(s.name)) != 'SHORT BREAK')
-    """
-    
-    placeholder = get_placeholder()
-    query = query.replace("%s", placeholder)
-    
-    rows = db.execute(query, (current_day, current_time_str, current_time_str)).fetchall()
-    
-    active_classes = []
-    for row in rows:
-        active_classes.append({
-            "section": row_get(row, "section", ""),
-            "subject": row_get(row, "subject_name", ""),
-            "faculty": row_get(row, "faculty_name", ""),
-            "room": row_get(row, "room", ""),
-            "start_time": row_get(row, "start_time", ""),
-            "end_time": row_get(row, "end_time", ""),
-            "branch": row_get(row, "branch_name", "")
-        })
-        
-    return active_classes
 
+@app.route("/api/attendance/session", methods=["POST"])
+def api_create_attendance_session():
+    data = request.get_json() or {}
+    section = (data.get("section") or "").strip()
+    subject = (data.get("subject") or "").strip()
+    faculty = (data.get("faculty") or "").strip()
+    date_val = (data.get("date") or "").strip()
+    start_time = (data.get("start_time") or "").strip()
+    end_time = (data.get("end_time") or "").strip()
 
-@app.route("/api/active-classes", methods=["GET"])
-def api_active_classes():
+    if not all([section, subject, date_val, start_time, end_time]):
+        return jsonify({"success": False, "error": "Missing required fields"}), 400
+
     db = None
     try:
         db = get_db()
-        classes = get_current_active_classes(db)
-        return jsonify({"success": True, "active_classes": classes, "count": len(classes)})
+        placeholder = get_placeholder()
+        
+        # Auto-link to timetable_entries
+        # We find the entry that matches section, subject, date (mapped to day), and times
+        day_of_week = datetime.strptime(date_val, "%Y-%m-%d").strftime("%A")
+        
+        te_query = f"""
+            SELECT te.id FROM timetable_entries te
+            LEFT JOIN subjects s ON te.subject_id = s.id
+            WHERE LOWER(TRIM(te.section)) = LOWER(TRIM({placeholder}))
+              AND LOWER(TRIM(s.name)) = LOWER(TRIM({placeholder}))
+              AND LOWER(TRIM(te.day)) = LOWER(TRIM({placeholder}))
+              AND te.start_time = {placeholder}
+              AND te.end_time = {placeholder}
+            LIMIT 1
+        """
+        te_row = db.execute(te_query, (section, subject, day_of_week, start_time, end_time)).fetchone()
+        timetable_entry_id = row_get(te_row, "id") if te_row else None
+        
+        insert_query = f"""
+            INSERT INTO attendance_sessions 
+            (timetable_entry_id, faculty_name, section, subject_name, date, start_time, end_time)
+            VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})
+        """
+        if app.config.get("DATABASE", "").startswith("postgres"):
+            insert_query += " RETURNING id"
+        
+        try:
+            cur = db.execute(insert_query, (timetable_entry_id, faculty, section, subject, date_val, start_time, end_time))
+            if app.config.get("DATABASE", "").startswith("postgres"):
+                session_id = cur.fetchone()[0]
+            else:
+                session_id = cur.lastrowid
+            db.commit()
+            return jsonify({"success": True, "session_id": session_id})
+        except Exception as e:
+            db.rollback()
+            err_str = str(e).lower()
+            if "unique" in err_str or "duplicate" in err_str:
+                return jsonify({"success": False, "error": "Session already exists for this slot."}), 409
+            raise e
+            
     except Exception as e:
-        print(f"Error fetching active classes: {e}")
+        print(f"Error creating attendance session: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+    finally:
+        if db:
+            try:
+                db.close()
+            except Exception:
+                pass
+
+
+@app.route("/api/attendance/mark", methods=["POST"])
+def api_mark_attendance():
+    data = request.get_json() or {}
+    session_id = data.get("session_id")
+    student_id = data.get("student_id")
+    status = (data.get("status") or "").strip()
+
+    if not all([session_id, student_id, status]):
+        return jsonify({"success": False, "error": "Missing required fields"}), 400
+
+    db = None
+    try:
+        db = get_db()
+        placeholder = get_placeholder()
+        
+        # Check if session is closed
+        sess = db.execute(f"SELECT is_closed FROM attendance_sessions WHERE id = {placeholder}", (session_id,)).fetchone()
+        if not sess:
+            return jsonify({"success": False, "error": "Session not found."}), 404
+        if row_get(sess, "is_closed"):
+            return jsonify({"success": False, "error": "Session is closed."}), 403
+
+        insert_query = f"""
+            INSERT INTO attendance_records (session_id, student_id, status)
+            VALUES ({placeholder}, {placeholder}, {placeholder})
+        """
+        # Handle SQLite/Postgres "ON CONFLICT" or simply let it fail if unique constraint violated
+        # Using a simple check first to prevent error spam
+        existing = db.execute(f"SELECT id FROM attendance_records WHERE session_id = {placeholder} AND student_id = {placeholder}", (session_id, student_id)).fetchone()
+        
+        if existing:
+            db.execute(f"UPDATE attendance_records SET status = {placeholder} WHERE session_id = {placeholder} AND student_id = {placeholder}", (status, session_id, student_id))
+        else:
+            db.execute(insert_query, (session_id, student_id, status))
+            
+        db.commit()
+        return jsonify({"success": True})
+    except Exception as e:
+        print(f"Error marking attendance: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+    finally:
+        if db:
+            try:
+                db.close()
+            except Exception:
+                pass
+
+
+@app.route("/api/attendance/session/<int:session_id>/close", methods=["POST"])
+def api_close_attendance_session(session_id):
+    db = None
+    try:
+        db = get_db()
+        placeholder = get_placeholder()
+        
+        db.execute(f"UPDATE attendance_sessions SET is_closed = 1 WHERE id = {placeholder}", (session_id,))
+        db.commit()
+        return jsonify({"success": True})
+    except Exception as e:
+        print(f"Error closing attendance session: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
     finally:
         if db:
