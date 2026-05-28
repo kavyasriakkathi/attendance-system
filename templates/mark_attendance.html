@@ -5,6 +5,10 @@
 function getRealtimeSocket() {
     if (!window.__attendanceRealtimeSocket) {
         window.__attendanceRealtimeSocket = io({
+        <div>
+            <label>Section</label>
+            <input type="text" name="section" id="section_input" value="" placeholder="e.g. A" />
+        </div>
             transports: ['websocket'],
             upgrade: false,
             reconnection: true,
@@ -15,6 +19,43 @@ function getRealtimeSocket() {
     }
     return window.__attendanceRealtimeSocket;
 }
+document.addEventListener('DOMContentLoaded', function() {
+    // Auto-detect current period when date/section/subject are provided
+    const sectionInput = document.getElementById('section_input');
+    const subjectSelect = document.querySelector('select[name="subject_id"]');
+    const dateInput = document.querySelector('input[name="date"]');
+    const branchSelect = document.querySelector('select[name="branch_id"]');
+
+    function detectAndLoad() {
+        const section = sectionInput ? sectionInput.value.trim() : '';
+        const subject = subjectSelect ? subjectSelect.value : '';
+        const date = dateInput ? dateInput.value : '';
+        if (!subject || !date || !section) return;
+        const q = new URLSearchParams({ date, section, subject });
+        fetch('/api/current-period?' + q.toString())
+            .then(r => r.json())
+            .then(data => {
+                if (data.error) return;
+                if (data.branch_id && branchSelect) {
+                    branchSelect.value = data.branch_id;
+                }
+                if (data.subject_id) {
+                    // redirect to the attendance page to auto-load students
+                    const params = new URLSearchParams({ branch_id: data.branch_id, subject_id: data.subject_id, date: date });
+                    if (data.already_marked) {
+                        alert('Attendance already exists for this subject/date. You can still view or update it.');
+                    }
+                    window.location = '/attendance?' + params.toString();
+                }
+            }).catch(() => {});
+    }
+
+    // Trigger detection when subject/section/date change
+    if (subjectSelect) subjectSelect.addEventListener('change', detectAndLoad);
+    if (sectionInput) sectionInput.addEventListener('change', detectAndLoad);
+    if (dateInput) dateInput.addEventListener('change', detectAndLoad);
+});
+
 
 document.addEventListener('DOMContentLoaded', function() {
     const socket = getRealtimeSocket();

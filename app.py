@@ -1,91 +1,27 @@
 import os
-import logging
-import re
-import base64
-import secrets
-from datetime import date, timedelta
+from datetime import date, timedelta, datetime
 from io import BytesIO
 import sqlite3
+import smtplib
+import ssl
 import time
-import threading
+import socket
 import traceback
-from typing import Tuple
 from urllib.parse import urlparse
-import requests
+from email.message import EmailMessage
 from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
-from dotenv import load_dotenv
-import sys
 
-from flask import Flask, abort, redirect, render_template, request, session, url_for, flash, jsonify, send_file, make_response
+from flask import Flask, abort, redirect, render_template, request, session, url_for, flash, jsonify, send_file
 from functools import wraps
 from werkzeug.security import check_password_hash, generate_password_hash
 from werkzeug.exceptions import HTTPException
 from werkzeug.utils import secure_filename
-from flask_socketio import SocketIO, emit, join_room
+# from flask_socketio import SocketIO, emit, join_room
+
+# # Initialize SocketIO
+# socketio = SocketIO(app, cors_allowed_origins="*")
 
 app = Flask(__name__)
-
-# Determine deployment mode early so secret/session policy can be applied consistently.
-is_prod = bool(os.environ.get("RENDER") or os.environ.get("RENDER_INTERNAL_HOSTNAME") or os.environ.get("FLASK_ENV", "").lower() == "production")
-
-# Use a fixed secret from environment in production to prevent session invalidation after restarts.
-_secret_key_from_env = (os.getenv("SECRET_KEY") or "").strip()
-if _secret_key_from_env:
-    _effective_secret_key = _secret_key_from_env
-elif is_prod:
-    _effective_secret_key = secrets.token_hex(32)
-    logging.getLogger("app.startup").warning(
-        "SECRET_KEY is not set in production; using a temporary fallback key. "
-        "Set SECRET_KEY in Render to keep sessions stable across restarts."
-    )
-else:
-    _effective_secret_key = "dev-key-change-in-production"
-
-def _resolve_socketio_async_mode() -> str:
-    configured_mode = (os.getenv("SOCKETIO_ASYNC_MODE") or "").strip().lower()
-    if configured_mode:
-        return configured_mode
-
-    if not is_prod:
-        return "threading"
-
-    try:
-        import importlib
-
-        import eventlet  # noqa: F401
-        importlib.import_module("engineio.async_drivers.eventlet")
-        return "eventlet"
-    except Exception:
-        logging.getLogger("app.startup").warning(
-            "eventlet is unavailable or incompatible; falling back to threading async mode."
-        )
-        return "threading"
-
-
-_socketio_async_mode = _resolve_socketio_async_mode()
-
-# Initialize SocketIO with Render-safe defaults and Flask-managed sessions.
-socketio = SocketIO(
-    app,
-    cors_allowed_origins="*",
-    manage_session=False,
-    async_mode=_socketio_async_mode,
-    logger=False,
-    engineio_logger=False,
-    ping_interval=25,
-    ping_timeout=60,
-)
-# Configure root logger to emit to stdout (Render captures stdout/stderr)
-try:
-    handler = logging.StreamHandler(stream=sys.stdout)
-    handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
-    root_logger = logging.getLogger()
-    # Replace handlers to avoid duplicate logs in some environments
-    root_logger.handlers = [handler]
-    root_logger.setLevel(logging.INFO)
-except Exception:
-    # If logging config fails, continue without crashing the app
-    pass
 # Email sending is handled by the `send_email` helper defined later in the file.
 
 
@@ -134,203 +70,26 @@ else:
     print(f"Using database path: {database_path}")
     print(f"Current working directory: {os.getcwd()}")
 
-# Load .env variables if present (does not overwrite existing environment)
-load_dotenv(override=False)
-
-# Suppress itsdangerous warnings about invalid session cookies (expected for old/tampered cookies)
-import warnings
-warnings.filterwarnings("ignore", category=Warning, module="itsdangerous")
-logging.getLogger("itsdangerous").setLevel(logging.ERROR)
-
-# Session cookie and lifetime configuration
-# In production (Render) ensure cookies are secure and SECRET_KEY is set.
-
-# Normalize Resend credentials from environment
-raw_resend_api_key = os.environ.get("RESEND_API_KEY") or ""
-raw_mail_from = os.environ.get("MAIL_FROM") or ""
-resend_api_key = raw_resend_api_key.strip() if raw_resend_api_key else None
-mail_from = raw_mail_from.strip() if raw_mail_from else None
+# Normalize SMTP credentials from environment to avoid accidental spaces/quotes
+raw_mail_username = os.environ.get("MAIL_USERNAME") or ""
+raw_mail_password = os.environ.get("MAIL_PASSWORD") or ""
+# Trim surrounding whitespace and remove accidental inner spaces in passwords (common when copying)
+mail_username = raw_mail_username.strip() if raw_mail_username else None
+# Remove spaces commonly introduced when copying app-passwords (e.g. "abcd efgh ijkl mnop")
+mail_password = raw_mail_password.strip().replace(" ", "") if raw_mail_password else None
 
 app.config.from_mapping(
-    SECRET_KEY=_effective_secret_key,
+    SECRET_KEY=os.environ.get("SECRET_KEY", "dev-key-change-in-production"),
     DATABASE=database_path,
-    RESEND_API_KEY=resend_api_key,
-    MAIL_FROM=mail_from,
-    MAIL_PROVIDER="resend",
-    # Keep these for compatibility with existing templates/debug cards.
-    MAIL_SERVER="api.resend.com",
-    MAIL_PORT=443,
-    MAIL_USERNAME=mail_from,
-    MAIL_USE_TLS=True,
+    MAIL_SERVER=os.environ.get("MAIL_SERVER", "smtp.gmail.com"),
+    MAIL_PORT=int(os.environ.get("MAIL_PORT", 587)),
+    MAIL_USERNAME=mail_username,
+    MAIL_PASSWORD=mail_password,
+    MAIL_USE_TLS=os.environ.get("MAIL_USE_TLS", "True").lower() in ("true", "1", "yes"),
+    MAIL_FROM=os.environ.get("MAIL_FROM", mail_username),
     REPORT_ADMIN_EMAIL=os.environ.get("REPORT_ADMIN_EMAIL", "instituteattendanceapp@gmail.com"),
     LOW_ATTENDANCE_THRESHOLD=int(os.environ.get("LOW_ATTENDANCE_THRESHOLD", 75)),
 )
-
-# Keep the resolved startup secret stable for this process.
-app.config["SECRET_KEY"] = _effective_secret_key
-
-
-@app.route("/debug/env")
-def debug_env_info():
-    # Temporary debug route to inspect env suitability (admin-only in production)
-    return {
-        "has_secret": bool(os.getenv("SECRET_KEY")),
-        "secret_len": len(app.config.get("SECRET_KEY") or ""),
-        "environment": os.getenv("RENDER") or os.getenv("FLASK_ENV") or "local",
-    }
-
-
-@app.route("/_clear_session")
-def _clear_session():
-    # Clear the session cookie/server-side session for debugging.
-    try:
-        session.clear()
-    except Exception:
-        pass
-    return "session cleared"
-
-
-def _mask_env_value(key: str, value: str) -> str:
-    """Return a masked representation for sensitive env values.
-
-    We avoid printing full secrets. For API keys and passwords, show a short
-    masked summary. For non-sensitive values (emails/usernames), show a
-    truncated value for convenience.
-    """
-    try:
-        if value is None:
-            return "<not set>"
-        s = str(value)
-    except Exception:
-        return "<unavailable>"
-    lower = key.lower()
-    # Treat anything with 'key' or 'secret' or 'password' as sensitive
-    if any(tok in lower for tok in ("password", "secret", "api_key", "apikey", "token")):
-        if len(s) <= 6:
-            return "<set>"
-        return s[:3] + "..." + s[-3:]
-    # For emails and usernames, mask username part leaving domain
-    if "@" in s:
-        parts = s.split("@")
-        user = parts[0]
-        if len(user) <= 2:
-            masked_user = "*"
-        else:
-            masked_user = user[0] + "..." + user[-1]
-        return masked_user + "@" + parts[1]
-    # Fallback: show first/last char
-    if len(s) <= 4:
-        return s[0] + "..."
-    return s[:2] + "..." + s[-2:]
-
-
-def _log_mail_env_summary():
-    """Log which mail-related environment variables are present (masked).
-
-    This runs at module import time so operators see the state in startup
-    logs. It respects the fact that `load_dotenv(override=False)` was called,
-    meaning Render/production env vars take precedence over .env.
-    """
-    logger = logging.getLogger("app.mailenv")
-    mail_keys = ["MAIL_USERNAME", "MAIL_PASSWORD", "MAIL_FROM", "RESEND_API_KEY", "REPORT_ADMIN_EMAIL"]
-    present = []
-    missing = []
-    lines = []
-    for k in mail_keys:
-        # Prefer actual environment variables (Render/production). fall back to app.config
-        raw = os.environ.get(k)
-        if raw is None:
-            raw = app.config.get(k)
-        if raw and str(raw).strip():
-            present.append(k)
-            lines.append(f"{k}= { _mask_env_value(k, raw) }")
-        else:
-            missing.append(k)
-            lines.append(f"{k}= <not set>")
-
-    mode = "production" if is_prod else "development/local"
-    print(f"[mail.env] Starting mail environment diagnostics ({mode}). .env was loaded with override=False so existing environment vars were preserved.")
-    for ln in lines:
-        # Use print to ensure visible in stdout logs
-        print(f"[mail.env] {ln}")
-
-    if missing:
-        print(f"[mail.env] Missing mail vars: {', '.join(missing)}")
-    else:
-        print("[mail.env] All mail vars detected (masked above).")
-
-
-# Run mail env summary immediately so it's visible in startup logs
-try:
-    _log_mail_env_summary()
-except Exception as e:
-    # Print a sanitized startup traceback so operators can debug why the
-    # diagnostics failed while avoiding full secret exposure. Dump only the
-    # exception type + first few lines of the traceback.
-    try:
-        import traceback as _tb
-        tb_text = _tb.format_exc()
-        # Keep only the first 6 lines to avoid huge logs
-        tb_lines = tb_text.splitlines()
-        snippet = "\n".join(tb_lines[:6])
-        print(f"[mail.env] Failed to run mail env diagnostics: {type(e).__name__}: {str(e)}")
-        print("[mail.env] Traceback (sanitized):")
-        for ln in snippet.splitlines():
-            print(f"[mail.env] {ln}")
-    except Exception:
-        print("[mail.env] Failed to run mail env diagnostics (unable to format traceback).")
-app.config.setdefault("MAX_CONTENT_LENGTH", int(os.environ.get("MAX_CONTENT_LENGTH", 25 * 1024 * 1024)))
-# SESSION_COOKIE configuration
-app.config.setdefault("SESSION_COOKIE_SECURE", os.environ.get("SESSION_COOKIE_SECURE", "True" if is_prod else "False").lower() in ("true", "1", "yes"))
-app.config.setdefault("SESSION_COOKIE_HTTPONLY", True)
-app.config.setdefault("SESSION_COOKIE_SAMESITE", os.environ.get("SESSION_COOKIE_SAMESITE", "Lax"))
-app.config.setdefault("PERMANENT_SESSION_LIFETIME", timedelta(hours=int(os.environ.get("PERMANENT_SESSION_HOURS", "8"))))
-
-# Warn loudly if running in production without a proper SECRET_KEY
-if is_prod and app.config.get("SECRET_KEY") in (None, "", "dev-key-change-in-production"):
-    print("[SECURITY] WARNING: Running in production without a real SECRET_KEY.\nSet the SECRET_KEY environment variable to a stable secret for all instances.")
-
-# Centralized mail configuration and diagnostics (use mail_config module)
-try:
-    import mail_config
-    # setup_mail_config will populate app.config with MAIL_* keys and print masked diagnostics
-    mail_config.setup_mail_config(app)
-except Exception as e:
-    print(f"[mail.config] Failed to initialize mail_config module: {type(e).__name__}: {str(e)}")
-
-def is_mail_configured():
-    try:
-        return mail_config.is_mail_configured(app)
-    except Exception:
-        # Fallback to previous heuristic
-        api_key = app.config.get("RESEND_API_KEY")
-        from_email = app.config.get("MAIL_FROM")
-        return bool(api_key and str(api_key).strip() and from_email and str(from_email).strip())
-
-# Middleware: gracefully handle invalid/unsigned session cookies (itsdangerous.BadSignature)
-class _SessionFixMiddleware:
-    def __init__(self, app_):
-        self.app = app_
-
-    def __call__(self, environ, start_response):
-        from itsdangerous import BadSignature
-        try:
-            return self.app(environ, start_response)
-        except BadSignature as e:
-            try:
-                from werkzeug.wrappers import Response
-                # Clear the session cookie and redirect to login page
-                res = Response(status=302)
-                res.headers["Location"] = "/login"
-                cookie_name = app.config.get("SESSION_COOKIE_NAME", "session")
-                res.set_cookie(cookie_name, "", expires=0, path='/', secure=app.config.get("SESSION_COOKIE_SECURE"), httponly=app.config.get("SESSION_COOKIE_HTTPONLY"), samesite=app.config.get("SESSION_COOKIE_SAMESITE"))
-                print(f"[session] Invalid signed session detected — clearing cookie and redirecting. detail={repr(e)}")
-                return res(environ, start_response)
-            except Exception:
-                # If anything goes wrong here, re-raise the original exception
-                raise
-
-app.wsgi_app = _SessionFixMiddleware(app.wsgi_app)
 
 def get_db():
     db_url = str(app.config.get("DATABASE", ""))
@@ -355,22 +114,7 @@ def get_db():
                 self._conn = conn
             def execute(self, query, params=()):
                 cur = self._conn.cursor(cursor_factory=DictCursor)
-                try:
-                    cur.execute(query, params)
-                except Exception as ex:
-                    # If the connection is in a failed transaction state, roll back
-                    # and retry once. This prevents InFailedSqlTransaction from
-                    # cascading into login, dashboard, and every other route.
-                    if "InFailedSqlTransaction" in type(ex).__name__ or "current transaction is aborted" in str(ex):
-                        print(f"[DB] Aborted transaction detected — rolling back and retrying.")
-                        try:
-                            self._conn.rollback()
-                        except Exception:
-                            pass
-                        cur = self._conn.cursor(cursor_factory=DictCursor)
-                        cur.execute(query, params)
-                    else:
-                        raise
+                cur.execute(query, params)
                 return cur
             def commit(self): return self._conn.commit()
             def rollback(self): return self._conn.rollback()
@@ -405,19 +149,14 @@ def ensure_db_initialized(db) -> bool:
     global _DB_INIT_DONE, _DB_INIT_LAST_ERROR
     if _DB_INIT_DONE:
         return True
-    
-    # Set flag early to prevent recursion if init_db calls get_db()
-    _DB_INIT_DONE = True
     try:
-        _db_log("INFO", "db.init", "Starting database initialization...")
         init_db(db=db)
+        _DB_INIT_DONE = True
         _DB_INIT_LAST_ERROR = None
-        _db_log("SUCCESS", "db.init", "Database initialization completed")
         return True
     except Exception as e:
-        _DB_INIT_DONE = False # Reset on failure
         _DB_INIT_LAST_ERROR = repr(e)
-        _db_log("ERROR", "db.init", f"Database initialization failed: {_DB_INIT_LAST_ERROR}")
+        print(f"[DB] init_db failed: {_DB_INIT_LAST_ERROR}")
         print(traceback.format_exc())
         return False
 
@@ -449,9 +188,9 @@ def is_valid_email(email: str) -> bool:
 
 
 def is_mail_configured():
-    api_key = app.config.get("RESEND_API_KEY")
-    from_email = app.config.get("MAIL_FROM")
-    return bool(api_key and str(api_key).strip() and from_email and str(from_email).strip())
+    username = app.config.get("MAIL_USERNAME")
+    password = app.config.get("MAIL_PASSWORD")
+    return bool(username and username.strip() and password and password.strip())
 
 
 def get_setting(db, key, default=None):
@@ -486,359 +225,119 @@ def set_setting(db, key, value):
         )
 
 
-def _clean_text(value: object) -> str:
-    if value is None:
-        return ""
-    text = str(value).strip()
-    if text.lower() in ("", "nan", "none", "n/a"):
-        return ""
-    return text
-
-
-def _normalize_enrollment(value: object) -> str:
-    return re.sub(r"\s+", "", _clean_text(value)).upper()
-
-
-def _clean_identifier(value: object) -> str:
-    import re
-    text = re.sub(r"[^a-zA-Z0-9]+", "_", (str(value) if value is not None else "").strip().lower())
-    return text.strip("_")
-
-
-def _db_log(level: str, module: str, message: str):
-    """Log database operations with consistent formatting.
-    
-    Args:
-        level: 'INFO', 'SUCCESS', 'WARNING', 'ERROR'
-        module: Module name (e.g., 'db.init', 'db.schema')
-        message: Log message
-    """
-    level_symbols = {
-        'INFO': '>>',
-        'SUCCESS': 'OK',
-        'WARNING': 'WN',
-        'ERROR': 'ER',
-    }
-    symbol = level_symbols.get(level, '--')
-    print(f"[{level}] [{module}] {symbol} {message}")
-
-
-def _table_columns(db, table_name: str):
-    """Get all column names from a table (SQLite and PostgreSQL compatible)."""
+def send_email(subject, recipient, body, attachments=None):
+    # If credentials are not configured, allow a local dev fallback when explicitly enabled
+    dev_fallback_enabled = os.environ.get("MAIL_DEV_FALLBACK", "False").lower() in ("1", "true", "yes")
+    if not is_mail_configured():
+        if not (dev_fallback_enabled or app.config.get("MAIL_SERVER") in ("localhost", "127.0.0.1")):
+            print("Email not sent: mail credentials not configured.")
+            return False
+        print("Mail credentials not configured — attempting development fallback (unauthenticated SMTP).")
+    # Build message defensively so this helper never crashes a request handler.
     try:
-        if str(app.config.get("DATABASE", "")).startswith("postgres"):
-            rows = db.execute(
-                """
-                SELECT column_name
-                FROM information_schema.columns
-                WHERE table_name = %s AND table_schema = 'public'
-                ORDER BY ordinal_position
-                """,
-                (table_name,),
-            ).fetchall()
-            return {row_get(row, "column_name") for row in rows}
+        if not recipient or not str(recipient).strip():
+            print("Email not sent: recipient is empty.")
+            return False
+        from_addr = (app.config.get("MAIL_FROM") or app.config.get("MAIL_USERNAME") or "").strip()
+        if not from_addr:
+            print("Email not sent: MAIL_FROM/MAIL_USERNAME is empty.")
+            return False
 
-        rows = db.execute(f"PRAGMA table_info({table_name})").fetchall()
-        return {row_get(row, "name") for row in rows}
-    except Exception as e:
-        _db_log("ERROR", "db.schema", f"Failed to get columns for table '{table_name}': {repr(e)}")
-        return set()
+        msg = EmailMessage()
+        msg["Subject"] = subject
+        msg["From"] = from_addr
+        msg["To"] = recipient
+        msg.set_content(body)
 
-
-def _ensure_column(db, table_name: str, column_name: str, column_definition: str):
-    """Add a column to a table if it doesn't exist with enhanced logging.
-    
-    For PostgreSQL, each ALTER is wrapped in a SAVEPOINT so that if it fails
-    (e.g. duplicate column from a concurrent worker), only that statement is
-    rolled back and the connection is NOT left in the InFailedSqlTransaction
-    state that would break all subsequent queries including login.
-    """
-    is_postgres = str(app.config.get("DATABASE", "")).startswith("postgres")
-    
-    try:
-        if is_postgres:
-            # Use savepoint so a failure here doesn't abort the outer transaction
-            try:
-                db.execute("SAVEPOINT ensure_col")
-            except Exception as sp_err:
-                _db_log("WARNING", "db.schema", f"Failed to create savepoint for {table_name}.{column_name}: {repr(sp_err)}")
-                return
-            
-            try:
-                columns = _table_columns(db, table_name)
-                if column_name not in columns:
-                    _db_log("INFO", "db.schema", f"Checking {table_name}.{column_name}")
-                    db.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}")
-                    _db_log("SUCCESS", "db.schema", f"Column added: {table_name}.{column_name} ({column_definition})")
+        if attachments:
+            for attachment in attachments:
+                filename = (attachment.get("filename") or "attachment").strip()
+                content = attachment.get("content", b"")
+                if isinstance(content, str):
+                    content = content.encode("utf-8")
+                mimetype = attachment.get("mimetype") or "application/octet-stream"
+                if "/" in mimetype:
+                    maintype, subtype = mimetype.split("/", 1)
                 else:
-                    _db_log("INFO", "db.schema", f"Column exists: {table_name}.{column_name}")
-                db.execute("RELEASE SAVEPOINT ensure_col")
-            except Exception as e:
-                _db_log("ERROR", "db.schema", f"Failed to add column {table_name}.{column_name}: {repr(e)}")
-                try:
-                    db.execute("ROLLBACK TO SAVEPOINT ensure_col")
-                    db.execute("RELEASE SAVEPOINT ensure_col")
-                except Exception:
-                    pass
-        else:
-            # SQLite
-            columns = _table_columns(db, table_name)
-            if column_name not in columns:
-                try:
-                    _db_log("INFO", "db.schema", f"Checking {table_name}.{column_name}")
-                    db.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}")
-                    _db_log("SUCCESS", "db.schema", f"Column added: {table_name}.{column_name} ({column_definition})")
-                except Exception as e:
-                    _db_log("ERROR", "db.schema", f"Failed to add column {table_name}.{column_name}: {repr(e)}")
-            else:
-                _db_log("INFO", "db.schema", f"Column exists: {table_name}.{column_name}")
-    except Exception as outer_err:
-        _db_log("ERROR", "db.schema", f"Unexpected error in _ensure_column for {table_name}.{column_name}: {repr(outer_err)}")
-
-
-def get_teacher_context(db=None):
-    """Return the logged-in teacher profile plus subject/branch/section metadata."""
-    if session.get("role") != "teacher":
-        return None
-
-    created_here = False
-    if db is None:
-        db = get_db()
-        created_here = True
-
-    try:
-        teacher_id = session.get("teacher_id")
-        if not teacher_id:
-            return None
-
-        placeholder = get_placeholder()
-        teacher = db.execute(
-            f"SELECT * FROM teachers WHERE id = {placeholder}",
-            (teacher_id,),
-        ).fetchone()
-        if not teacher:
-            return None
-
-        legacy_subject_id = row_get(teacher, "subject_id")
-        current_subject_id = session.get("teacher_subject_id") or legacy_subject_id
-        current_branch_id = session.get("teacher_branch_id")
-        current_section = _normalize_branch_name(session.get("teacher_section"))
-
-        assigned_assignments = _resolve_teacher_assignments(db, teacher_id)
-        assigned_subjects = []
-        assigned_branches = []
-        for assignment in assigned_assignments:
-            if row_get(assignment, "subject_id") is not None:
-                assigned_subjects.append({
-                    "id": row_get(assignment, "subject_id"),
-                    "name": row_get(assignment, "subject_name"),
-                    "branch_id": row_get(assignment, "branch_id"),
-                })
-            if row_get(assignment, "branch_id") is not None:
-                assigned_branches.append({
-                    "id": row_get(assignment, "branch_id"),
-                    "name": row_get(assignment, "branch_name"),
-                    "location": None,
-                    "section": row_get(assignment, "section") or _branch_section_from_name(row_get(assignment, "branch_name")) or row_get(assignment, "branch_name"),
-                })
-
-        # Deduplicate helper lists while preserving order.
-        def _dedupe_rows(rows, key_name):
-            seen = set()
-            unique_rows = []
-            for item in rows:
-                key = row_get(item, key_name)
-                if key in seen:
-                    continue
-                seen.add(key)
-                unique_rows.append(item)
-            return unique_rows
-
-        assigned_subjects = _dedupe_rows(assigned_subjects, "id")
-        assigned_branches = _dedupe_rows(assigned_branches, "id")
-
-        allowed_pairs = {
-            (str(row_get(a, "subject_id")), str(row_get(a, "branch_id")), _normalize_branch_name(row_get(a, "section")))
-            for a in assigned_assignments
-            if row_get(a, "subject_id") is not None and row_get(a, "branch_id") is not None
-        }
-
-        if current_branch_id:
-            current_branch_row = db.execute(
-                f"SELECT id, name FROM branches WHERE id = {placeholder}",
-                (current_branch_id,),
-            ).fetchone()
-            branch_label = row_get(current_branch_row, "name") if current_branch_row else ""
-            current_section = current_section or _branch_section_from_name(branch_label) or branch_label
-
-        if assigned_subjects and current_subject_id is None:
-            current_subject_id = row_get(assigned_subjects[0], "id")
-        if assigned_branches and current_branch_id is None:
-            current_branch_id = row_get(assigned_branches[0], "id")
-            current_section = row_get(assigned_branches[0], "section") or current_section or row_get(assigned_branches[0], "name")
-
-        if current_subject_id and current_branch_id:
-            pair_key = (str(current_subject_id), str(current_branch_id), _normalize_branch_name(current_section))
-            if allowed_pairs and pair_key not in allowed_pairs:
-                current_subject_id = None
-                current_branch_id = None
-                current_section = ""
-
-        if not current_subject_id and assigned_subjects:
-            current_subject_id = row_get(assigned_subjects[0], "id")
-            session["teacher_subject_id"] = current_subject_id
-
-        if not current_branch_id and assigned_branches:
-            current_branch_id = row_get(assigned_branches[0], "id")
-            current_section = row_get(assigned_branches[0], "section") or current_section or row_get(assigned_branches[0], "name")
-            session["teacher_branch_id"] = current_branch_id
-            session["teacher_section"] = current_section
-
-        if current_subject_id is None and legacy_subject_id:
-            current_subject_id = legacy_subject_id
-
-        current_branch_name = None
-        if current_branch_id:
-            branch_row = db.execute(
-                f"SELECT id, name, location FROM branches WHERE id = {placeholder}",
-                (current_branch_id,),
-            ).fetchone()
-            current_branch_name = row_get(branch_row, "name") if branch_row else None
-
-        subject = None
-        if current_subject_id:
-            subject = db.execute(
-                f"SELECT id, name, branch_id FROM subjects WHERE id = {placeholder}",
-                (current_subject_id,),
-            ).fetchone()
-
-        subject_name = row_get(subject, "name") if subject else ""
-
-        return {
-            "teacher": teacher,
-            "teacher_id": row_get(teacher, "id"),
-            "name": row_get(teacher, "name"),
-            "username": row_get(teacher, "username"),
-            "subject_name": subject_name,
-            "subject_id": row_get(subject, "id") if subject else legacy_subject_id,
-            "current_subject_id": row_get(subject, "id") if subject else current_subject_id,
-            "subject_row": subject,
-            "current_branch_id": current_branch_id,
-            "current_branch_name": current_branch_name,
-            "current_section": current_section,
-            "assigned_branches": assigned_branches,
-            "assigned_branches_count": len(assigned_branches) if assigned_branches else 0,
-            "assigned_subjects": assigned_subjects,
-            "assigned_subjects_count": len(assigned_subjects) if assigned_subjects else 0,
-            "assigned_assignments": assigned_assignments,
-            "assigned_assignments_count": len(assigned_assignments) if assigned_assignments else 0,
-        }
-    finally:
-        if created_here:
-            try:
-                db.close()
-            except Exception:
-                pass
-
-
-def send_email_resend(subject: str, recipient: str, body: str, attachments=None, html_body=None) -> Tuple[bool, str]:
-    """Send email using Resend Email API.
-
-    Returns (success: bool, error_message: str|None).
-    """
-    logger = logging.getLogger("app.email")
-    resend_key = (app.config.get("RESEND_API_KEY") or "").strip()
-    from_email = (app.config.get("MAIL_FROM") or "").strip()
-    timeout = float(os.environ.get("RESEND_TIMEOUT_SECONDS", 15))
-
-    if not resend_key or not from_email:
-        err = "Email is not configured. Set RESEND_API_KEY and MAIL_FROM."
-        logger.error("[email.resend] %s", err)
-        return False, err
-
-    if not is_valid_email(recipient):
-        err = f"Invalid recipient email: {recipient}"
-        logger.error("[email.resend] %s", err)
-        return False, err
-
-    payload = {
-        "from": from_email,
-        "to": [recipient],
-        "subject": subject,
-        "text": body,
-    }
-    if html_body:
-        payload["html"] = html_body
-
-    if attachments:
-        encoded_attachments = []
-        for attachment in attachments:
-            filename = (attachment.get("filename") or "attachment").strip()
-            content = attachment.get("content", b"")
-            if isinstance(content, str):
-                content = content.encode("utf-8")
-            mimetype = attachment.get("mimetype") or "application/octet-stream"
-            encoded_attachments.append({
-                "filename": filename,
-                "content": base64.b64encode(content).decode("ascii"),
-                "type": mimetype,
-            })
-        payload["attachments"] = encoded_attachments
-
-    headers = {
-        "Authorization": f"Bearer {resend_key}",
-        "Content-Type": "application/json",
-    }
-
-    try:
-        response = requests.post(
-            "https://api.resend.com/emails",
-            json=payload,
-            headers=headers,
-            timeout=timeout,
-        )
-    except requests.RequestException as req_err:
-        logger.exception("[email.resend] API request failed for recipient=%s", recipient)
-        return False, f"Resend API request failed: {req_err}"
-
-    if 200 <= response.status_code < 300:
-        try:
-            response_json = response.json()
-        except Exception:
-            response_json = {}
-        message_id = response_json.get("id")
-        logger.info("[email.resend] Email sent to %s (id=%s)", recipient, message_id or "n/a")
-        return True, None
-
-    response_body = (response.text or "")[:800]
-    logger.error(
-        "[email.resend] API error status=%s recipient=%s body=%s",
-        response.status_code,
-        recipient,
-        response_body,
-    )
-    return False, f"Resend API error {response.status_code}: {response_body}"
-
-
-def send_email(subject, recipient, body, attachments=None, html_body=None):
-    """Compatibility wrapper for legacy `send_email` that returns bool."""
-    ok, err = send_email_resend(subject, recipient, body, attachments=attachments, html_body=html_body)
-    if ok:
-        return True
-    print(f"Email not sent: {err}")
-    return False
-
-
-def send_email_with_error(subject, recipient, body, attachments=None, html_body=None):
-    """Compatibility wrapper that returns (success, error_message)."""
-    return send_email_resend(subject, recipient, body, attachments=attachments, html_body=html_body)
-
-
-def safe_send_email(subject: str, recipient: str, body: str, attachments=None, html_body=None) -> bool:
-    try:
-        return bool(send_email(subject, recipient, body, attachments=attachments, html_body=html_body))
+                    maintype, subtype = "application", "octet-stream"
+                msg.add_attachment(content, maintype=maintype, subtype=subtype, filename=filename)
     except Exception as e:
-        logging.getLogger("app.email").exception("safe_send_email unexpected error")
+        print(f"Email not sent: failed to build message: {repr(e)}")
+        return False
+    smtp_host = app.config.get("MAIL_SERVER")
+    smtp_port = int(app.config.get("MAIL_PORT", 587))
+    use_tls = bool(app.config.get("MAIL_USE_TLS"))
+    debug = os.environ.get("MAIL_DEBUG", "False").lower() in ("1", "true", "yes")
+
+    def _try_send(host_to_use: str) -> None:
+        context = ssl.create_default_context()
+        if is_mail_configured():
+            username = app.config.get("MAIL_USERNAME")
+            password = app.config.get("MAIL_PASSWORD")
+            if use_tls:
+                with smtplib.SMTP(host_to_use, smtp_port, timeout=10) as server:
+                    if debug:
+                        server.set_debuglevel(1)
+                    server.ehlo()
+                    server.starttls(context=context)
+                    server.ehlo()
+                    server.login(username, password)
+                    server.send_message(msg)
+            else:
+                with smtplib.SMTP_SSL(host_to_use, smtp_port, context=context, timeout=10) as server:
+                    if debug:
+                        server.set_debuglevel(1)
+                    server.ehlo()
+                    server.login(username, password)
+                    server.send_message(msg)
+        else:
+            # Development fallback: unauthenticated SMTP (MailHog/smtp4dev)
+            with smtplib.SMTP(host_to_use, smtp_port, timeout=10) as server:
+                if debug:
+                    server.set_debuglevel(1)
+                server.ehlo()
+                server.send_message(msg)
+
+    attempts = 3
+    for attempt in range(1, attempts + 1):
+        try:
+            # 1) Normal simple connection (beginner-friendly)
+            _try_send(smtp_host)
+            print(f"Email sent to {recipient}")
+            return True
+
+        except smtplib.SMTPAuthenticationError as e:
+            print(f"Attempt {attempt} - SMTP authentication failed: {repr(e)}")
+            return False
+
+        except OSError as e:
+            print(f"Attempt {attempt} - OSError when sending email to {recipient}: {repr(e)}")
+            if getattr(e, "errno", None) == 101:
+                # 2) Retry once using IPv4 A-record (avoids common IPv6 routing issues)
+                try:
+                    ipv4 = socket.gethostbyname(smtp_host)
+                    print(f"Retrying with IPv4 address: {smtp_host} -> {ipv4}")
+                    _try_send(ipv4)
+                    print(f"Email sent to {recipient}")
+                    return True
+                except Exception as retry_err:
+                    print(f"IPv4 retry failed: {repr(retry_err)}")
+
+        except Exception as e:
+            print(f"Attempt {attempt} - Failed to send email to {recipient}: {repr(e)}")
+
+        if attempt < attempts:
+            time.sleep(2)
+            continue
+        return False
+
+
+def safe_send_email(subject: str, recipient: str, body: str, attachments=None) -> bool:
+    """Wrapper around send_email() that guarantees no exception escapes."""
+    try:
+        return bool(send_email(subject=subject, recipient=recipient, body=body, attachments=attachments))
+    except Exception as e:
+        print(f"safe_send_email: unexpected error: {repr(e)}")
         return False
 
 
@@ -877,7 +376,6 @@ def notify_low_attendance(db, student_ids):
             students.id AS student_id,
             students.name AS student_name,
             students.email AS email,
-            students.parent_email AS parent_email,
             ROUND(
                 100.0 * SUM(CASE WHEN attendance.status = 'Present' THEN 1 ELSE 0 END) / COUNT(attendance.id),
                 1
@@ -892,77 +390,29 @@ def notify_low_attendance(db, student_ids):
     emailed_students = []
 
     for row in rows:
-        recipients = []
-        if row["email"]: recipients.append(row["email"])
-        if row["parent_email"]: recipients.append(row["parent_email"])
-        
-        if not recipients:
+        if not row["email"]:
             continue
-            
         if row["percentage"] < threshold:
             body = (
-                f"Hello {row['student_name']} and Parent/Guardian,\n\n"
-                f"The current attendance for {row['student_name']} is {row['percentage']}%, which is below the minimum required threshold of {threshold}%.\n"
-                "Please attend classes regularly and check the attendance dashboard for details.\n\n"
+                f"Hello {row['student_name']},\n\n"
+                f"Your current attendance is {row['percentage']}%, which is below the minimum required threshold of {threshold}% for this course.\n"
+                "Please attend classes regularly and check your attendance dashboard for details.\n\n"
                 "If you have any questions, contact your instructor.\n\n"
                 "Best regards,\n"
                 "Attendance Management Team"
             )
-            html_body = (
-                f"<div style='font-family:Arial,sans-serif;line-height:1.6;color:#1f2937'>"
-                f"<h2 style='margin-bottom:8px;color:#ef476f'>Low Attendance Alert</h2>"
-                f"<p>Hello <strong>{row['student_name']} and Parent/Guardian</strong>,</p>"
-                f"<p>The current attendance for <strong>{row['student_name']}</strong> is <strong>{row['percentage']}%</strong>, which is below the required threshold of <strong>{threshold}%</strong>.</p>"
-                "<p>Please attend classes regularly and check your dashboard for details.</p>"
-                "<p style='margin-top:16px'>Best regards,<br>Attendance Management Team</p>"
-                "</div>"
-            )
-            
-            # Send to all recipients
-            for rec in recipients:
-                if send_email(
-                    subject=f"Low Attendance Alert: {row['percentage']}%",
-                    recipient=rec,
-                    body=body,
-                    html_body=html_body,
-                ):
-                    emailed_students.append({
-                        "name": row["student_name"],
-                        "email": rec,
-                        "percentage": row["percentage"],
-                    })
+            if send_email(
+                subject=f"Low Attendance Alert: {row['percentage']}%",
+                recipient=row["email"],
+                body=body,
+            ):
+                emailed_students.append({
+                    "name": row["student_name"],
+                    "email": row["email"],
+                    "percentage": row["percentage"],
+                })
 
     return emailed_students
-
-
-def _send_low_attendance_background(student_ids):
-    """Background task so attendance save response is never blocked by email API calls."""
-    db = None
-    try:
-        db = get_db()
-        emailed = notify_low_attendance(db, student_ids)
-        print(f"[mark_attendance] Low-attendance email task complete. emailed={len(emailed)}")
-    except Exception as e:
-        print(f"[mark_attendance] Low-attendance email task failed: {repr(e)}")
-        print(traceback.format_exc())
-    finally:
-        if db:
-            try:
-                db.close()
-            except Exception:
-                pass
-
-
-def dispatch_low_attendance_notifications(student_ids):
-    if not student_ids or not is_mail_configured():
-        return
-    try:
-        # Preferred path for eventlet/gevent compatible servers.
-        socketio.start_background_task(_send_low_attendance_background, list(student_ids))
-    except Exception as e:
-        print(f"[mark_attendance] socketio background task unavailable, using thread fallback: {repr(e)}")
-        t = threading.Thread(target=_send_low_attendance_background, args=(list(student_ids),), daemon=True)
-        t.start()
 
 
 def init_db(db=None):
@@ -983,17 +433,6 @@ def init_db(db=None):
         # IMPORTANT: create referenced tables before tables with FOREIGN KEYs.
 
         db.execute("""
-        CREATE TABLE IF NOT EXISTS teachers (
-            id SERIAL PRIMARY KEY,
-            name TEXT NOT NULL,
-            username TEXT UNIQUE NOT NULL,
-            password TEXT NOT NULL,
-            subject_id INTEGER,
-            branch_id INTEGER NOT NULL
-        );
-        """)
-
-        db.execute("""
         CREATE TABLE IF NOT EXISTS branches (
             id SERIAL PRIMARY KEY,
             name TEXT UNIQUE NOT NULL,
@@ -1006,14 +445,8 @@ def init_db(db=None):
             id SERIAL PRIMARY KEY,
             name TEXT NOT NULL,
             enrollment TEXT UNIQUE NOT NULL,
-            roll_no TEXT,
             branch_id INTEGER NOT NULL,
-            section TEXT,
-            email TEXT,
-            parent_email TEXT,
-            current_year INTEGER DEFAULT 1,
-            current_semester INTEGER DEFAULT 1,
-            import_order INTEGER
+            email TEXT
         );
         """)
 
@@ -1041,15 +474,10 @@ def init_db(db=None):
             id SERIAL PRIMARY KEY,
             student_id INTEGER NOT NULL,
             branch_id INTEGER NOT NULL,
-            branch_section TEXT,
-            section TEXT,
             subject_id INTEGER NOT NULL,
-            teacher_id INTEGER,
-            subject_name TEXT,
             date TEXT NOT NULL,
             status TEXT NOT NULL,
-            note TEXT,
-            period INTEGER DEFAULT 1
+            note TEXT
         );
         """)
 
@@ -1059,35 +487,15 @@ def init_db(db=None):
             key TEXT UNIQUE NOT NULL,
             value TEXT NOT NULL
         );
-
-        CREATE TABLE IF NOT EXISTS teacher_assignments (
-            id SERIAL PRIMARY KEY,
-            teacher_id INTEGER NOT NULL,
-            subject_id INTEGER NOT NULL,
-            branch_id INTEGER NOT NULL,
-            section TEXT,
-            UNIQUE(teacher_id, subject_id, branch_id, section),
-            FOREIGN KEY(teacher_id) REFERENCES teachers(id) ON DELETE CASCADE,
-            FOREIGN KEY(subject_id) REFERENCES subjects(id) ON DELETE CASCADE,
-            FOREIGN KEY(branch_id) REFERENCES branches(id) ON DELETE CASCADE
-        );
         """)
 
-        # Index creation moved to upgrade section to ensure columns exist first.
+        db.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_attendance_student_subject_date
+        ON attendance(student_id, subject_id, date);
+        """)
     else:
         # SQLite
         db.executescript("""
-        CREATE TABLE IF NOT EXISTS teachers (
-            id INTEGER PRIMARY KEY,
-            name TEXT NOT NULL,
-            username TEXT UNIQUE NOT NULL,
-            password TEXT NOT NULL,
-            subject_id INTEGER,
-            branch_id INTEGER NOT NULL,
-            FOREIGN KEY(subject_id) REFERENCES subjects(id),
-            FOREIGN KEY(branch_id) REFERENCES branches(id)
-        );
-
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY,
             username TEXT UNIQUE NOT NULL,
@@ -1113,29 +521,18 @@ def init_db(db=None):
             id INTEGER PRIMARY KEY,
             name TEXT NOT NULL,
             enrollment TEXT UNIQUE NOT NULL,
-            roll_no TEXT,
             branch_id INTEGER NOT NULL,
-            section TEXT,
-            email TEXT,
-            parent_email TEXT,
-            current_year INTEGER DEFAULT 1,
-            current_semester INTEGER DEFAULT 1,
-            import_order INTEGER
+            email TEXT
         );
 
         CREATE TABLE IF NOT EXISTS attendance (
             id INTEGER PRIMARY KEY,
             student_id INTEGER NOT NULL,
             branch_id INTEGER NOT NULL,
-            branch_section TEXT,
-            section TEXT,
             subject_id INTEGER NOT NULL,
-            teacher_id INTEGER,
-            subject_name TEXT,
             date TEXT NOT NULL,
             status TEXT NOT NULL,
-            note TEXT,
-            period INTEGER DEFAULT 1
+            note TEXT
         );
 
         CREATE TABLE IF NOT EXISTS settings (
@@ -1144,918 +541,56 @@ def init_db(db=None):
             value TEXT NOT NULL
         );
 
-        CREATE TABLE IF NOT EXISTS teacher_assignments (
-            id INTEGER PRIMARY KEY,
-            teacher_id INTEGER NOT NULL,
-            subject_id INTEGER NOT NULL,
-            branch_id INTEGER NOT NULL,
-            section TEXT,
-            UNIQUE(teacher_id, subject_id, branch_id, section),
-            FOREIGN KEY(teacher_id) REFERENCES teachers(id) ON DELETE CASCADE,
-            FOREIGN KEY(subject_id) REFERENCES subjects(id) ON DELETE CASCADE,
-            FOREIGN KEY(branch_id) REFERENCES branches(id) ON DELETE CASCADE
-        );
-
-        -- Index creation moved to upgrade section to ensure columns exist first.
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_attendance_student_subject_date
+        ON attendance(student_id, subject_id, date);
         """)
 
-    # Best-effort schema upgrades for existing databases.
-    # IMPORTANT: For PostgreSQL, we rollback any stale aborted transaction
-    # that may have been left by a previous failed connection before doing
-    # any DDL work. This prevents InFailedSqlTransaction from poisoning the
-    # connection and breaking the login route.
-    is_postgres = str(app.config.get("DATABASE", "")).startswith("postgres")
-    if is_postgres:
-        try:
-            db.rollback()
-        except Exception:
-            pass
-
-    try:
-        _ensure_column(db, "attendance", "teacher_id", "INTEGER")
-        _ensure_column(db, "attendance", "subject_name", "TEXT")
-        _ensure_column(db, "attendance", "period", "INTEGER DEFAULT 1")
-        _ensure_column(db, "attendance", "branch_section", "TEXT")
-        _ensure_column(db, "attendance", "section", "TEXT")
-        _ensure_column(db, "students", "import_order", "INTEGER")
-        _ensure_column(db, "students", "parent_email", "TEXT")
-        _ensure_column(db, "students", "current_year", "INTEGER DEFAULT 1")
-        _ensure_column(db, "students", "current_semester", "INTEGER DEFAULT 1")
-        _ensure_column(db, "students", "roll_no", "TEXT")
-        _ensure_column(db, "students", "section", "TEXT")
-        _ensure_column(db, "users", "student_id", "INTEGER")
-        _ensure_column(db, "branches", "location", "TEXT")
-        _ensure_column(db, "teachers", "name", "TEXT NOT NULL")
-        _ensure_column(db, "teachers", "subject_id", "INTEGER")
-        _ensure_column(db, "teachers", "subject_name", "TEXT")
-
-        try:
-            db.execute(
-                """
-                UPDATE attendance
-                SET branch_section = COALESCE(
-                    branch_section,
-                    (SELECT name FROM branches WHERE branches.id = attendance.branch_id)
-                )
-                WHERE branch_section IS NULL OR TRIM(branch_section) = ''
-                """
-            )
-        except Exception:
-            pass
-
-        try:
-            db.execute(
-                """
-                UPDATE students
-                SET roll_no = COALESCE(roll_no, enrollment),
-                    section = COALESCE(section, '')
-                WHERE roll_no IS NULL OR section IS NULL OR TRIM(section) = ''
-                """
-            )
-        except Exception as e:
-            print(f"[DB] UPDATE students for roll_no/section failed: {repr(e)}")
-            pass
-
-        try:
-            db.execute(
-                """
-                UPDATE attendance
-                SET section = COALESCE(section, branch_section)
-                WHERE section IS NULL OR TRIM(section) = ''
-                """
-            )
-        except Exception:
-            pass
-        
-        # Drop the NOT NULL constraint on teachers.subject_name so new inserts
-        # that use subject_id instead of subject_name don't violate the constraint.
-        if is_postgres:
-            try:
-                db.execute("SAVEPOINT drop_subject_name_notnull")
-                db.execute("ALTER TABLE teachers ALTER COLUMN subject_name DROP NOT NULL")
-                db.execute("RELEASE SAVEPOINT drop_subject_name_notnull")
-                db.commit()
-            except Exception as e:
-                print(f"[DB] subject_name NOT NULL drop skipped: {repr(e)}")
-                try:
-                    db.execute("ROLLBACK TO SAVEPOINT drop_subject_name_notnull")
-                    db.execute("RELEASE SAVEPOINT drop_subject_name_notnull")
-                except Exception: pass
-        
-        db.commit() # Commit column additions before index creation
-        
-        # Verify and ensure critical columns exist
-        _db_log("INFO", "db.init", "Starting critical column verification...")
-        critical_columns = [
-            ("students", "roll_no", "TEXT", "Student roll number"),
-            ("students", "section", "TEXT", "Student section/class"),
-            ("students", "import_order", "INTEGER", "Import order for data consistency"),
-            ("attendance", "subject_id", "INTEGER", "Subject ID foreign key"),
-            ("attendance", "period", "INTEGER DEFAULT 1", "Period number for multiple attendance periods"),
-        ]
-        
-        columns_verified = 0
-        columns_added = 0
-        columns_failed = 0
-        
-        for table, col, col_type, description in critical_columns:
-            try:
-                _db_log("INFO", "db.verify", f"Checking {table}.{col} - {description}")
-                columns = _table_columns(db, table)
-                if col not in columns:
-                    _db_log("WARNING", "db.verify", f"Missing column: {table}.{col}")
-                    try:
-                        if is_postgres:
-                            db.execute("SAVEPOINT verify_col")
-                        db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}")
-                        if is_postgres:
-                            db.execute("RELEASE SAVEPOINT verify_col")
-                        db.commit()
-                        _db_log("SUCCESS", "db.verify", f"Column added: {table}.{col}")
-                        columns_added += 1
-                    except Exception as add_err:
-                        _db_log("ERROR", "db.verify", f"Failed to add {table}.{col}: {repr(add_err)}")
-                        if is_postgres:
-                            try:
-                                db.execute("ROLLBACK TO SAVEPOINT verify_col")
-                                db.execute("RELEASE SAVEPOINT verify_col")
-                            except Exception:
-                                pass
-                        columns_failed += 1
-                        if hasattr(db, 'rollback'):
-                            db.rollback()
-                else:
-                    _db_log("SUCCESS", "db.verify", f"Column exists: {table}.{col}")
-                    columns_verified += 1
-            except Exception as verify_err:
-                _db_log("ERROR", "db.verify", f"Verification failed for {table}.{col}: {repr(verify_err)}")
-                columns_failed += 1
-        
-        # Summary of verification
-        _db_log("INFO", "db.init", f"Critical columns verification summary:")
-        _db_log("INFO", "db.init", f"  [OK] Verified: {columns_verified}")
-        _db_log("INFO", "db.init", f"  + Added: {columns_added}")
-        if columns_failed > 0:
-            _db_log("WARNING", "db.init", f"  [ER] Failed: {columns_failed}")
-        else:
-            _db_log("SUCCESS", "db.init", f"  [ER] Failed: 0")
-        
-        # Upgrade index if it doesn't support period
-        _db_log("INFO", "db.init", "Upgrading database indexes...")
-        try:
-            if is_postgres:
-                db.execute("SAVEPOINT idx_upgrade")
-            db.execute("DROP INDEX IF EXISTS idx_attendance_student_subject_date")
-            db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_attendance_student_subject_date_period ON attendance(student_id, subject_id, date, period)")
-            db.execute("CREATE INDEX IF NOT EXISTS idx_attendance_date ON attendance(date)")
-            db.execute("CREATE INDEX IF NOT EXISTS idx_attendance_teacher ON attendance(teacher_id)")
-            db.execute("CREATE INDEX IF NOT EXISTS idx_attendance_subject ON attendance(subject_id)")
-            db.execute("CREATE INDEX IF NOT EXISTS idx_attendance_student ON attendance(student_id)")
-            if is_postgres:
-                db.execute("RELEASE SAVEPOINT idx_upgrade")
-            db.commit()
-            _db_log("SUCCESS", "db.init", "Database indexes upgraded successfully")
-        except Exception as idx_error:
-            _db_log("WARNING", "db.init", f"Index upgrade skipped: {repr(idx_error)}")
-            if is_postgres:
-                try:
-                    db.execute("ROLLBACK TO SAVEPOINT idx_upgrade")
-                    db.execute("RELEASE SAVEPOINT idx_upgrade")
-                except Exception: pass
-            if hasattr(db, 'rollback'): db.rollback()
-        
-        try:
-            db.execute("CREATE INDEX IF NOT EXISTS idx_students_import_order ON students(import_order, id)")
-            db.commit()
-            _db_log("SUCCESS", "db.init", "Index created: idx_students_import_order")
-        except Exception as idx_err:
-            _db_log("WARNING", "db.init", f"Failed to create idx_students_import_order: {repr(idx_err)}")
-            if hasattr(db, 'rollback'): db.rollback()
-
-        # Backfill import_order once for legacy rows (keeps existing relative order by id).
-        _db_log("INFO", "db.init", "Processing import order for legacy students...")
-        try:
-            max_row = db.execute("SELECT COALESCE(MAX(import_order), 0) AS max_import_order FROM students").fetchone()
-            next_import_order = int(row_get(max_row, "max_import_order", 0) or 0) + 1
-            missing_order_rows = db.execute("SELECT id FROM students WHERE import_order IS NULL ORDER BY id").fetchall()
-            if missing_order_rows:
-                for row in missing_order_rows:
-                    student_id = row_get(row, "id")
-                    if student_id is None:
-                        continue
-                    db.execute(
-                        f"UPDATE students SET import_order = {placeholder} WHERE id = {placeholder}",
-                        (next_import_order, student_id),
-                    )
-                    next_import_order += 1
-                _db_log("SUCCESS", "db.init", f"Updated import_order for {len(missing_order_rows)} students")
-            db.commit()
-        except Exception as import_err:
-            _db_log("WARNING", "db.init", f"Import order update skipped: {repr(import_err)}")
-            if hasattr(db, 'rollback'):
-                db.rollback()
-
-        if str(app.config.get("DATABASE", "")).startswith("postgres"):
-            db.execute("""
-                CREATE TABLE IF NOT EXISTS teachers (
-                    id SERIAL PRIMARY KEY,
-                    name TEXT NOT NULL,
-                    username TEXT UNIQUE NOT NULL,
-                    password TEXT NOT NULL,
-                    subject_id INTEGER,
-                    branch_id INTEGER NOT NULL,
-                    subject_name TEXT
-                )
-            """)
-        else:
-            db.execute("""
-                CREATE TABLE IF NOT EXISTS teachers (
-                    id INTEGER PRIMARY KEY,
-                    name TEXT NOT NULL,
-                    username TEXT UNIQUE NOT NULL,
-                    password TEXT NOT NULL,
-                    subject_id INTEGER,
-                    branch_id INTEGER NOT NULL,
-                    subject_name TEXT
-                )
-            """)
-    except Exception as upgrade_error:
-        _db_log("WARNING", "db.init", f"Teacher schema upgrade skipped: {repr(upgrade_error)}")
-
-    # ✅ Create teacher_branches junction table for multi-branch support
-    try:
-        if is_postgres:
-            db.execute("""
-                CREATE TABLE IF NOT EXISTS teacher_branches (
-                    id SERIAL PRIMARY KEY,
-                    teacher_id INTEGER NOT NULL,
-                    branch_id INTEGER NOT NULL,
-                    UNIQUE(teacher_id, branch_id),
-                    FOREIGN KEY(teacher_id) REFERENCES teachers(id) ON DELETE CASCADE,
-                    FOREIGN KEY(branch_id) REFERENCES branches(id) ON DELETE CASCADE
-                )
-            """)
-        else:
-            db.execute("""
-                CREATE TABLE IF NOT EXISTS teacher_branches (
-                    id INTEGER PRIMARY KEY,
-                    teacher_id INTEGER NOT NULL,
-                    branch_id INTEGER NOT NULL,
-                    UNIQUE(teacher_id, branch_id),
-                    FOREIGN KEY(teacher_id) REFERENCES teachers(id) ON DELETE CASCADE,
-                    FOREIGN KEY(branch_id) REFERENCES branches(id) ON DELETE CASCADE
-                )
-            """)
-        
-        # Migrate existing teacher-branch assignments from teachers.branch_id
-        # One-time migration: for each teacher with a branch_id, insert into teacher_branches if not already there
-        try:
-            existing_assignments = db.execute("SELECT COUNT(*) as count FROM teacher_branches").fetchone()
-            count = row_get(existing_assignments, "count", 0)
-            if count == 0:
-                # First migration - populate from teachers.branch_id
-                teachers_with_branches = db.execute("SELECT DISTINCT id, branch_id FROM teachers WHERE branch_id IS NOT NULL").fetchall()
-                for teacher_row in teachers_with_branches:
-                    t_id = row_get(teacher_row, "id")
-                    b_id = row_get(teacher_row, "branch_id")
-                    if t_id and b_id:
-                        try:
-                            db.execute(
-                                f"INSERT INTO teacher_branches (teacher_id, branch_id) VALUES ({placeholder}, {placeholder})",
-                                (t_id, b_id)
-                            )
-                        except Exception:
-                            pass  # Duplicate or other constraint - ignore
-                db.commit()
-                print("[DB] Migrated teacher-branch assignments to new junction table")
-        except Exception as migration_error:
-            print(f"[DB] teacher_branches migration skipped: {repr(migration_error)}")
-            if hasattr(db, 'rollback'): db.rollback()
-        
-        db.commit()
-    except Exception as tb_error:
-        print(f"[DB] teacher_branches table creation skipped: {repr(tb_error)}")
-
-    # ✅ Create teacher_subjects junction table for multi-subject support
-    try:
-        if is_postgres:
-            db.execute("""
-                CREATE TABLE IF NOT EXISTS teacher_subjects (
-                    id SERIAL PRIMARY KEY,
-                    teacher_id INTEGER NOT NULL,
-                    subject_id INTEGER NOT NULL,
-                    UNIQUE(teacher_id, subject_id),
-                    FOREIGN KEY(teacher_id) REFERENCES teachers(id) ON DELETE CASCADE,
-                    FOREIGN KEY(subject_id) REFERENCES subjects(id) ON DELETE CASCADE
-                )
-            """)
-        else:
-            db.execute("""
-                CREATE TABLE IF NOT EXISTS teacher_subjects (
-                    id INTEGER PRIMARY KEY,
-                    teacher_id INTEGER NOT NULL,
-                    subject_id INTEGER NOT NULL,
-                    UNIQUE(teacher_id, subject_id),
-                    FOREIGN KEY(teacher_id) REFERENCES teachers(id) ON DELETE CASCADE,
-                    FOREIGN KEY(subject_id) REFERENCES subjects(id) ON DELETE CASCADE
-                )
-            """)
-
-        # One-time migration from legacy teachers.subject_id
-        _db_log("INFO", "db.init", "Checking for teacher-subject junction table migration...")
-        try:
-            existing_assignments = db.execute("SELECT COUNT(*) as count FROM teacher_subjects").fetchone()
-            count = row_get(existing_assignments, "count", 0)
-            if count == 0:
-                _db_log("INFO", "db.init", "Migrating legacy teacher-subject assignments...")
-                teachers_with_subjects = db.execute(
-                    "SELECT DISTINCT id, subject_id FROM teachers WHERE subject_id IS NOT NULL"
-                ).fetchall()
-                migrated_count = 0
-                for teacher_row in teachers_with_subjects:
-                    t_id = row_get(teacher_row, "id")
-                    s_id = row_get(teacher_row, "subject_id")
-                    if t_id and s_id:
-                        try:
-                            db.execute(
-                                f"INSERT INTO teacher_subjects (teacher_id, subject_id) VALUES ({placeholder}, {placeholder})",
-                                (t_id, s_id),
-                            )
-                            migrated_count += 1
-                        except Exception:
-                            pass
-                db.commit()
-                _db_log("SUCCESS", "db.init", f"Migrated {migrated_count} teacher-subject assignments to junction table")
-            else:
-                _db_log("INFO", "db.init", f"Teacher-subject migration already complete ({count} records)")
-        except Exception as migration_error:
-            _db_log("WARNING", "db.init", f"Teacher-subject migration skipped: {repr(migration_error)}")
-            if hasattr(db, 'rollback'):
-                db.rollback()
-
-        db.commit()
-    except Exception as ts_error:
-        _db_log("WARNING", "db.init", f"Teacher-subjects table creation skipped: {repr(ts_error)}")
-
-    try:
-        if is_postgres:
-            db.execute("""
-                CREATE TABLE IF NOT EXISTS teacher_assignments (
-                    id SERIAL PRIMARY KEY,
-                    teacher_id INTEGER NOT NULL,
-                    subject_id INTEGER NOT NULL,
-                    branch_id INTEGER NOT NULL,
-                    section TEXT,
-                    UNIQUE(teacher_id, subject_id, branch_id, section),
-                    FOREIGN KEY(teacher_id) REFERENCES teachers(id) ON DELETE CASCADE,
-                    FOREIGN KEY(subject_id) REFERENCES subjects(id) ON DELETE CASCADE,
-                    FOREIGN KEY(branch_id) REFERENCES branches(id) ON DELETE CASCADE
-                )
-            """)
-        else:
-            db.execute("""
-                CREATE TABLE IF NOT EXISTS teacher_assignments (
-                    id INTEGER PRIMARY KEY,
-                    teacher_id INTEGER NOT NULL,
-                    subject_id INTEGER NOT NULL,
-                    branch_id INTEGER NOT NULL,
-                    section TEXT,
-                    UNIQUE(teacher_id, subject_id, branch_id, section),
-                    FOREIGN KEY(teacher_id) REFERENCES teachers(id) ON DELETE CASCADE,
-                    FOREIGN KEY(subject_id) REFERENCES subjects(id) ON DELETE CASCADE,
-                    FOREIGN KEY(branch_id) REFERENCES branches(id) ON DELETE CASCADE
-                )
-            """)
-
-        existing_assignments = db.execute("SELECT COUNT(*) as count FROM teacher_assignments").fetchone()
-        if row_get(existing_assignments, "count", 0) == 0:
-            teachers = db.execute("SELECT DISTINCT id FROM teachers").fetchall()
-            for teacher_row in teachers:
-                teacher_id = row_get(teacher_row, "id")
-                if teacher_id is None:
-                    continue
-                branch_rows = db.execute(
-                    f"SELECT b.id, b.name FROM branches b JOIN teacher_branches tb ON tb.branch_id = b.id WHERE tb.teacher_id = {placeholder}",
-                    (teacher_id,),
-                ).fetchall()
-                subject_rows = db.execute(
-                    f"SELECT s.id FROM subjects s JOIN teacher_subjects ts ON ts.subject_id = s.id WHERE ts.teacher_id = {placeholder}",
-                    (teacher_id,),
-                ).fetchall()
-                for branch_row in branch_rows:
-                    branch_id = row_get(branch_row, "id")
-                    branch_name = row_get(branch_row, "name") or ""
-                    section = _branch_section_from_name(branch_name)
-                    for subject_row in subject_rows:
-                        subject_id = row_get(subject_row, "id")
-                        if branch_id is None or subject_id is None:
-                            continue
-                        try:
-                            db.execute(
-                                f"INSERT INTO teacher_assignments (teacher_id, subject_id, branch_id, section) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder})",
-                                (teacher_id, subject_id, branch_id, section),
-                            )
-                        except Exception:
-                            pass
-            db.commit()
-        else:
-            _db_log("INFO", "db.init", f"Teacher-assignments already complete ({row_get(existing_assignments, 'count', 0)} records)")
-    except Exception as ta_error:
-        _db_log("WARNING", "db.init", f"Teacher-assignments creation skipped: {repr(ta_error)}")
-
     # ✅ Admin check
-    _db_log("INFO", "db.init", "Verifying admin user...")
     admin = db.execute(
         f"SELECT id FROM users WHERE username = {placeholder}", ("admin",)
     ).fetchone()
 
     if not admin:
-        _db_log("WARNING", "db.init", "Admin user not found, creating default admin account...")
-        try:
-            db.execute(
-                f"INSERT INTO users (username, password, role) VALUES ({placeholder}, {placeholder}, {placeholder})",
-                ("admin", generate_password_hash("admin123"), "admin"),
-            )
-            db.commit()
-            _db_log("SUCCESS", "db.init", "Default admin account created (username: admin)")
-        except Exception as admin_err:
-            _db_log("ERROR", "db.init", f"Failed to create admin account: {repr(admin_err)}")
-    else:
-        _db_log("SUCCESS", "db.init", "Admin user verified")
+        db.execute(
+            f"INSERT INTO users (username, password, role) VALUES ({placeholder}, {placeholder}, {placeholder})",
+            ("admin", generate_password_hash("admin123"), "admin"),
+        )
 
-    # No default teacher accounts are seeded.
-    # Teachers must be created manually by an admin via /admin/teachers.
+    # ✅ Teacher check
+    teacher = db.execute(
+        f"SELECT id FROM users WHERE username = {placeholder}", ("teacher1",)
+    ).fetchone()
 
-    # ✅ Ensure at least one branch exists
-    _db_log("INFO", "db.init", "Verifying default branch...")
-    default_branch = db.execute(f"SELECT id FROM branches ORDER BY id LIMIT 1").fetchone()
-    if not default_branch:
-        _db_log("WARNING", "db.init", "No branch found, creating default branch...")
-        try:
-            db.execute(f"INSERT INTO branches (name, location) VALUES ({placeholder}, {placeholder})", ("General Branch", "Main Campus"))
-            db.commit()
-            default_branch = db.execute(f"SELECT id FROM branches ORDER BY id LIMIT 1").fetchone()
-            _db_log("SUCCESS", "db.init", "Default branch created")
-        except Exception as branch_err:
-            _db_log("ERROR", "db.init", f"Failed to create default branch: {repr(branch_err)}")
-    else:
-        _db_log("SUCCESS", "db.init", "Default branch verified")
-    
-    default_branch_id = row_get(default_branch, "id")
-
-    # ✅ Create normalized timetable_entries table for production-ready timetable data
-    try:
-        if str(app.config.get("DATABASE", "")).startswith("postgres"):
-            db.execute("""
-            CREATE TABLE IF NOT EXISTS timetable_entries (
-                id SERIAL PRIMARY KEY,
-                branch_id INTEGER,
-                section TEXT,
-                semester INTEGER,
-                day TEXT,
-                start_time TEXT,
-                end_time TEXT,
-                subject_id INTEGER,
-                teacher_id INTEGER,
-                is_lab INTEGER DEFAULT 0,
-                room TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-            """)
-        else:
-            db.execute("""
-            CREATE TABLE IF NOT EXISTS timetable_entries (
-                id INTEGER PRIMARY KEY,
-                branch_id INTEGER,
-                section TEXT,
-                semester INTEGER,
-                day TEXT,
-                start_time TEXT,
-                end_time TEXT,
-                subject_id INTEGER,
-                teacher_id INTEGER,
-                is_lab INTEGER DEFAULT 0,
-                room TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-            """)
-        db.commit()
-        _db_log("SUCCESS", "db.init", "timetable_entries table ensured")
-    except Exception as te_err:
-        _db_log("WARNING", "db.init", f"timetable_entries creation skipped: {repr(te_err)}")
-
-    # Safe migration: map legacy timetable_slots -> timetable_entries (best-effort)
-    try:
-        # Only migrate if timetable_slots exist and timetable_entries is empty
-        cols = _table_columns(db, "timetable_slots")
-        if cols:
-            existing = db.execute("SELECT COUNT(1) AS c FROM timetable_entries").fetchone()
-            existing_count = int(row_get(existing, "c", 0) or 0)
-            if existing_count == 0:
-                _db_log("INFO", "db.migrate", "Starting migration from timetable_slots to timetable_entries")
-                slots = db.execute("SELECT id, branch, section, semester, day, start_time, end_time, subject_name, faculty_name, is_lab, room FROM timetable_slots ORDER BY id").fetchall()
-                migrated = 0
-                placeholder = get_placeholder()
-                for s in slots:
-                    bname = row_get(s, "branch") or ""
-                    sec = row_get(s, "section") or ""
-                    sem = row_get(s, "semester")
-                    day = row_get(s, "day") or ""
-                    st = row_get(s, "start_time") or ""
-                    et = row_get(s, "end_time") or ""
-                    subj_name = row_get(s, "subject_name") or ""
-                    fac_name = row_get(s, "faculty_name") or ""
-                    is_lab = int(row_get(s, "is_lab") or 0)
-                    room = row_get(s, "room") or ""
-
-                    branch_id = None
-                    try:
-                        row = db.execute(f"SELECT id FROM branches WHERE LOWER(name)=LOWER({placeholder}) LIMIT 1", (bname,)).fetchone()
-                        branch_id = row_get(row, "id") if row else None
-                    except Exception:
-                        branch_id = None
-
-                    subject_id = None
-                    try:
-                        row = db.execute(f"SELECT id FROM subjects WHERE LOWER(name)=LOWER({placeholder}) LIMIT 1", (subj_name,)).fetchone()
-                        subject_id = row_get(row, "id") if row else None
-                    except Exception:
-                        subject_id = None
-
-                    teacher_id = None
-                    try:
-                        row = db.execute(f"SELECT id FROM teachers WHERE LOWER(name)=LOWER({placeholder}) LIMIT 1", (fac_name,)).fetchone()
-                        teacher_id = row_get(row, "id") if row else None
-                    except Exception:
-                        teacher_id = None
-
-                    try:
-                        db.execute(
-                            f"INSERT INTO timetable_entries (branch_id, section, semester, day, start_time, end_time, subject_id, teacher_id, is_lab, room) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})",
-                            (branch_id, sec, sem, day, st, et, subject_id, teacher_id, is_lab, room),
-                        )
-                        migrated += 1
-                    except Exception:
-                        pass
-                try:
-                    db.commit()
-                except Exception:
-                    pass
-                _db_log("SUCCESS", "db.migrate", f"Migrated {migrated} timetable_slots rows to timetable_entries (best-effort)")
-    except Exception as mig_err:
-        _db_log("WARNING", "db.migrate", f"Timetable migration skipped: {repr(mig_err)}")
-    # ✅ Ensure sample subjects exist
-    _db_log("INFO", "db.init", "Verifying sample subjects...")
-    sample_subjects = ["Mathematics", "Physics", "Chemistry", "English", "Programming", "Data Structures"]
-    subjects_created = 0
-    for sub_name in sample_subjects:
-        try:
-            existing_sub = db.execute(f"SELECT id FROM subjects WHERE name = {placeholder}", (sub_name,)).fetchone()
-            if not existing_sub:
-                db.execute(f"INSERT INTO subjects (name, branch_id) VALUES ({placeholder}, {placeholder})", (sub_name, default_branch_id))
-                subjects_created += 1
-        except Exception as subject_err:
-            _db_log("WARNING", "db.init", f"Failed to create subject '{sub_name}': {repr(subject_err)}")
-    
-    if subjects_created > 0:
-        db.commit()
-        _db_log("SUCCESS", "db.init", f"Created {subjects_created} sample subjects")
-    else:
-        _db_log("SUCCESS", "db.init", "Sample subjects already exist")
-    # No demo teacher accounts are seeded automatically.
-    # All teacher accounts must be created by an admin via the Manage Teachers page.
+    if not teacher:
+        db.execute(
+            f"INSERT INTO users (username, password, role) VALUES ({placeholder}, {placeholder}, {placeholder})",
+            ("teacher1", generate_password_hash("1234"), "teacher"),
+        )
 
     # ✅ Default low attendance threshold setting
-    _db_log("INFO", "db.init", "Verifying low attendance threshold setting...")
-    try:
-        if not db.execute(f"SELECT id FROM settings WHERE key = {placeholder}", ("low_attendance_threshold",)).fetchone():
-            _db_log("WARNING", "db.init", "Threshold setting not found, creating default...")
-            db.execute(
-                f"INSERT INTO settings (key, value) VALUES ({placeholder}, {placeholder})",
-                ("low_attendance_threshold", str(app.config["LOW_ATTENDANCE_THRESHOLD"])),
-            )
-            db.commit()
-            _db_log("SUCCESS", "db.init", f"Threshold setting created (threshold: {app.config['LOW_ATTENDANCE_THRESHOLD']}%)")
-        else:
-            _db_log("SUCCESS", "db.init", "Threshold setting verified")
-    except Exception as settings_err:
-        _db_log("ERROR", "db.init", f"Failed to verify threshold setting: {repr(settings_err)}")
+    if not db.execute(f"SELECT id FROM settings WHERE key = {placeholder}", ("low_attendance_threshold",)).fetchone():
+        db.execute(
+            f"INSERT INTO settings (key, value) VALUES ({placeholder}, {placeholder})",
+            ("low_attendance_threshold", str(app.config["LOW_ATTENDANCE_THRESHOLD"])),
+        )
 
     db.commit()
-    _db_log("SUCCESS", "db.init", "Database initialization completed successfully")
-    
     if created_here:
         try:
             db.close()
         except Exception:
             pass
-
-
-def _normalize_branch_name(name):
-    return (name or "").strip()
-
-
-def _branch_section_from_name(branch_name):
-    branch_name = _normalize_branch_name(branch_name)
-    if "-" not in branch_name:
-        return ""
-    return branch_name.rsplit("-", 1)[-1].strip()
-
-
-def _branch_base_from_name(branch_name):
-    branch_name = _normalize_branch_name(branch_name)
-    if "-" not in branch_name:
-        return branch_name
-    return branch_name.rsplit("-", 1)[0].strip()
-
-
-def _branch_name_exists(db, branch_name, exclude_id=None):
-    placeholder = get_placeholder()
-    branch_name = _normalize_branch_name(branch_name)
-    if not branch_name:
-        return False
-
-    if exclude_id:
-        row = db.execute(
-            f"SELECT 1 FROM branches WHERE LOWER(name) = LOWER({placeholder}) AND id != {placeholder}",
-            (branch_name, exclude_id),
-        ).fetchone()
-    else:
-        row = db.execute(
-            f"SELECT 1 FROM branches WHERE LOWER(name) = LOWER({placeholder})",
-            (branch_name,),
-        ).fetchone()
-    return bool(row)
-
-
-def _build_branch_section_names(base_name, sections_value):
-    base_name = _normalize_branch_name(base_name)
-    sections_value = _normalize_branch_name(sections_value)
-
-    if not sections_value:
-        return [base_name] if base_name else []
-
-    branch_names = []
-    for section in sections_value.split(","):
-        section = _normalize_branch_name(section)
-        if not section:
-            continue
-        branch_name = f"{base_name}-{section}" if base_name else section
-        if branch_name not in branch_names:
-            branch_names.append(branch_name)
-    return branch_names
-
-
-def _get_branch_section_name(db, branch_id):
-    if not branch_id:
-        return None
-    placeholder = get_placeholder()
-    row = db.execute(
-        f"SELECT name FROM branches WHERE id = {placeholder}",
-        (branch_id,),
-    ).fetchone()
-    return row_get(row, "name") if row else None
-
-
-def _get_branch_name_and_section(db, branch_id):
-    if not branch_id:
-        return None, None
-    placeholder = get_placeholder()
-    row = db.execute(
-        f"SELECT id, name FROM branches WHERE id = {placeholder}",
-        (branch_id,),
-    ).fetchone()
-    branch_name = row_get(row, "name") if row else None
-    return branch_name, _branch_section_from_name(branch_name) if branch_name else None
-
-
-def _resolve_teacher_assignments(db, teacher_id):
-    placeholder = get_placeholder()
-    assignments = db.execute(
-        f"""
-        SELECT ta.id, ta.teacher_id, ta.subject_id, ta.branch_id, ta.section,
-               s.name AS subject_name, b.name AS branch_name
-        FROM teacher_assignments ta
-        JOIN subjects s ON ta.subject_id = s.id
-        JOIN branches b ON ta.branch_id = b.id
-        WHERE ta.teacher_id = {placeholder}
-        ORDER BY s.name, b.name, ta.section
-        """,
-        (teacher_id,),
-    ).fetchall()
-
-    if assignments:
-        return assignments
-
-    # Backward-compatible fallback from the legacy junction tables.
-    branch_rows = db.execute(
-        f"""
-        SELECT b.id, b.name, b.location
-        FROM branches b
-        JOIN teacher_branches tb ON b.id = tb.branch_id
-        WHERE tb.teacher_id = {placeholder}
-        ORDER BY b.name
-        """,
-        (teacher_id,),
-    ).fetchall()
-    subject_rows = db.execute(
-        f"""
-        SELECT s.id, s.name, s.branch_id
-        FROM subjects s
-        JOIN teacher_subjects ts ON s.id = ts.subject_id
-        WHERE ts.teacher_id = {placeholder}
-        ORDER BY s.name
-        """,
-        (teacher_id,),
-    ).fetchall()
-
-    fallback_assignments = []
-    for subject in subject_rows:
-        for branch in branch_rows:
-            branch_name = row_get(branch, "name")
-            fallback_assignments.append({
-                "id": f"legacy-{teacher_id}-{row_get(subject, 'id')}-{row_get(branch, 'id')}",
-                "teacher_id": teacher_id,
-                "subject_id": row_get(subject, "id"),
-                "branch_id": row_get(branch, "id"),
-                "section": _branch_section_from_name(branch_name),
-                "subject_name": row_get(subject, "name"),
-                "branch_name": branch_name,
-            })
-    return fallback_assignments
-
-
 def login_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
         if "user_id" not in session:
-            flash("Please login first.", "warning")
-            return redirect(url_for("login"))
+            flash("You must be logged in to view this page.", "warning")
+            return redirect(url_for("teacher_login"))
+        if session.get("role") == "student":
+            flash("You do not have permission to access this page.", "danger")
+            return redirect(url_for("student_dashboard"))
         return f(*args, **kwargs)
     return decorated_function
-
-
-def teacher_login_required(f):
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        if "user_id" not in session:
-            flash("Please login first.", "warning")
-            return redirect(url_for("teacher_login", next=request.path))
-        if session.get("role") != "teacher":
-            return "Unauthorized Access", 403
-        return f(*args, **kwargs)
-
-    return decorated_function
-
-
-def student_login_required(f):
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        if "user_id" not in session:
-            flash("Please login first.", "warning")
-            return redirect(url_for("student_login", next=request.path))
-        if session.get("role") != "student":
-            return "Unauthorized Access", 403
-        return f(*args, **kwargs)
-
-    return decorated_function
-
-
-def student_required(f):
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        if session.get("role") != "student":
-            return "Unauthorized Access", 403
-        if not session.get("student_id"):
-            session.clear()
-            flash("Please login first.", "warning")
-            return redirect(url_for("student_login"))
-        return f(*args, **kwargs)
-
-    return decorated_function
-
-
-def admin_required(f):
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        # If not logged in, send to admin login with the required message.
-        if "user_id" not in session:
-            flash("Please login first.", "warning")
-            return redirect(url_for("login"))
-        # If logged in but not an admin, force re-authentication via admin login.
-        if session.get("role") != "admin":
-            flash("Please login first.", "warning")
-            return redirect(url_for("login"))
-        return f(*args, **kwargs)
-
-    return decorated_function
-
-
-def teacher_required(f):
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        if session.get("role") != "teacher":
-            return "Unauthorized Access", 403
-        teacher_id = session.get("teacher_id")
-        if not teacher_id:
-            return "Unauthorized Access", 403
-        if str(session.get("user_id")) != str(teacher_id):
-            session.clear()
-            return "Unauthorized Access", 403
-        return f(*args, **kwargs)
-
-    return decorated_function
-
-
-@app.before_request
-def _validate_role_session():
-    """Lightweight session validation to improve stability.
-
-    - Validates session structure on every request.
-    - Periodically validates that the referenced user/teacher still exists.
-    """
-    try:
-        if request.path.startswith("/static/"):
-            return
-
-        role = session.get("role")
-        if not role:
-            return
-
-        if role not in ("admin", "teacher", "student"):
-            session.clear()
-            return
-
-        if "user_id" not in session:
-            session.clear()
-            return
-
-        if role == "teacher":
-            if not session.get("teacher_id"):
-                session.clear()
-                return
-            if str(session.get("user_id")) != str(session.get("teacher_id")):
-                session.clear()
-                return
-
-        # DB validation at most once per 5 minutes
-        now = int(time.time())
-        last = int(session.get("_validated_at") or 0)
-        if now - last < 300:
-            return
-
-        db = None
-        try:
-            db = get_db()
-            placeholder = get_placeholder()
-
-            if role in ("admin", "student"):
-                row = db.execute(
-                    f"SELECT role FROM users WHERE id = {placeholder}",
-                    (session.get("user_id"),),
-                ).fetchone()
-                if not row or row_get(row, "role") != role:
-                    session.clear()
-                    return
-
-            if role == "teacher":
-                row = db.execute(
-                    f"SELECT id FROM teachers WHERE id = {placeholder}",
-                    (session.get("teacher_id"),),
-                ).fetchone()
-                if not row:
-                    session.clear()
-                    return
-        except Exception:
-            # Do not block requests if DB is down; routes will handle errors.
-            return
-        finally:
-            try:
-                if db is not None:
-                    db.close()
-            except Exception:
-                pass
-
-        session["_validated_at"] = now
-    except Exception:
-        return
-
-
-@app.after_request
-def _add_no_cache_headers(response):
-    try:
-        if request.path.startswith("/static/"):
-            return response
-        if session.get("user_id"):
-            # Prevent cached authenticated pages showing after logout
-            response.headers.setdefault("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
-            response.headers.setdefault("Pragma", "no-cache")
-            response.headers.setdefault("Expires", "0")
-    except Exception:
-        pass
-    return response
-
-
 @app.route("/login", methods=["GET", "POST"])
 @app.route("/admin_login", methods=["GET", "POST"])  # compatibility URL
 @app.route("/admin-login", methods=["GET", "POST"])  # compatibility URL
@@ -2071,41 +606,13 @@ def login():
         db = None
         try:
             db = get_db()
-            # Safety: clear any stale aborted transaction (PostgreSQL only).
-            # If init_db left the connection in a failed state, this resets it.
-            if str(app.config.get("DATABASE", "")).startswith("postgres"):
-                try:
-                    db.rollback()
-                except Exception:
-                    pass
             placeholder = get_placeholder()
             user = db.execute(
                 f"SELECT id, username, password, role FROM users WHERE username = {placeholder}",
                 (username,),
             ).fetchone()
 
-            password_ok = False
-            if user:
-                stored = row_get(user, "password") or ""
-                try:
-                    password_ok = check_password_hash(stored, password)
-                except Exception:
-                    # Legacy plaintext password detected; upgrade on successful match
-                    password_ok = (stored == password)
-                    if password_ok:
-                        try:
-                            db.execute(
-                                f"UPDATE users SET password = {placeholder} WHERE id = {placeholder}",
-                                (generate_password_hash(password), row_get(user, "id")),
-                            )
-                            db.commit()
-                        except Exception:
-                            try:
-                                db.rollback()
-                            except Exception:
-                                pass
-
-            if user and password_ok:
+            if user and check_password_hash(row_get(user, "password"), password):
                 if row_get(user, "role") == "student":
                     flash("Please use the student login page.", "error")
                     return redirect(url_for("student_login"))
@@ -2114,7 +621,6 @@ def login():
                 session["user_id"] = row_get(user, "id")
                 session["username"] = row_get(user, "username")
                 session["role"] = row_get(user, "role")
-                session.permanent = True
                 return redirect(url_for("dashboard"))
 
             flash("Invalid username or password.", "error")
@@ -2131,275 +637,130 @@ def login():
             except Exception:
                 pass
 
-    return render_template("login.html", hide_nav=True)
+    return render_template("login.html")
 
 
 @app.route("/logout")
-@login_required
 def logout():
-    role = session.get("role")
     session.clear()
-    dest = "login"
-    if role == "teacher":
-        dest = "teacher_login"
-    elif role == "student":
-        dest = "student_login"
-    resp = redirect(url_for(dest))
-    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
-    resp.headers["Pragma"] = "no-cache"
-    resp.headers["Expires"] = "0"
-    return resp
+    return redirect(url_for("login"))
 
 
 @app.route("/")
 def index():
-    return render_template("index.html", hide_nav=True)
+    return render_template("index.html")
 
 
 @app.route("/dashboard")
 @login_required
-@admin_required
 def dashboard():
     """Main admin dashboard with stats and charts."""
     db = None
     try:
         db = get_db()
         placeholder = get_placeholder()
-        
-        # Safety: clear any stale aborted transaction (PostgreSQL).
-        if str(app.config.get("DATABASE", "")).startswith("postgres"):
-            try:
-                db.rollback()
-            except Exception:
-                pass
-
-        def _safe_scalar(query, params=(), default=0):
-            try:
-                row = db.execute(query, params).fetchone()
-                if row is None:
-                    return default
-                try:
-                    return row[0]
-                except Exception:
-                    return default
-            except Exception as qe:
-                print(f"[dashboard] scalar query failed: {repr(qe)} | query={query}")
-                return default
-
-        def _safe_fetchall(query, params=()):
-            try:
-                return db.execute(query, params).fetchall()
-            except Exception as qe:
-                print(f"[dashboard] fetchall query failed: {repr(qe)} | query={query}")
-                return []
-
-        branch_count = int(_safe_scalar("SELECT COUNT(*) FROM branches", default=0) or 0)
-        student_count = int(_safe_scalar("SELECT COUNT(*) FROM students", default=0) or 0)
-        subject_count = int(_safe_scalar("SELECT COUNT(*) FROM subjects", default=0) or 0)
-        # Count unique conducted classes (unique combinations of date, subject, branch, and period)
-        total_classes_query = "SELECT COUNT(*) FROM (SELECT 1 FROM attendance GROUP BY date, subject_id, branch_id, period) AS classes"
-        total_classes = int(_safe_scalar(total_classes_query, default=0) or 0)
+        branch_count = db.execute("SELECT COUNT(*) FROM branches").fetchone()[0]
+        student_count = db.execute("SELECT COUNT(*) FROM students").fetchone()[0]
+        subject_count = db.execute("SELECT COUNT(*) FROM subjects").fetchone()[0]
+        attendance_count = db.execute("SELECT COUNT(*) FROM attendance").fetchone()[0]
 
         attendance_stats = db.execute("""
             SELECT
                 COUNT(CASE WHEN status='Present' THEN 1 END) as present_count,
-                COUNT(*) as total_attendance_records
+                COUNT(*) as total_count
             FROM attendance
         """).fetchone()
 
+        total_classes = 0
         present_count = 0
         absent_count = 0
-        attendance_record_count = 0
         try:
+            total_classes = int(row_get(attendance_stats, "total_count") or 0)
             present_count = int(row_get(attendance_stats, "present_count") or 0)
-            attendance_record_count = int(row_get(attendance_stats, "total_attendance_records") or 0)
-            absent_count = max(attendance_record_count - present_count, 0)
+            absent_count = max(total_classes - present_count, 0)
         except Exception:
             pass
 
         overall_percentage = 0
-        if attendance_record_count > 0:
-            overall_percentage = round((present_count / attendance_record_count) * 100, 1)
+        if total_classes > 0:
+            overall_percentage = round((present_count / total_classes) * 100, 1)
 
-        # Additional analytics for upgraded dashboard
-        today_str = date.today().isoformat()
-        # Today's attendance
-        today_q = f"SELECT COUNT(CASE WHEN status='Present' THEN 1 END) as present_today, COUNT(*) as total_today FROM attendance WHERE date = {placeholder}"
-        try:
-            today_row = db.execute(today_q, (today_str,)).fetchone()
-            today_present = int(row_get(today_row, "present_today", 0) or 0)
-            today_total = int(row_get(today_row, "total_today", 0) or 0)
-            today_percentage = round((today_present / today_total) * 100, 1) if today_total > 0 else 0
-        except Exception:
-            today_present = 0
-            today_total = 0
-            today_percentage = 0
-
-        # Active classes today (unique date, subject, branch, period)
-        active_classes_today_q = f"SELECT COUNT(*) FROM (SELECT 1 FROM attendance WHERE date = {placeholder} GROUP BY subject_id, branch_id, period) AS classes"
-        active_classes_today = int(_safe_scalar(active_classes_today_q, (today_str,), default=0) or 0)
-
-        # Total teachers
-        total_teachers = int(_safe_scalar("SELECT COUNT(*) FROM teachers", default=0) or 0)
-
-        # Total semesters (distinct non-null current_semester in students)
-        try:
-            total_semesters = int(db.execute("SELECT COUNT(DISTINCT current_semester) AS cnt FROM students WHERE current_semester IS NOT NULL").fetchone()[0] or 0)
-        except Exception:
-            total_semesters = 0
-
-        # Low attendance alerts: students with < 75% attendance (and at least 1 record)
-        low_alerts_q = f"SELECT COUNT(*) FROM (SELECT s.id, SUM(CASE WHEN a.status='Present' THEN 1 ELSE 0 END) as present_marks, COUNT(a.id) as total_marks, (SUM(CASE WHEN a.status='Present' THEN 1 ELSE 0 END)*100.0)/NULLIF(COUNT(a.id),0) as pct FROM students s LEFT JOIN attendance a ON s.id = a.student_id GROUP BY s.id) sub WHERE sub.total_marks > 0 AND sub.pct < 75"
-        low_attendance_alerts = int(_safe_scalar(low_alerts_q, default=0) or 0)
-
-        # Monthly attendance trend (last 12 months) - use YYYY-MM substring for portability
-        monthly_rows = _safe_fetchall(
+        subject_data = db.execute(
             """
-            SELECT substr(date,1,7) AS month,
-                   SUM(CASE WHEN status='Present' THEN 1 ELSE 0 END) AS present_marks,
-                   COUNT(*) AS total_marks
+            SELECT
+                subjects.name AS name,
+                SUM(CASE WHEN attendance.status='Present' THEN 1 ELSE 0 END) AS present_count,
+                COUNT(*) AS total_count,
+                ROUND(
+                    SUM(CASE WHEN attendance.status='Present' THEN 1 ELSE 0 END)*100.0 / NULLIF(COUNT(*), 0),
+                    1
+                ) AS percentage
             FROM attendance
-            GROUP BY month
-            ORDER BY month DESC
-            LIMIT 12
+            JOIN subjects ON attendance.subject_id = subjects.id
+            GROUP BY subjects.id, subjects.name
+            ORDER BY subjects.name
             """
-        )
-        monthly_labels = []
-        monthly_percentages = []
-        for row in reversed(monthly_rows):
-            m = row_get(row, "month", "") or ""
-            tm = int(row_get(row, "total_marks", 0) or 0)
-            pm = int(row_get(row, "present_marks", 0) or 0)
-            pct = round((pm / tm) * 100, 1) if tm > 0 else 0
-            monthly_labels.append(m)
-            monthly_percentages.append(pct)
+        ).fetchall()
 
-        # Recent activity (last 10 attendance records)
-        recent_activity = _safe_fetchall(
-            f"""
-            SELECT a.date, s.name AS student_name, sub.name AS subject_name, b.name AS branch_name, a.status
-            FROM attendance a
-            LEFT JOIN students s ON a.student_id = s.id
-            LEFT JOIN subjects sub ON a.subject_id = sub.id
-            LEFT JOIN branches b ON a.branch_id = b.id
-            ORDER BY a.id DESC
-            LIMIT 10
-            """
-        )
-
-        subject_rows = _safe_fetchall(
-            """
+        subject_chart_labels = [row_get(r, "name") for r in subject_data]
+        subject_chart_percentages = [float(row_get(r, "percentage") or 0) for r in subject_data]
+        
+        branch_data = db.execute("""
             SELECT
-                s.name AS subject_name,
-                (SELECT COUNT(*) FROM (SELECT 1 FROM attendance a2 WHERE a2.subject_id = s.id GROUP BY a2.date, a2.branch_id, a2.period) sub) AS total_count,
-                SUM(CASE WHEN a.status = 'Present' THEN 1 ELSE 0 END) AS total_present_marks,
-                COUNT(a.id) AS total_attendance_records
-            FROM subjects s
-            LEFT JOIN attendance a ON s.id = a.subject_id
-            GROUP BY s.id, s.name
-            ORDER BY s.name
-            """
-        )
+                branches.name AS branch_name,
+                branches.location AS location,
+                COUNT(DISTINCT students.id) AS student_count,
+                COUNT(DISTINCT subjects.id) AS subject_count,
+                COUNT(attendance.id) AS attendance_count,
+                ROUND(
+                    COUNT(CASE WHEN attendance.status='Present' THEN 1 END)*100.0 / NULLIF(COUNT(attendance.id),0),
+                    1
+                ) AS attendance_percentage
+            FROM branches
+            LEFT JOIN students ON branches.id = students.branch_id
+            LEFT JOIN subjects ON branches.id = subjects.branch_id
+            LEFT JOIN attendance ON branches.id = attendance.branch_id
+            GROUP BY branches.id, branches.name, branches.location
+            ORDER BY branches.name
+        """).fetchall()
 
-        subject_chart_labels = []
-        subject_chart_percentages = []
-        for row in subject_rows:
-            total_recs = int(row_get(row, "total_attendance_records", 0) or 0)
-            present_mks = int(row_get(row, "total_present_marks", 0) or 0)
-            pct = round((present_mks / total_recs) * 100, 1) if total_recs > 0 else 0
-            subject_chart_labels.append(row_get(row, "subject_name", "") or "")
-            subject_chart_percentages.append(pct)
-
-        trend_rows = _safe_fetchall(
-            """
-            SELECT
-                date,
-                (SELECT COUNT(*) FROM (SELECT 1 FROM attendance a2 WHERE a2.date = a.date GROUP BY a2.subject_id, a2.branch_id, a2.period) sub) AS daily_classes,
-                SUM(CASE WHEN status = 'Present' THEN 1 ELSE 0 END) AS present_marks,
-                COUNT(*) AS total_marks
-            FROM attendance a
-            GROUP BY date
-            ORDER BY date DESC
-            LIMIT 14
-            """
-        )
-        trend_labels = []
-        trend_percentages = []
-        for row in reversed(trend_rows):
-            date_val = row_get(row, "date", "")
-            total_m = int(row_get(row, "total_marks", 0) or 0)
-            present_m = int(row_get(row, "present_marks", 0) or 0)
-            pct = round((present_m / total_m) * 100, 1) if total_m > 0 else 0
-            trend_labels.append(date_val)
-            trend_percentages.append(pct)
-
-        branch_data = _safe_fetchall(
-            """
-            SELECT
-                b.id,
-                b.name AS branch_name,
-                b.location,
-                (SELECT COUNT(*) FROM students s WHERE s.branch_id = b.id) AS student_count,
-                (SELECT COUNT(*) FROM subjects sb WHERE sb.branch_id = b.id) AS subject_count,
-                (SELECT COUNT(*) FROM (SELECT 1 FROM attendance a2 WHERE a2.branch_id = b.id GROUP BY a2.date, a2.subject_id, a2.period) sub) AS total_count,
-                (SELECT COUNT(*) FROM attendance a3 WHERE a3.branch_id = b.id AND a3.status = 'Present') AS present_marks,
-                (SELECT COUNT(*) FROM attendance a4 WHERE a4.branch_id = b.id) AS total_marks
-            FROM branches b
-            ORDER BY b.name
-            """
-        )
-
-        processed_branch_data = []
-        for row in branch_data:
-            d = dict(row)
-            tm = int(d.get("total_marks", 0) or 0)
-            pm = int(d.get("present_marks", 0) or 0)
-            d["attendance_percentage"] = round((pm / tm) * 100, 1) if tm > 0 else 0
-            processed_branch_data.append(d)
-        branch_data = processed_branch_data
-        if not branch_data:
-            # Backward-compatible fallback for old schemas that don't have branches.location.
-            branch_data = _safe_fetchall(
-                """
+        # Build last-7-days chart data
+        chart_dates = [date.today() - timedelta(days=i) for i in range(6, -1, -1)]
+        chart_date_values = [d.isoformat() for d in chart_dates]
+        chart_data = []
+        if chart_date_values:
+            placeholder = get_placeholder()
+            chart_rows = db.execute(
+                f"""
                 SELECT
-                    branches.name AS branch_name,
-                    '' AS location,
-                    COUNT(DISTINCT students.id) AS student_count,
-                    COUNT(DISTINCT subjects.id) AS subject_count,
-                    COUNT(attendance.id) AS attendance_count,
-                    ROUND(
-                        COUNT(CASE WHEN attendance.status='Present' THEN 1 END)*100.0 / NULLIF(COUNT(attendance.id),0),
-                        1
-                    ) AS attendance_percentage
-                FROM branches
-                LEFT JOIN students ON branches.id = students.branch_id
-                LEFT JOIN subjects ON branches.id = subjects.branch_id
-                LEFT JOIN attendance ON branches.id = attendance.branch_id
-                GROUP BY branches.id, branches.name
-                ORDER BY branches.name
-                """
-            )
-
-        current_active_period = None
-        upcoming_timetable = []
-        try:
-            import timetable as _timetable
-            current_active_period = _timetable.get_global_active_class(db)
-            upcoming_timetable = _timetable.get_upcoming_classes(db, "", "", limit=4)
-        except Exception as timetable_err:
-            print(f"[dashboard] timetable widget load skipped: {repr(timetable_err)}")
+                    date,
+                    SUM(CASE WHEN status='Present' THEN 1 ELSE 0 END) AS present_count,
+                    COUNT(*) AS total_count
+                FROM attendance
+                WHERE date IN ({', '.join([placeholder] * len(chart_date_values))})
+                GROUP BY date
+                """,
+                tuple(chart_date_values),
+            ).fetchall()
+            chart_map = {row_get(r, "date"): r for r in chart_rows}
+            for date_str in chart_date_values:
+                row = chart_map.get(date_str)
+                total_count = row_get(row, "total_count", 0) or 0
+                present_count = row_get(row, "present_count", 0) or 0
+                percentage = round((present_count / total_count) * 100, 1) if total_count else 0
+                chart_data.append({"date": date_str, "percentage": percentage})
 
         db.close()
         database_info = {
-            "storage": "PostgreSQL" if str(app.config.get("DATABASE", "")).startswith("postgresql") else "SQLite",
-            "path": app.config.get("DATABASE", "unknown"),
+            "storage": "PostgreSQL" if app.config["DATABASE"].startswith("postgresql") else "SQLite",
+            "path": app.config["DATABASE"],
         }
         mail_info = {
             "configured": is_mail_configured(),
-            "server": app.config.get("MAIL_SERVER", "api.resend.com"),
-            "port": app.config.get("MAIL_PORT", 443),
-            "username": app.config.get("MAIL_FROM"),
-            "tls": True,
+            "server": app.config["MAIL_SERVER"],
+            "port": app.config["MAIL_PORT"],
+            "username": app.config["MAIL_USERNAME"],
+            "tls": app.config["MAIL_USE_TLS"],
             "render_env": bool(os.environ.get("RENDER") or os.environ.get("RENDER_INTERNAL_HOSTNAME")),
         }
 
@@ -2408,70 +769,24 @@ def dashboard():
             branch_count=branch_count,
             student_count=student_count,
             subject_count=subject_count,
-            attendance_count=attendance_record_count,
+            attendance_count=attendance_count,
             total_classes=total_classes,
             present_count=present_count,
             absent_count=absent_count,
             overall_percentage=overall_percentage,
+            subject_data=subject_data,
             subject_chart_labels=subject_chart_labels,
             subject_chart_percentages=subject_chart_percentages,
-            trend_labels=trend_labels,
-            trend_percentages=trend_percentages,
             branch_data=branch_data,
+            chart_data=chart_data,
             database_info=database_info,
             mail_info=mail_info,
-            today_percentage=today_percentage,
-            today_present=today_present,
-            today_total=today_total,
-            active_classes_today=active_classes_today,
-            total_teachers=total_teachers,
-            total_semesters=total_semesters,
-            low_attendance_alerts=low_attendance_alerts,
-            monthly_labels=monthly_labels,
-            monthly_percentages=monthly_percentages,
-            recent_activity=recent_activity,
-            current_active_period=current_active_period,
-            upcoming_timetable=upcoming_timetable,
         )
     except Exception as e:
         print(f"[dashboard] CRITICAL ERROR: {repr(e)}")
         print(traceback.format_exc())
         flash("Dashboard is temporarily unavailable due to a database error.", "error")
-        return render_template(
-            "dashboard.html",
-            error_mode=True,
-            branch_count=0,
-            student_count=0,
-            subject_count=0,
-            attendance_count=0,
-            total_classes=0,
-            present_count=0,
-            absent_count=0,
-            overall_percentage=0,
-            subject_chart_labels=[],
-            subject_chart_percentages=[],
-            trend_labels=[],
-            trend_percentages=[],
-            branch_data=[],
-            database_info={"storage": "Unknown", "path": "Unavailable"},
-            mail_info={
-                "configured": False,
-                "server": "Unavailable",
-                "port": "-",
-                "username": None,
-                "tls": False,
-            },
-            today_percentage=0,
-            today_present=0,
-            today_total=0,
-            active_classes_today=0,
-            total_teachers=0,
-            total_semesters=0,
-            low_attendance_alerts=0,
-            monthly_labels=[],
-            monthly_percentages=[],
-            recent_activity=[],
-        )
+        return render_template("dashboard.html", error_mode=True)
     finally:
         if db:
             try: db.close()
@@ -2480,7 +795,6 @@ def dashboard():
 
 @app.route("/department-dashboard")
 @login_required
-@admin_required
 def department_dashboard():
     db = None
     try:
@@ -2566,7 +880,7 @@ def department_dashboard():
             FROM students
             LEFT JOIN attendance ON attendance.student_id = students.id
             GROUP BY students.id, students.branch_id, students.name, students.enrollment, students.email
-            ORDER BY COALESCE(students.import_order, students.id), students.id
+            ORDER BY students.name
         """).fetchall():
             branch_id = row_get(row, "branch_id")
             total = row_get(row, "total_count", 0) or 0
@@ -2630,84 +944,8 @@ def department_dashboard():
             try: db.close()
             except: pass
 
-
-@app.route("/api/low-attendance-details")
-@admin_required
-def api_low_attendance_details():
-    """Return detailed low attendance information for dashboard modal."""
-    db = None
-    try:
-        db = get_db()
-        placeholder = get_placeholder()
-        threshold = get_setting(db, "low_attendance_threshold", app.config["LOW_ATTENDANCE_THRESHOLD"])
-        
-        # Query all students with their attendance details, including subject and semester
-        query = f"""
-            SELECT 
-                s.id AS student_id,
-                s.name AS student_name,
-                s.roll_no AS roll_number,
-                s.section AS section,
-                s.current_semester AS semester,
-                b.name AS branch_name,
-                subj.name AS subject_name,
-                COUNT(a.id) AS total_classes,
-                SUM(CASE WHEN a.status = 'Present' THEN 1 ELSE 0 END) AS classes_attended,
-                ROUND(
-                    100.0 * SUM(CASE WHEN a.status = 'Present' THEN 1 ELSE 0 END) / NULLIF(COUNT(a.id), 0),
-                    1
-                ) AS attendance_percentage
-            FROM students s
-            LEFT JOIN attendance a ON s.id = a.student_id
-            LEFT JOIN branches b ON s.branch_id = b.id
-            LEFT JOIN subjects subj ON a.subject_id = subj.id
-            GROUP BY s.id, s.name, s.roll_no, s.section, s.current_semester, b.name, subj.name
-            HAVING COUNT(a.id) > 0 AND (100.0 * SUM(CASE WHEN a.status = 'Present' THEN 1 ELSE 0 END) / NULLIF(COUNT(a.id), 0)) < {placeholder}
-            ORDER BY attendance_percentage ASC, s.name ASC
-        """
-        
-        rows = db.execute(query, (threshold,)).fetchall()
-        
-        low_attendance_students = []
-        for row in rows:
-            attendance_pct = row_get(row, "attendance_percentage") or 0
-            low_attendance_students.append({
-                "student_id": row_get(row, "student_id"),
-                "student_name": row_get(row, "student_name"),
-                "roll_number": row_get(row, "roll_number") or "N/A",
-                "branch_name": row_get(row, "branch_name") or "N/A",
-                "section": row_get(row, "section") or "N/A",
-                "semester": row_get(row, "semester") or 0,
-                "subject_name": row_get(row, "subject_name") or "N/A",
-                "attendance_percentage": float(attendance_pct),
-                "total_classes": int(row_get(row, "total_classes") or 0),
-                "classes_attended": int(row_get(row, "classes_attended") or 0),
-                "is_critical": float(attendance_pct) < 65,  # Critical if below 65%
-            })
-        
-        return jsonify({
-            "success": True,
-            "threshold": threshold,
-            "count": len(low_attendance_students),
-            "students": low_attendance_students
-        })
-    
-    except Exception as e:
-        print(f"[api_low_attendance_details] ERROR: {repr(e)}")
-        print(traceback.format_exc())
-        return jsonify({
-            "success": False,
-            "error": str(e)
-        }), 500
-    finally:
-        if db:
-            try: db.close()
-            except: pass
-
-
 @app.route("/settings", methods=["GET", "POST"])
 @login_required
-@admin_required
 def settings():
     if session.get("role") != "admin":
         return redirect(url_for("dashboard"))
@@ -2736,10 +974,10 @@ def settings():
 
     mail_info = {
         "configured": is_mail_configured(),
-        "server": app.config.get("MAIL_SERVER", "api.resend.com"),
-        "port": app.config.get("MAIL_PORT", 443),
-        "username": app.config.get("MAIL_FROM"),
-        "tls": True,
+        "server": app.config["MAIL_SERVER"],
+        "port": app.config["MAIL_PORT"],
+        "username": app.config["MAIL_USERNAME"],
+        "tls": app.config["MAIL_USE_TLS"],
         "render_env": bool(os.environ.get("RENDER") or os.environ.get("RENDER_INTERNAL_HOSTNAME")),
     }
 
@@ -2759,7 +997,7 @@ def test_email():
         return redirect(url_for("dashboard"))
 
     if not is_mail_configured():
-        flash("Email is not configured. Please set RESEND_API_KEY and MAIL_FROM.", "error")
+        flash("Email is not configured. Please set MAIL_USERNAME and MAIL_PASSWORD.", "error")
         return redirect(url_for("settings"))
 
     recipient = (app.config.get("REPORT_ADMIN_EMAIL") or "").strip()
@@ -2772,204 +1010,17 @@ def test_email():
         f"Sent to: {recipient}\n"
         f"Time: {date.today().isoformat()}\n"
     )
-    try:
-        email_sent, error_msg = send_email_with_error(
-            subject="Test Email: Attendance System",
-            recipient=recipient,
-            body=body,
-        )
-        if email_sent:
-            flash(f"Test email sent to {recipient}.", "success")
-        else:
-            flash(f"Failed to send test email: {error_msg}", "error")
-    except Exception as e:
-        flash(f"Resend API error: {str(e)}", "error")
+    email_sent = safe_send_email(
+        subject="Test Email: Attendance System",
+        recipient=recipient,
+        body=body,
+    )
+    if email_sent:
+        flash(f"Test email sent to {recipient}.", "success")
+    else:
+        flash("Failed to send test email. Check mail settings.", "error")
 
     return redirect(url_for("settings"))
-
-
-@app.route('/debug-env')
-@login_required
-def debug_env():
-    """Development-only route to inspect masked mail-related env detection.
-
-    Visible only when not in production. Returns masked values and sources
-    (env vs .env) without exposing secrets.
-    """
-    if is_prod:
-        abort(404)
-    if session.get("role") != "admin":
-        return redirect(url_for("dashboard"))
-
-    try:
-        report = getattr(app, 'mail_config_report', None)
-        if not report:
-            # Ensure module is loaded and report is generated
-            import mail_config
-            report = mail_config.setup_mail_config(app)
-        return jsonify({"ok": True, "report": report})
-    except Exception as e:
-        print(f"[debug-env] error: {repr(e)}")
-        return jsonify({"ok": False, "error": "failed to generate debug report"}), 500
-
-
-@app.route('/admin/email-diagnostics', methods=['POST'])
-@login_required
-def email_diagnostics():
-    """Run email diagnostics and optionally send a test email.
-
-    Returns structured JSON with checks for environment variables, internet
-    connectivity (Resend API), optional SMTP connectivity/auth (if legacy
-    MAIL_USERNAME/MAIL_PASSWORD are present), and a test send result.
-    """
-    if session.get("role") != "admin":
-        return jsonify({"error": "unauthorized"}), 403
-
-    import socket
-    import smtplib
-
-    logger = logging.getLogger("app.email.diagnostics")
-    logger.info("Starting email diagnostics")
-
-    results = {
-        "env": {},
-        "connectivity": {},
-        "smtp": {},
-        "test_send": {},
-    }
-
-    # Environment variables
-    for var in ("MAIL_USERNAME", "MAIL_PASSWORD", "MAIL_FROM", "RESEND_API_KEY"):
-        val = os.environ.get(var)
-        results["env"][var] = bool(val and str(val).strip())
-
-    # Internet connectivity check to Resend API
-    try:
-        r = requests.get("https://api.resend.com/", timeout=5)
-        results["connectivity"]["resend_api"] = {"ok": True, "status_code": r.status_code}
-    except Exception as e:
-        results["connectivity"]["resend_api"] = {"ok": False, "error": str(e)}
-        logger.warning("Resend connectivity check failed: %s", repr(e))
-
-    # SMTP connectivity/auth checks only if legacy credentials present
-    mail_username = os.environ.get("MAIL_USERNAME")
-    mail_password = os.environ.get("MAIL_PASSWORD")
-    mail_server = os.environ.get("MAIL_SERVER") or app.config.get("MAIL_SERVER") or "smtp.gmail.com"
-    try:
-        mail_port = int(os.environ.get("MAIL_PORT") or app.config.get("MAIL_PORT") or 587)
-    except Exception:
-        mail_port = 587
-
-    smtp_report = {}
-    if mail_username and mail_password:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(6)
-        try:
-            sock.connect((mail_server, mail_port))
-            smtp_report["connection"] = {"ok": True, "message": f"Connected to {mail_server}:{mail_port}"}
-            try:
-                if mail_port == 465:
-                    server = smtplib.SMTP_SSL(mail_server, mail_port, timeout=6)
-                else:
-                    server = smtplib.SMTP(mail_server, mail_port, timeout=6)
-                    server.ehlo()
-                    if app.config.get("MAIL_USE_TLS"):
-                        server.starttls()
-                        server.ehlo()
-                try:
-                    server.login(mail_username, mail_password)
-                    smtp_report["auth"] = {"ok": True}
-                except smtplib.SMTPAuthenticationError as aerr:
-                    smtp_report["auth"] = {"ok": False, "error": str(aerr)}
-                except Exception as e:
-                    smtp_report["auth"] = {"ok": False, "error": str(e)}
-                try:
-                    server.quit()
-                except Exception:
-                    pass
-            except Exception as e:
-                smtp_report["auth"] = {"ok": False, "error": str(e)}
-        except socket.timeout:
-            smtp_report["connection"] = {"ok": False, "error": "Connection timed out (possible hosting provider blocking SMTP ports)"}
-        except Exception as e:
-            smtp_report["connection"] = {"ok": False, "error": str(e)}
-        finally:
-            try:
-                sock.close()
-            except Exception:
-                pass
-    else:
-        smtp_report["skipped"] = "MAIL_USERNAME or MAIL_PASSWORD not set; SMTP checks skipped"
-
-    results["smtp"] = smtp_report
-
-    # Send a test email using the app's configured method (Resend wrapper)
-    recipient = (app.config.get("REPORT_ADMIN_EMAIL") or os.environ.get("REPORT_ADMIN_EMAIL") or "").strip()
-    if recipient and is_valid_email(recipient):
-        try:
-            ok, err = send_email_with_error(
-                subject="Test Email: Attendance System",
-                recipient=recipient,
-                body=("This is a test email sent by the Email Diagnostics tool.\n\n"
-                      f"Time: {date.today().isoformat()}\n"),
-            )
-            if ok:
-                results["test_send"] = {"ok": True, "message": f"Test email sent to {recipient}"}
-            else:
-                results["test_send"] = {"ok": False, "error": err}
-        except Exception as e:
-            results["test_send"] = {"ok": False, "error": str(e)}
-            logger.exception("Test send failed")
-    else:
-        results["test_send"] = {"ok": False, "error": "Admin recipient invalid or not set (REPORT_ADMIN_EMAIL)"}
-
-    # Terminal log for debugging (full structured output)
-    print("[email.diagnostics] ", results)
-    logger.info("Email diagnostics completed")
-
-    # Build friendly UI messages
-    messages = []
-    conn = results.get("connectivity", {}).get("resend_api")
-    if conn and conn.get("ok"):
-        messages.append("Internet connectivity to Resend API: OK")
-    else:
-        err = conn.get("error") if conn else "Unknown"
-        messages.append("Internet connectivity to Resend API: Failed")
-        if err:
-            messages.append(f"Detail: {err}")
-
-    smtp_conn = results.get("smtp", {}).get("connection")
-    if smtp_conn:
-        if smtp_conn.get("ok"):
-            messages.append("SMTP connection: Success")
-        else:
-            err = smtp_conn.get("error", "")
-            if "timed out" in str(err).lower():
-                messages.append("SMTP connection: Failed — SMTP connection blocked by hosting provider")
-            else:
-                messages.append(f"SMTP connection: Failed — {err}")
-    else:
-        if results.get("smtp", {}).get("skipped"):
-            messages.append("SMTP checks skipped: MAIL_USERNAME or MAIL_PASSWORD not set")
-
-    auth = results.get("smtp", {}).get("auth")
-    if auth:
-        if auth.get("ok"):
-            messages.append("SMTP authentication: Success")
-        else:
-            messages.append(f"SMTP authentication: Failed — {auth.get('error')}")
-
-    # Environment variables summary
-    for k, v in results.get("env", {}).items():
-        messages.append(f"{k}: {'Loaded' if v else 'Not set'}")
-
-    ts = results.get("test_send", {})
-    if ts.get("ok"):
-        messages.append("Test email sent successfully")
-    else:
-        messages.append(f"Test email failed: {ts.get('error')}")
-
-    return jsonify({"results": results, "messages": messages})
 
 
 @app.route("/admin/import_data", methods=["POST"])
@@ -3088,505 +1139,62 @@ def admin_import_data():
 
 @app.route("/branches", methods=["GET", "POST"])
 @login_required
-@admin_required
 def branches():
-    db = None
-    try:
-        db = get_db()
-        placeholder = get_placeholder()
+    db = get_db()
+    placeholder = get_placeholder()
+    if request.method == "POST":
+        name = request.form["name"].strip()
+        location = request.form["location"].strip()
+        if name:
+            try:
+                db.execute(f"INSERT INTO branches (name, location) VALUES ({placeholder}, {placeholder})", (name, location))
+                db.commit()
+                flash("Branch added successfully.", "success")
+            except Exception as e:
+                db.rollback()
+                print(f"Error adding branch: {e}")
+                flash("Branch name already exists.", "error")
+        else:
+            flash("Branch name is required.", "error")
 
-        if request.method == "POST":
-            action = (request.form.get("action") or "add").strip().lower()
-            branch_id = (request.form.get("branch_id") or "").strip()
-            name = _normalize_branch_name(request.form.get("name"))
-            location = request.form.get("location")
-            sections = _normalize_branch_name(request.form.get("sections"))
-
-            if action == "delete":
-                if not branch_id:
-                    flash("Branch ID is required for deletion.", "error")
-                    return redirect(url_for("branches"))
-                else:
-                    refs = {
-                        "students": db.execute(f"SELECT COUNT(*) AS count FROM students WHERE branch_id = {placeholder}", (branch_id,)).fetchone(),
-                        "subjects": db.execute(f"SELECT COUNT(*) AS count FROM subjects WHERE branch_id = {placeholder}", (branch_id,)).fetchone(),
-                        "attendance": db.execute(f"SELECT COUNT(*) AS count FROM attendance WHERE branch_id = {placeholder}", (branch_id,)).fetchone(),
-                        "teacher_branches": db.execute(f"SELECT COUNT(*) AS count FROM teacher_branches WHERE branch_id = {placeholder}", (branch_id,)).fetchone(),
-                    }
-                    total_refs = sum(int(row_get(row, "count", 0) or 0) for row in refs.values())
-                    if total_refs > 0:
-                        flash("This branch cannot be deleted because it is still used by students, subjects, attendance, or teacher assignments.", "error")
-                        return redirect(url_for("branches"))
-                    else:
-                        try:
-                            db.execute(f"DELETE FROM branches WHERE id = {placeholder}", (branch_id,))
-                            db.commit()
-                            flash("Branch deleted successfully.", "success")
-                            return redirect(url_for("branches"))
-                        except Exception as e:
-                            db.rollback()
-                            print(f"[branches] delete error: {repr(e)}")
-                            flash("Error deleting branch. See server logs.", "error")
-                            return redirect(url_for("branches"))
-
-            elif action == "edit":
-                if not branch_id or not name:
-                    flash("Branch ID and name are required for editing.", "error")
-                    return redirect(url_for("branches"))
-                else:
-                    if _branch_name_exists(db, name, exclude_id=branch_id):
-                        flash("Another branch already uses that name.", "error")
-                        return redirect(url_for("branches"))
-                    else:
-                        try:
-                            db.execute(
-                                f"UPDATE branches SET name = {placeholder}, location = {placeholder} WHERE id = {placeholder}",
-                                (name, location, branch_id),
-                            )
-                            db.commit()
-                            flash("Branch updated successfully.", "success")
-                            return redirect(url_for("branches"))
-                        except Exception as e:
-                            db.rollback()
-                            print(f"[branches] update error: {repr(e)}")
-                            flash("Error updating branch. See server logs.", "error")
-                            return redirect(url_for("branches"))
-
-            else:
-                if not name:
-                    flash("Branch name is required.", "error")
-                    return redirect(url_for("branches"))
-                else:
-                    try:
-                        branch_names = _build_branch_section_names(name, sections)
-                        if not branch_names:
-                            flash("Branch name is required.", "error")
-                            return redirect(url_for("branches"))
-
-                        added = 0
-                        skipped = []
-                        for branch_name in branch_names:
-                            if _branch_name_exists(db, branch_name):
-                                skipped.append(branch_name)
-                                continue
-                            db.execute(
-                                f"INSERT INTO branches (name, location) VALUES ({placeholder}, {placeholder})",
-                                (branch_name, location),
-                            )
-                            added += 1
-
-                        db.commit()
-                        if added and skipped:
-                            flash(f"Added {added} section(s); skipped {len(skipped)} duplicate(s).", "warning")
-                        elif added:
-                            flash("Branch added successfully.", "success")
-                        else:
-                            flash("No new sections were added because they already exist.", "info")
-                        return redirect(url_for("branches"))
-                    except Exception as e:
-                        db.rollback()
-                        print(f"[branches] insert error: {repr(e)}")
-                        flash("Error adding branch(s). See server logs.", "error")
-                        return redirect(url_for("branches"))
-
-        branches_list = db.execute("SELECT * FROM branches ORDER BY name").fetchall()
-        response = make_response(render_template("branches.html", branches=branches_list))
-        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
-        response.headers["Pragma"] = "no-cache"
-        response.headers["Expires"] = "0"
-        return response
-    except Exception as e:
-        print(f"[branches] ERROR: {repr(e)}")
-        flash("Branch management is temporarily unavailable.", "error")
-        return redirect(url_for("dashboard"))
-    finally:
-        if db:
-            try: db.close()
-            except: pass
+    branches = db.execute(f"SELECT * FROM branches ORDER BY name").fetchall()
+    db.close()
+    return render_template("branches.html", branches=branches)
 
 
 @app.route("/subjects", methods=["GET", "POST"])
 @login_required
-@admin_required
 def subjects():
-    db = None
-    try:
-        db = get_db()
-        placeholder = get_placeholder()
-        if request.method == "POST":
-            name = request.form.get("name")
-            branch_id = request.form.get("branch_id")
-            if name and branch_id:
-                db.execute(f"INSERT INTO subjects (name, branch_id) VALUES ({placeholder}, {placeholder})", (name, branch_id))
+    db = get_db()
+    placeholder = get_placeholder()
+    branches = db.execute(f"SELECT * FROM branches ORDER BY name").fetchall()
+    if request.method == "POST":
+        name = request.form["name"].strip()
+        branch_id = request.form.get("branch_id")
+        if name and branch_id:
+            try:
+                db.execute(
+                    f"INSERT INTO subjects (name, branch_id) VALUES ({placeholder}, {placeholder})",
+                    (name, branch_id),
+                )
                 db.commit()
                 flash("Subject added successfully.", "success")
-            else:
-                flash("Name and branch are required.", "error")
+            except Exception as e:
+                db.rollback()
+                print(f"Error adding subject: {e}")
+                flash("Error adding subject. Please try again.", "error")
+        else:
+            flash("Subject name and branch are required.", "error")
 
-        subjects_list = db.execute("SELECT subjects.*, branches.name AS branch_name FROM subjects JOIN branches ON subjects.branch_id = branches.id ORDER BY subjects.name").fetchall()
-        subjects_list = db.execute("SELECT id, name FROM subjects ORDER BY name").fetchall()
-        branches_list = db.execute("SELECT id, name FROM branches ORDER BY name").fetchall()
-        return render_template("subjects.html", subjects=subjects_list, branches=branches_list)
-    except Exception as e:
-        print(f"[subjects] ERROR: {repr(e)}")
-        flash("Subject management is temporarily unavailable.", "error")
-        return redirect(url_for("dashboard"))
-    finally:
-        if db:
-            try: db.close()
-            except: pass
-
-
-@app.route("/delete_subject", methods=["POST"])
-@login_required
-@admin_required
-def delete_subject():
-    db = None
-    try:
-        subject_id = (request.form.get("subject_id") or "").strip()
-        if not subject_id:
-            flash("No subject specified for deletion.", "error")
-            return redirect(url_for("subjects"))
-
-        db = get_db()
-        placeholder = get_placeholder()
-
-        # Data Safety: Prevent accidental deletion if attendance records exist
-        attendance_count_row = db.execute(f"SELECT COUNT(*) as count FROM attendance WHERE subject_id = {placeholder}", (subject_id,)).fetchone()
-        attendance_count = row_get(attendance_count_row, 'count', 0)
-        
-        if attendance_count > 0:
-            flash(f"Cannot delete subject because it has {attendance_count} attendance records. This ensures long-term data safety.", "error")
-            return redirect(url_for("subjects"))
-
-        # Delete the subject
-        db.execute(f"DELETE FROM subjects WHERE id = {placeholder}", (subject_id,))
-        db.commit()
-        flash("Subject deleted successfully.", "success")
-    except Exception as e:
-        if db:
-            try: db.rollback()
-            except: pass
-        print(f"[delete_subject] ERROR: {repr(e)}")
-        flash("Failed to delete subject.", "error")
-    finally:
-        if db:
-            try: db.close()
-            except: pass
-    return redirect(url_for("subjects"))
-
-
-@app.route("/admin/teachers", methods=["GET", "POST"])
-@login_required
-@admin_required
-def manage_teachers():
-    db = None
-    try:
-        db = get_db()
-        placeholder = get_placeholder()
-        
-        if request.method == "POST":
-            action = request.form.get("action")
-
-            if action == "add":
-                name = (request.form.get("name") or "").strip()
-                username = (request.form.get("username") or "").strip()
-                password = (request.form.get("password") or "").strip()
-                subject_ids = [sid for sid in request.form.getlist("subject_ids") if str(sid).strip()]
-                branch_ids = request.form.getlist("branch_ids")  # Multiple branches
-
-                if not all([name, username, password, subject_ids, branch_ids]):
-                    flash("Teacher name, username, password, at least one subject, and at least one branch are required.", "error")
-                else:
-                    # Duplicate username check
-                    existing = db.execute(f"SELECT id FROM teachers WHERE username = {placeholder}", (username,)).fetchone()
-                    if existing:
-                        flash(f"Username '{username}' is already taken. Please choose a different username.", "error")
-                    else:
-                        # Look up subject name for backward compatibility
-                        primary_subject_id = subject_ids[0]
-                        sub_row = db.execute(f"SELECT name FROM subjects WHERE id = {placeholder}", (primary_subject_id,)).fetchone()
-                        subject_name_val = row_get(sub_row, "name") if sub_row else ""
-                        if not subject_name_val:
-                            subject_name_val = ""
-                        try:
-                            # Insert teacher with first branch as legacy branch_id
-                            first_branch_id = branch_ids[0] if branch_ids else None
-                            first_branch_name, first_branch_section = _get_branch_name_and_section(db, first_branch_id)
-                            db.execute(
-                                f"INSERT INTO teachers (name, username, password, subject_id, subject_name, branch_id) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})",
-                                (name, username, generate_password_hash(password), primary_subject_id, subject_name_val, first_branch_id)
-                            )
-                            db.commit()
-                            
-                            # Get the newly created teacher ID
-                            teacher = db.execute(f"SELECT id FROM teachers WHERE username = {placeholder}", (username,)).fetchone()
-                            new_teacher_id = row_get(teacher, "id")
-                            
-                            # Insert into teacher_branches for all selected branches
-                            for branch_id in branch_ids:
-                                try:
-                                    db.execute(
-                                        f"INSERT INTO teacher_branches (teacher_id, branch_id) VALUES ({placeholder}, {placeholder})",
-                                        (new_teacher_id, branch_id)
-                                    )
-                                except Exception:
-                                    pass  # Skip duplicate entries
-
-                            for branch_id in branch_ids:
-                                branch_name, branch_section = _get_branch_name_and_section(db, branch_id)
-                                for subject_id in subject_ids:
-                                    try:
-                                        db.execute(
-                                            f"INSERT INTO teacher_assignments (teacher_id, subject_id, branch_id, section) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder})",
-                                            (new_teacher_id, subject_id, branch_id, branch_section),
-                                        )
-                                    except Exception:
-                                        pass
-
-                            # Insert teacher subject assignments (junction table)
-                            for subject_id in subject_ids:
-                                try:
-                                    db.execute(
-                                        f"INSERT INTO teacher_subjects (teacher_id, subject_id) VALUES ({placeholder}, {placeholder})",
-                                        (new_teacher_id, subject_id),
-                                    )
-                                except Exception:
-                                    pass
-                            db.commit()
-                            flash(f"Teacher '{name}' added successfully with {len(subject_ids)} subject(s) and {len(branch_ids)} branch(es). They can now log in with username: {username}", "success")
-                        except Exception as e:
-                            db.rollback()
-                            flash(f"Error adding teacher: {repr(e)}", "error")
-
-            elif action == "edit":
-                teacher_id = request.form.get("teacher_id")
-                name = (request.form.get("name") or "").strip()
-                username = (request.form.get("username") or "").strip()
-                subject_ids = [sid for sid in request.form.getlist("subject_ids") if str(sid).strip()]
-                branch_ids = request.form.getlist("branch_ids")  # Multiple branches
-
-                if not all([teacher_id, name, username, subject_ids, branch_ids]):
-                    flash("All fields including at least one subject and one branch are required.", "error")
-                else:
-                    # Check for duplicate username excluding self
-                    dup = db.execute(f"SELECT id FROM teachers WHERE username = {placeholder} AND id != {placeholder}", (username, teacher_id)).fetchone()
-                    if dup:
-                        flash(f"Username '{username}' is already taken by another teacher.", "error")
-                    else:
-                        # Look up subject name to maintain backward compatibility
-                        primary_subject_id = subject_ids[0]
-                        sub_row = db.execute(f"SELECT name FROM subjects WHERE id = {placeholder}", (primary_subject_id,)).fetchone()
-                        subject_name_val = row_get(sub_row, "name") if sub_row else ""
-                        if not subject_name_val:
-                            subject_name_val = ""
-                        try:
-                            first_branch_id = branch_ids[0] if branch_ids else None
-                            first_branch_name, first_branch_section = _get_branch_name_and_section(db, first_branch_id)
-                            db.execute(
-                                f"UPDATE teachers SET name = {placeholder}, username = {placeholder}, subject_id = {placeholder}, subject_name = {placeholder}, branch_id = {placeholder} WHERE id = {placeholder}",
-                                (name, username, primary_subject_id, subject_name_val, first_branch_id, teacher_id)
-                            )
-                            
-                            # Clear existing branch assignments
-                            db.execute(f"DELETE FROM teacher_branches WHERE teacher_id = {placeholder}", (teacher_id,))
-
-                            # Clear existing subject assignments
-                            try:
-                                db.execute(f"DELETE FROM teacher_subjects WHERE teacher_id = {placeholder}", (teacher_id,))
-                            except Exception:
-                                pass
-                            try:
-                                db.execute(f"DELETE FROM teacher_assignments WHERE teacher_id = {placeholder}", (teacher_id,))
-                            except Exception:
-                                pass
-                            
-                            # Insert new branch assignments
-                            for branch_id in branch_ids:
-                                try:
-                                    db.execute(
-                                        f"INSERT INTO teacher_branches (teacher_id, branch_id) VALUES ({placeholder}, {placeholder})",
-                                        (teacher_id, branch_id)
-                                    )
-                                except Exception:
-                                    pass  # Skip duplicates
-
-                            # Insert new subject assignments
-                            for subject_id in subject_ids:
-                                try:
-                                    db.execute(
-                                        f"INSERT INTO teacher_subjects (teacher_id, subject_id) VALUES ({placeholder}, {placeholder})",
-                                        (teacher_id, subject_id),
-                                    )
-                                except Exception:
-                                    pass
-
-                            for branch_id in branch_ids:
-                                branch_name, branch_section = _get_branch_name_and_section(db, branch_id)
-                                for subject_id in subject_ids:
-                                    try:
-                                        db.execute(
-                                            f"INSERT INTO teacher_assignments (teacher_id, subject_id, branch_id, section) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder})",
-                                            (teacher_id, subject_id, branch_id, branch_section),
-                                        )
-                                    except Exception:
-                                        pass
-                            
-                            db.commit()
-                            flash(f"Teacher '{name}' updated successfully with {len(subject_ids)} subject(s) and {len(branch_ids)} branch(es).", "success")
-                        except Exception as e:
-                            db.rollback()
-                            flash(f"Error updating teacher: {repr(e)}", "error")
-
-            elif action == "reset_password":
-                teacher_id = request.form.get("teacher_id")
-                new_password = (request.form.get("new_password") or "").strip()
-
-                if not teacher_id or not new_password:
-                    flash("Teacher ID and new password are required.", "error")
-                elif len(new_password) < 4:
-                    flash("Password must be at least 4 characters.", "error")
-                else:
-                    try:
-                        db.execute(
-                            f"UPDATE teachers SET password = {placeholder} WHERE id = {placeholder}",
-                            (generate_password_hash(new_password), teacher_id)
-                        )
-                        db.commit()
-                        flash("Password reset successfully.", "success")
-                    except Exception as e:
-                        db.rollback()
-                        flash(f"Error resetting password: {repr(e)}", "error")
-
-            elif action == "delete":
-                teacher_id = request.form.get("teacher_id")
-                if teacher_id:
-                    attendance_count_row = db.execute(f"SELECT COUNT(*) as count FROM attendance WHERE teacher_id = {placeholder}", (teacher_id,)).fetchone()
-                    attendance_count = row_get(attendance_count_row, 'count', 0)
-                    if attendance_count > 0:
-                        flash(f"Cannot delete teacher — they have {attendance_count} attendance record(s). This protects historical data.", "error")
-                    else:
-                        try:
-                            db.execute(f"DELETE FROM teachers WHERE id = {placeholder}", (teacher_id,))
-                            db.commit()
-                            flash("Teacher deleted successfully.", "success")
-                        except Exception as e:
-                            db.rollback()
-                            flash(f"Error deleting teacher: {repr(e)}", "error")
-
-        teachers_list = db.execute("""
-            SELECT DISTINCT t.id, t.name, t.username, t.subject_id, s.name AS subject_name
-            FROM teachers t 
-            LEFT JOIN subjects s ON t.subject_id = s.id 
-            ORDER BY t.name
-        """).fetchall()
-        subjects_list = db.execute("SELECT id, name FROM subjects ORDER BY name").fetchall()
-        branches_list = db.execute("SELECT id, name FROM branches ORDER BY name").fetchall()
-        
-        # For each teacher, fetch their assigned branches
-        teacher_branches_map = {}
-        teacher_subjects_map = {}
-        for teacher_row in teachers_list:
-            teacher_id = row_get(teacher_row, "id")
-            assigned_branches = db.execute(f"""
-                SELECT b.id, b.name
-                FROM branches b
-                JOIN teacher_branches tb ON b.id = tb.branch_id
-                WHERE tb.teacher_id = {placeholder}
-                ORDER BY b.name
-            """, (teacher_id,)).fetchall()
-            teacher_branches_map[teacher_id] = assigned_branches
-            assigned_subjects = db.execute(f"""
-                SELECT s.id, s.name
-                FROM subjects s
-                JOIN teacher_subjects ts ON s.id = ts.subject_id
-                WHERE ts.teacher_id = {placeholder}
-                ORDER BY s.name
-            """, (teacher_id,)).fetchall()
-            teacher_subjects_map[teacher_id] = assigned_subjects
-        
-        return render_template("admin_teachers.html", 
-                             teachers=teachers_list, 
-                             subjects=subjects_list, 
-                             branches=branches_list,
-                             teacher_branches_map=teacher_branches_map,
-                             teacher_subjects_map=teacher_subjects_map)
-    except Exception as e:
-        print(f"[manage_teachers] ERROR: {repr(e)}")
-        flash("Teacher management is temporarily unavailable.", "error")
-        return redirect(url_for("dashboard"))
-    finally:
-        if db:
-            try: db.close()
-            except: pass
-
-
-@app.route("/admin/academic", methods=["GET", "POST"])
-@login_required
-@admin_required
-def admin_academic():
-    db = None
-    try:
-        db = get_db()
-        placeholder = get_placeholder()
-        
-        if request.method == "POST":
-            action = request.form.get("action")
-            
-            if action == "promote_semester":
-                # Promote all students to next semester. If they are in sem 2, move to sem 1 of next year.
-                # SQLite and Postgres handle this slightly differently, but standard SQL works.
-                db.execute("""
-                    UPDATE students 
-                    SET 
-                        current_year = CASE WHEN current_semester = 2 THEN current_year + 1 ELSE current_year END,
-                        current_semester = CASE WHEN current_semester = 1 THEN 2 ELSE 1 END
-                """)
-                db.commit()
-                flash("All students have been promoted to the next semester successfully.", "success")
-                
-            elif action == "promote_year":
-                # Promote all students to next year, reset semester to 1
-                db.execute("UPDATE students SET current_year = current_year + 1, current_semester = 1")
-                db.commit()
-                flash("All students have been promoted to the next academic year successfully.", "success")
-                
-            elif action == "update_student":
-                student_id = request.form.get("student_id")
-                new_year = request.form.get("current_year")
-                new_sem = request.form.get("current_semester")
-                if student_id and new_year and new_sem:
-                    db.execute(f"UPDATE students SET current_year = {placeholder}, current_semester = {placeholder} WHERE id = {placeholder}", (new_year, new_sem, student_id))
-                    db.commit()
-                    flash("Student academic status updated.", "success")
-                    
-            elif action == "trigger_warnings":
-                all_students = db.execute("SELECT id FROM students").fetchall()
-                student_ids = [row_get(s, "id") for s in all_students]
-                if student_ids:
-                    dispatch_low_attendance_notifications(student_ids)
-                    flash("Automated warnings triggered. Emails are being sent in the background to students below the attendance threshold.", "success")
-                else:
-                    flash("No students found to check.", "warning")
-
-        # Fetch stats
-        stats = db.execute("SELECT current_year, current_semester, COUNT(*) as count FROM students GROUP BY current_year, current_semester ORDER BY current_year, current_semester").fetchall()
-        students = db.execute("SELECT id, name, enrollment, current_year, current_semester FROM students ORDER BY current_year, current_semester, name").fetchall()
-        
-        return render_template("admin_academic.html", stats=stats, students=students)
-    except Exception as e:
-        print(f"[admin_academic] ERROR: {repr(e)}")
-        flash("Academic management is temporarily unavailable.", "error")
-        return redirect(url_for("dashboard"))
-    finally:
-        if db:
-            try: db.close()
-            except: pass
+    subjects = db.execute(
+        f"SELECT subjects.*, branches.name AS branch_name FROM subjects JOIN branches ON subjects.branch_id = branches.id ORDER BY subjects.name"
+    ).fetchall()
+    db.close()
+    return render_template("subjects.html", subjects=subjects, branches=branches)
 
 
 @app.route("/upload_students", methods=["GET", "POST"])
 @login_required
-@admin_required
 def upload_students():
     if session.get("role") != "admin":
         return redirect(url_for("dashboard"))
@@ -3691,8 +1299,6 @@ def upload_students():
         inserted = 0
         skipped = 0
         errors = 0
-        max_order_row = db.execute("SELECT COALESCE(MAX(import_order), 0) AS max_import_order FROM students").fetchone()
-        next_import_order = int(row_get(max_order_row, "max_import_order", 0) or 0) + 1
 
         try:
             # Pre-fetch branches for name matching
@@ -3707,9 +1313,9 @@ def upload_students():
                     branches_map[str(b_id)] = b_id
 
             for _, row in df.iterrows():
-                name = _clean_text(row.get("name"))
-                enrollment = _normalize_enrollment(row.get("enrollment"))
-                email = _clean_text(row.get("email"))
+                name = str(row.get("name", "")).strip()
+                enrollment = str(row.get("enrollment", "")).strip()
+                email = str(row.get("email", "")).strip()
                 branch_id_raw = str(row.get("branch_id", "")).strip()
 
                 if not name or not enrollment:
@@ -3743,12 +1349,12 @@ def upload_students():
                 if is_postgres:
                     student_row = db.execute(
                         f"""
-                        INSERT INTO students (name, enrollment, email, branch_id, import_order)
-                        VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})
+                        INSERT INTO students (name, enrollment, email, branch_id)
+                        VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder})
                         ON CONFLICT (enrollment) DO NOTHING
                         RETURNING id
                         """,
-                        (name, enrollment, email_value, branch_id, next_import_order),
+                        (name, enrollment, email_value, branch_id),
                     ).fetchone()
                     student_id = row_get(student_row, "id")
                     if not student_id:
@@ -3756,15 +1362,13 @@ def upload_students():
                         continue
                 else:
                     cur = db.execute(
-                        f"INSERT OR IGNORE INTO students (name, enrollment, email, branch_id, import_order) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})",
-                        (name, enrollment, email_value, branch_id, next_import_order),
+                        f"INSERT OR IGNORE INTO students (name, enrollment, email, branch_id) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder})",
+                        (name, enrollment, email_value, branch_id),
                     )
                     if getattr(cur, "rowcount", 0) == 0:
                         skipped += 1
                         continue
                     student_id = cur.lastrowid
-
-                next_import_order += 1
 
                 default_password = enrollment[-4:] if len(enrollment) >= 4 else enrollment
                 if is_postgres:
@@ -3806,485 +1410,85 @@ def upload_students():
 
 @app.route("/upload_students_csv", methods=["GET", "POST"])
 @login_required
-@admin_required
 def upload_students_csv():
-    """CSV upload for students with enrollment sequence validation and safe batched inserts."""
-
+    """Simple CSV upload for students with automatic login creation."""
     if request.method == "POST":
         file = request.files.get("file")
-        if not file or not str(file.filename).lower().endswith(".csv"):
+        if not file or not file.filename.endswith(".csv"):
             flash("Please upload a valid CSV file.", "error")
             return redirect(url_for("upload_students_csv"))
 
-        max_size_mb = int(os.environ.get("CSV_UPLOAD_MAX_MB", 20))
         try:
-            stream = file.stream
-            if hasattr(stream, "seek"):
-                stream.seek(0, 2)
-                file_size = stream.tell()
-                stream.seek(0)
-            else:
-                file_size = 0
-
-            if file_size and file_size > max_size_mb * 1024 * 1024:
-                flash(f"File is too large ({file_size / 1024 / 1024:.1f}MB). Maximum is {max_size_mb}MB.", "error")
-                return redirect(url_for("upload_students_csv"))
-            if file_size:
-                print(f"[CSV Upload] File size OK: {file_size / 1024:.1f}KB")
-        except Exception as size_error:
-            print(f"[CSV Upload] Could not check file size: {repr(size_error)}")
-
-        db = None
-        try:
-            import csv
-            import io
-            import re
-
-            try:
-                from psycopg2.extras import execute_values
-            except Exception:
-                execute_values = None
-
-            def _canon_header(value: object) -> str:
-                return re.sub(r"[\s_\-]+", "", _clean_text(value).lstrip("\ufeff").lower())
-
-            def _is_valid_email(email: str) -> bool:
-                if not email:
-                    return False
-                pattern = r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$"
-                return re.match(pattern, email.strip()) is not None
-
-            def _base36_char_to_int(ch: str):
-                if not ch or len(ch) != 1:
-                    return None
-                if '0' <= ch <= '9':
-                    return ord(ch) - ord('0')
-                if 'A' <= ch <= 'Z':
-                    return ord(ch) - ord('A') + 10
-                return None
-
-            def _int_to_base36_char(value: int):
-                if value < 0 or value > 35:
-                    return None
-                if value < 10:
-                    return chr(ord('0') + value)
-                return chr(ord('A') + (value - 10))
-
-            def _parse_enrollment_enhanced(enrollment: str):
-                """
-                Expected format support (as requested):
-                - Prefix + 2-char sequence token where:
-                  token[0] in 0-9,A-Z and token[1] in 0-9
-                Examples:
-                ...65, ...69, ...70, ...99, ...A0, ...A9, ...B0, ...C8
-
-                Returns (prefix, sequence_index, sequence_token, mode)
-                where sequence_index = base36(token[0]) * 10 + int(token[1]).
-                """
-                if not enrollment:
-                    return None, None, None, None
-                enrollment = enrollment.upper().strip()
-
-                if len(enrollment) < 3:
-                    return None, None, None, None
-
-                prefix = enrollment[:-2]
-                token_first = enrollment[-2]
-                token_last = enrollment[-1]
-
-                if not re.fullmatch(r"[A-Z0-9]+", prefix):
-                    return None, None, None, None
-                if not re.fullmatch(r"[0-9A-Z]", token_first):
-                    return None, None, None, None
-                if not re.fullmatch(r"[0-9]", token_last):
-                    return None, None, None, None
-
-                first_val = _base36_char_to_int(token_first)
-                if first_val is None:
-                    return None, None, None, None
-
-                sequence_index = first_val * 10 + int(token_last)
-                sequence_token = f"{token_first}{token_last}"
-                return prefix, sequence_index, sequence_token, "tail2_alnum_digit"
-
-            def _row_value(row_values, index):
-                if index is None or index < 0 or index >= len(row_values):
-                    return ""
-                return _clean_text(row_values[index])
-
-            dialect = csv.excel
-            try:
-                stream = file.stream
-                if hasattr(stream, "seek"):
-                    stream.seek(0)
-                sample_bytes = stream.read(4096)
-                if hasattr(stream, "seek"):
-                    stream.seek(0)
-                sample_text = sample_bytes.decode("utf-8-sig", errors="replace")
-                dialect = csv.Sniffer().sniff(sample_text, delimiters=",;\t|")
-                print(f"[CSV Upload] Detected delimiter: {repr(dialect.delimiter)}")
-            except Exception as sniff_error:
-                print(f"[CSV Upload] Delimiter detection failed: {repr(sniff_error)}. Using comma.")
-                try:
-                    if hasattr(file.stream, "seek"):
-                        file.stream.seek(0)
-                except Exception:
-                    pass
-
-            text_stream = io.TextIOWrapper(file.stream, encoding="utf-8-sig", newline="")
-            reader = csv.reader(text_stream, dialect=dialect)
-
-            headers = next(reader, None)
-            print(f"[CSV Upload] Raw headers detected: {headers}")
-            if not headers:
-                flash("The uploaded CSV file is empty or unreadable.", "error")
-                return redirect(url_for("upload_students_csv"))
-
-            header_map = {}
-            for index, header in enumerate(headers):
-                key = _canon_header(header)
-                if key and key not in header_map:
-                    header_map[key] = index
-
-            required_aliases = {
-                "name": {"name", "studentname", "student"},
-                "enrollment": {"enrollment", "enrollmentno", "htno", "hallticketno", "tendigitsh.t.no", "rollno"},
-                "email": {"email", "mailid", "emailid", "mail"},
-                "branch_id": {"branchid", "branch", "section"},
-            }
-
-            column_indexes = {}
-            missing_columns = []
-            for field_name, aliases in required_aliases.items():
-                found_index = None
-                for alias in aliases:
-                    if alias in header_map:
-                        found_index = header_map[alias]
-                        break
-                if found_index is None:
-                    missing_columns.append(field_name)
-                else:
-                    column_indexes[field_name] = found_index
-
-            if missing_columns:
-                flash(
-                    f"Missing required columns: {', '.join(sorted(missing_columns))}. CSV must include Name, Enrollment, Email, and Branch_ID.",
-                    "error",
-                )
+            import pandas as pd
+            # Use pandas to read CSV for better handling of delimiters and whitespace
+            df = pd.read_csv(file)
+            
+            # Standardize column names to lowercase
+            df.columns = [str(c).strip().lower() for c in df.columns]
+            
+            required = {"name", "enrollment", "email", "branch_id"}
+            if not required.issubset(set(df.columns)):
+                flash(f"CSV must contain: {', '.join(required)}", "error")
                 return redirect(url_for("upload_students_csv"))
 
             db = get_db()
             placeholder = get_placeholder()
             is_postgres = str(app.config.get("DATABASE", "")).startswith("postgres")
-            if is_postgres and execute_values is None:
-                raise RuntimeError("psycopg2.extras.execute_values is required for PostgreSQL CSV uploads")
-
-            valid_branch_ids = set()
-            for branch_row in db.execute("SELECT id FROM branches").fetchall():
-                branch_id_value = row_get(branch_row, "id")
-                if branch_id_value is not None:
-                    try:
-                        valid_branch_ids.add(int(branch_id_value))
-                    except Exception:
-                        pass
-
-            existing_enrollments = set()
-            for student_row in db.execute("SELECT enrollment FROM students").fetchall():
-                enrollment_value = _normalize_enrollment(row_get(student_row, "enrollment"))
-                if enrollment_value:
-                    existing_enrollments.add(enrollment_value)
-
+            
             inserted = 0
             skipped = 0
-            duplicates = 0
-            failed = 0
-            missing_sequence_messages = []
-            failed_rows_log = []
-            seen_enrollments = set()
-            password_hash_cache = {}
-            pending_rows = []
-            enrollments_by_prefix = {}
-            max_order_row = db.execute("SELECT COALESCE(MAX(import_order), 0) AS max_import_order FROM students").fetchone()
-            next_import_order = int(row_get(max_order_row, "max_import_order", 0) or 0) + 1
 
-            for row_number, row_values in enumerate(reader, start=2):
-                try:
-                    row_values = list(row_values)
-                    print(f"[CSV Upload] Processing row {row_number}: {row_values}")
+            for _, row in df.iterrows():
+                name = str(row["name"]).strip()
+                enrollment = str(row["enrollment"]).strip()
+                email = str(row["email"]).strip()
+                branch_id = str(row["branch_id"]).strip()
 
-                    if not row_values or not any(_clean_text(value) for value in row_values):
-                        skipped += 1
-                        print(f"[CSV Upload] Row {row_number}: skipped empty row")
-                        continue
-
-                    name = _row_value(row_values, column_indexes["name"])
-                    raw_enrollment = _row_value(row_values, column_indexes["enrollment"])
-                    enrollment = _normalize_enrollment(raw_enrollment)
-                    email = _row_value(row_values, column_indexes["email"])
-                    branch_id_raw = _row_value(row_values, column_indexes["branch_id"])
-
-                    if not name:
-                        msg = f"Row {row_number}: Name is required"
-                        print(f"[CSV Upload] {msg}")
-                        failed_rows_log.append(msg)
-                        failed += 1
-                        continue
-                    if not enrollment:
-                        msg = f"Row {row_number}: Enrollment is required"
-                        print(f"[CSV Upload] {msg}")
-                        failed_rows_log.append(msg)
-                        failed += 1
-                        continue
-                    if not email:
-                        msg = f"Row {row_number}: Email is required"
-                        print(f"[CSV Upload] {msg}")
-                        failed_rows_log.append(msg)
-                        failed += 1
-                        continue
-                    if not branch_id_raw:
-                        msg = f"Row {row_number}: Branch_ID is required"
-                        print(f"[CSV Upload] {msg}")
-                        failed_rows_log.append(msg)
-                        failed += 1
-                        continue
-
-                    prefix, sequence_number, sequence_token, sequence_mode = _parse_enrollment_enhanced(enrollment)
-                    if prefix is None:
-                        msg = f"Row {row_number}: Invalid enrollment format '{enrollment}'"
-                        print(f"[CSV Upload] {msg}")
-                        failed_rows_log.append(msg)
-                        failed += 1
-                        continue
-
-                    try:
-                        branch_id = int(branch_id_raw)
-                    except (TypeError, ValueError):
-                        msg = f"Row {row_number}: Invalid branch_id '{branch_id_raw}'"
-                        print(f"[CSV Upload] {msg}")
-                        failed_rows_log.append(msg)
-                        failed += 1
-                        continue
-
-                    if branch_id not in valid_branch_ids:
-                        msg = f"Row {row_number}: Branch_ID {branch_id} does not exist"
-                        print(f"[CSV Upload] {msg}")
-                        failed_rows_log.append(msg)
-                        failed += 1
-                        continue
-
-                    if not _is_valid_email(email):
-                        msg = f"Row {row_number}: Invalid email format '{email}'"
-                        print(f"[CSV Upload] {msg}")
-                        failed_rows_log.append(msg)
-                        failed += 1
-                        continue
-
-                    if enrollment in seen_enrollments or enrollment in existing_enrollments:
-                        duplicates += 1
-                        print(f"[CSV Upload] Row {row_number}: duplicate enrollment skipped ({enrollment})")
-                        continue
-
-                    seen_enrollments.add(enrollment)
-                    key = (prefix, sequence_mode)
-                    enrollments_by_prefix.setdefault(key, []).append(
-                        {
-                            "number": sequence_number,
-                            "enrollment": enrollment,
-                            "token": sequence_token,
-                        }
-                    )
-
-                    password_plain = enrollment[-4:] if len(enrollment) >= 4 else enrollment
-                    password_hash = password_hash_cache.get(password_plain)
-                    if password_hash is None:
-                        password_hash = generate_password_hash(password_plain, method="pbkdf2:sha256:120000")
-                        password_hash_cache[password_plain] = password_hash
-
-                    pending_rows.append(
-                        {
-                            "row_number": row_number,
-                            "name": name,
-                            "enrollment": enrollment,
-                            "email": email,
-                            "branch_id": branch_id,
-                            "import_order": next_import_order,
-                            "password_hash": password_hash,
-                        }
-                    )
-                    next_import_order += 1
-                    print(f"[CSV Upload] Row {row_number}: validated")
-
-                except Exception as row_error:
-                    failed += 1
-                    msg = f"Row {row_number}: {repr(row_error)}"
-                    print(f"[CSV Upload] FAILED ROW {row_number}: {row_values}")
-                    print(f"[CSV Upload] EXCEPTION: {msg}")
-                    print(traceback.format_exc())
-                    failed_rows_log.append(msg)
-
-            def _format_tail2_token_from_index(index_value: int):
-                if index_value < 0:
-                    return None
-                first_val = index_value // 10
-                last_digit = index_value % 10
-                first_ch = _int_to_base36_char(first_val)
-                if first_ch is None:
-                    return None
-                return f"{first_ch}{last_digit}"
-
-            for (prefix, mode), items in enrollments_by_prefix.items():
-                numbers = sorted({item["number"] for item in items})
-                if len(numbers) < 2:
+                if not name or not enrollment or not branch_id:
                     continue
-                start, end = numbers[0], numbers[-1]
-                full_range = set(range(start, end + 1))
-                present = set(numbers)
-                missing_numbers = sorted(full_range - present)
-                for missing_number in missing_numbers:
-                    if mode == "tail2_alnum_digit":
-                        missing_suffix = _format_tail2_token_from_index(missing_number)
-                        if missing_suffix is not None:
-                            warning = f"Enrollment {prefix}{missing_suffix} is missing."
-                        else:
-                            warning = f"Enrollment {prefix}? is missing."
-                    else:
-                        warning = f"Enrollment {prefix}? is missing."
-                    print(f"[CSV Upload] {warning}")
-                    missing_sequence_messages.append(warning)
 
-            if not pending_rows:
-                summary = (
-                    f"Upload complete! inserted 0, skipped {skipped}, duplicates {duplicates}, "
-                    f"missing sequence numbers {len(missing_sequence_messages)}, failed rows {failed}."
-                )
-                print(f"[CSV Upload] {summary}")
-                if missing_sequence_messages:
-                    print("[CSV Upload] Sequence warnings:\n" + "\n".join(missing_sequence_messages[:20]))
-                flash(summary, "warning" if (duplicates or missing_sequence_messages or failed) else "success")
-                return redirect(url_for("students"))
+                # 1) Duplicate Check
+                existing = db.execute(f"SELECT id FROM students WHERE enrollment = {placeholder}", (enrollment,)).fetchone()
+                if existing:
+                    skipped += 1
+                    continue
 
-            if is_postgres:
-                conn = getattr(db, "_conn", None)
-                if conn is None:
-                    raise RuntimeError("PostgreSQL connection is not available")
-
-                student_values = [
-                    (row["name"], row["enrollment"], row["email"], row["branch_id"], row["import_order"])
-                    for row in pending_rows
-                ]
-
-                with conn.cursor() as cur:
-                    inserted_students = execute_values(
-                        cur,
-                        """
-                        INSERT INTO students (name, enrollment, email, branch_id, import_order)
-                        VALUES %s
-                        ON CONFLICT (enrollment) DO NOTHING
-                        RETURNING enrollment, id
-                        """,
-                        student_values,
-                        page_size=200,
-                        fetch=True,
-                    ) or []
-
-                    inserted_student_map = {row[0].upper(): row[1] for row in inserted_students}
-                    user_values = []
-                    for row in pending_rows:
-                        student_id = inserted_student_map.get(row["enrollment"].upper())
-                        if not student_id:
-                            duplicates += 1
-                            print(f"[CSV Upload] Row {row['row_number']}: skipped because student insert returned no id")
-                            continue
-                        user_values.append((row["enrollment"], row["password_hash"], "student", student_id))
-
-                    if user_values:
-                        execute_values(
-                            cur,
-                            """
-                            INSERT INTO users (username, password, role, student_id)
-                            VALUES %s
-                            ON CONFLICT (username) DO NOTHING
-                            """,
-                            user_values,
-                            page_size=200,
-                        )
-
-                inserted = len(inserted_students)
-                if inserted < len(pending_rows):
-                    duplicates += len(pending_rows) - inserted
-            else:
-                for row in pending_rows:
-                    try:
+                try:
+                    # 2) Insert Student
+                    if is_postgres:
                         cur = db.execute(
-                            f"INSERT OR IGNORE INTO students (name, enrollment, email, branch_id, import_order) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})",
-                            (row["name"], row["enrollment"], row["email"], row["branch_id"], row["import_order"]),
+                            f"INSERT INTO students (name, enrollment, email, branch_id) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}) RETURNING id",
+                            (name, enrollment, email or None, branch_id)
                         )
-                        if getattr(cur, "rowcount", 0) == 0:
-                            duplicates += 1
-                            print(f"[CSV Upload] Row {row['row_number']}: duplicate enrollment skipped at insert stage ({row['enrollment']})")
-                            continue
-
-                        student_id = getattr(cur, "lastrowid", None)
-                        if not student_id:
-                            raise RuntimeError("Could not retrieve student ID after insert")
-
-                        db.execute(
-                            f"INSERT OR IGNORE INTO users (username, password, role, student_id) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder})",
-                            (row["enrollment"], row["password_hash"], "student", student_id),
+                        student_id = cur.fetchone()[0]
+                    else:
+                        cur = db.execute(
+                            f"INSERT INTO students (name, enrollment, email, branch_id) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder})", (name, enrollment, email or None, branch_id)
                         )
-                        inserted += 1
-                    except Exception as insert_error:
-                        failed += 1
-                        msg = f"Row {row['row_number']}: {repr(insert_error)}"
-                        print(f"[CSV Upload] FAILED ROW {row['row_number']}: {row}")
-                        print(f"[CSV Upload] EXCEPTION: {msg}")
-                        print(traceback.format_exc())
-                        failed_rows_log.append(msg)
+                        student_id = cur.lastrowid
+
+                    # 3) Create User Account (Password = last 4 digits of enrollment)
+                    password_plain = enrollment[-4:] if len(enrollment) >= 4 else enrollment
+                    password_hash = generate_password_hash(password_plain)
+                    
+                    db.execute(
+                        f"INSERT INTO users (username, password, role, student_id) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder})",
+                        (enrollment, password_hash, "student", student_id)
+                    )
+                    inserted += 1
+                except Exception as e:
+                    print(f"[CSV Upload Error] Row {enrollment}: {repr(e)}")
+                    continue
 
             db.commit()
-
-            summary = (
-                f"Upload complete! inserted {inserted}, skipped {skipped}, duplicates {duplicates}, "
-                f"missing sequence numbers {len(missing_sequence_messages)}, failed rows {failed}."
-            )
-            print(f"[CSV Upload] {summary}")
-
-            if missing_sequence_messages:
-                print("[CSV Upload] Sequence warnings:\n" + "\n".join(missing_sequence_messages[:20]))
-
-            if failed_rows_log:
-                failed_preview = "\n".join(failed_rows_log[:5])
-                if len(failed_rows_log) > 5:
-                    failed_preview += f"\n... and {len(failed_rows_log) - 5} more errors"
-                print(f"[CSV Upload] Failed rows:\n{failed_preview}")
-                flash(f"{summary}\n\nWarnings:\n" + "\n".join(missing_sequence_messages[:10]) if missing_sequence_messages else summary, "warning")
-                return redirect(url_for("students"))
-
-            if missing_sequence_messages or duplicates:
-                flash(summary + ("\n\n" + "\n".join(missing_sequence_messages[:10]) if missing_sequence_messages else ""), "warning")
-            else:
-                flash(summary, "success")
-
+            db.close()
+            flash(f"Upload complete! {inserted} students added, {skipped} skipped.", "success")
             return redirect(url_for("students"))
 
         except Exception as e:
-            print(f"[CSV Upload CRITICAL] Unhandled exception: {repr(e)}")
-            print(traceback.format_exc())
-            if db:
-                try:
-                    db.rollback()
-                    print("[CSV Upload] Database rolled back after critical error")
-                except Exception as rollback_error:
-                    print(f"[CSV Upload] Rollback failed: {repr(rollback_error)}")
-            flash("Failed to process CSV file. Please check the file format and try again.", "error")
+            print(f"[CSV CRITICAL] {repr(e)}")
+            flash("Failed to process CSV file. Ensure it is correctly formatted.", "error")
             return redirect(url_for("upload_students_csv"))
-        finally:
-            if db:
-                try:
-                    db.close()
-                    print("[CSV Upload] Database connection closed")
-                except Exception:
-                    pass
 
     return render_template("upload_students_csv.html")
 
@@ -4298,19 +1502,15 @@ def students():
         placeholder = get_placeholder()
         
         if request.method == "POST":
-            name = _clean_text(request.form.get("name"))
-            enrollment = _normalize_enrollment(request.form.get("enrollment"))
+            name = request.form.get("name", "").strip()
+            enrollment = request.form.get("enrollment", "").strip()
             branch_id = request.form.get("branch_id", "").strip()
             email = request.form.get("email", "").strip()
-            parent_email = request.form.get("parent_email", "").strip()
-            branch_name, section = _get_branch_name_and_section(db, branch_id)
 
             if not name or not enrollment or not branch_id:
                 flash("Name, enrollment, and branch are required.", "error")
             elif email and not is_valid_email(email):
                 flash("Please enter a valid email address.", "error")
-            elif parent_email and not is_valid_email(parent_email):
-                flash("Please enter a valid parent email address.", "error")
             else:
                 existing = db.execute(f"SELECT id FROM students WHERE enrollment = {placeholder}", (enrollment,)).fetchone()
                 if existing:
@@ -4318,14 +1518,10 @@ def students():
                 else:
                     try:
                         if str(app.config.get("DATABASE", "")).startswith("postgres"):
-                            max_order_row = db.execute("SELECT COALESCE(MAX(import_order), 0) AS max_import_order FROM students").fetchone()
-                            next_import_order = int(row_get(max_order_row, "max_import_order", 0) or 0) + 1
-                            cur = db.execute(f"INSERT INTO students (name, enrollment, roll_no, email, parent_email, branch_id, section, import_order) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}) RETURNING id", (name, enrollment, enrollment, email or None, parent_email or None, branch_id, section, next_import_order))
+                            cur = db.execute(f"INSERT INTO students (name, enrollment, email, branch_id) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}) RETURNING id", (name, enrollment, email or None, branch_id))
                             student_id = cur.fetchone()[0]
                         else:
-                            max_order_row = db.execute("SELECT COALESCE(MAX(import_order), 0) AS max_import_order FROM students").fetchone()
-                            next_import_order = int(row_get(max_order_row, "max_import_order", 0) or 0) + 1
-                            cur = db.execute(f"INSERT INTO students (name, enrollment, roll_no, email, parent_email, branch_id, section, import_order) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})", (name, enrollment, enrollment, email or None, parent_email or None, branch_id, section, next_import_order))
+                            cur = db.execute(f"INSERT INTO students (name, enrollment, email, branch_id) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder})", (name, enrollment, email or None, branch_id))
                             student_id = cur.lastrowid
                         
                         db.execute(f"INSERT INTO users (username, password, role, student_id) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder})", (enrollment, generate_password_hash(enrollment[-4:]), "student", student_id))
@@ -4348,184 +1544,19 @@ def students():
             clauses.append(f"students.branch_id = {placeholder}")
             params.append(branch_filter)
         if clauses: query += " WHERE " + " AND ".join(clauses)
-        query += " ORDER BY COALESCE(students.import_order, students.id), students.id"
+        query += " ORDER BY students.name"
         
         students_list = db.execute(query, params).fetchall()
-        subjects_list = db.execute("SELECT id, name FROM subjects ORDER BY name").fetchall()
         branches_list = db.execute("SELECT id, name FROM branches ORDER BY name").fetchall()
+        db.close()
         return render_template("students.html", students=students_list, branches=branches_list)
     except Exception as e:
         print(f"[students] ERROR: {repr(e)}")
+        if db:
+            try: db.close()
+            except: pass
         flash("Student management is temporarily unavailable.", "error")
         return redirect(url_for("dashboard"))
-    finally:
-        if db:
-            try: db.close()
-            except: pass
-
-
-@app.route('/delete_student', methods=['POST'])
-@login_required
-@admin_required
-def delete_student():
-    """Delete a student and associated user record.
-
-    Accepts either `student_id` or `enrollment` in form data. Requires admin.
-    """
-    db = None
-    try:
-        student_id = (request.form.get('student_id') or '').strip()
-        enrollment = (request.form.get('enrollment') or '').strip()
-
-        if not student_id and not enrollment:
-            flash('No student specified for deletion.', 'error')
-            return redirect(url_for('students'))
-
-        db = get_db()
-        placeholder = get_placeholder()
-
-        # Lookup target student
-        if student_id:
-            target = db.execute(f"SELECT id, enrollment FROM students WHERE id = {placeholder}", (student_id,)).fetchone()
-        else:
-            target = db.execute(f"SELECT id, enrollment FROM students WHERE enrollment = {placeholder}", (enrollment,)).fetchone()
-
-        if not target:
-            flash('Student not found.', 'error')
-            return redirect(url_for('students'))
-
-        sid = row_get(target, 'id')
-        enroll_val = row_get(target, 'enrollment') or ''
-
-        # Data Safety: Prevent accidental deletion if attendance records exist
-        attendance_count_row = db.execute(f"SELECT COUNT(*) as count FROM attendance WHERE student_id = {placeholder}", (sid,)).fetchone()
-        attendance_count = row_get(attendance_count_row, 'count', 0)
-        
-        if attendance_count > 0:
-            flash(f"Cannot delete student {enroll_val} because they have {attendance_count} attendance records. This ensures long-term data safety.", 'error')
-            return redirect(url_for('students'))
-
-        # Perform deletion inside a transaction for users and students only
-        try:
-            db.execute(f"DELETE FROM users WHERE student_id = {placeholder}", (sid,))
-            db.execute(f"DELETE FROM students WHERE id = {placeholder}", (sid,))
-            db.commit()
-            flash(f"Student {enroll_val} deleted successfully.", 'success')
-        except Exception as e:
-            try:
-                db.rollback()
-            except Exception:
-                pass
-            print(f"[delete_student] ERROR: {repr(e)}")
-            flash('Failed to delete student. See server logs for details.', 'error')
-
-        return redirect(url_for('students'))
-
-    except Exception as e:
-        print(f"[delete_student] Unexpected error: {repr(e)}")
-        flash('An unexpected error occurred while deleting the student.', 'error')
-        return redirect(url_for('students'))
-    finally:
-        if db:
-            try: db.close()
-            except: pass
-
-
-@app.route('/bulk_delete_students', methods=['POST'])
-@login_required
-@admin_required
-def bulk_delete_students():
-    """Delete multiple students by a list of enrollments or IDs."""
-    db = None
-    try:
-        raw_data = (request.form.get('bulk_data') or '').strip()
-        if not raw_data:
-            flash('No student data provided for bulk deletion.', 'error')
-            return redirect(url_for('students'))
-
-        import re
-        # Split by comma, space, or newline
-        items = re.split(r'[,\s\n]+', raw_data)
-        items = [i.strip() for i in items if i.strip()]
-
-        if not items:
-            flash('No valid student IDs or enrollments found.', 'error')
-            return redirect(url_for('students'))
-
-        db = get_db()
-        placeholder = get_placeholder()
-        
-        deleted_count = 0
-        skipped_count = 0
-        
-        for item in items:
-            try:
-                # Try to find by enrollment first
-                target = db.execute(f"SELECT id, enrollment FROM students WHERE enrollment = {placeholder}", (item,)).fetchone()
-                # If not found by enrollment, try by numeric ID if the input is numeric
-                if not target and item.isdigit():
-                    target = db.execute(f"SELECT id, enrollment FROM students WHERE id = {placeholder}", (int(item),)).fetchone()
-                
-                if target:
-                    sid = row_get(target, 'id')
-                    db.execute(f"DELETE FROM attendance WHERE student_id = {placeholder}", (sid,))
-                    db.execute(f"DELETE FROM users WHERE student_id = {placeholder}", (sid,))
-                    db.execute(f"DELETE FROM students WHERE id = {placeholder}", (sid,))
-                    db.commit()
-                    deleted_count += 1
-                else:
-                    skipped_count += 1
-            except Exception as e:
-                print(f"[bulk_delete] Could not delete {item}: {repr(e)}")
-                try:
-                    db.rollback()
-                except:
-                    pass
-                skipped_count += 1
-        if deleted_count > 0:
-            flash(f"Successfully deleted {deleted_count} students.", 'success')
-        if skipped_count > 0:
-            flash(f"Skipped {skipped_count} items (not found or error).", 'warning')
-            
-        return redirect(url_for('students'))
-    except Exception as e:
-        print(f"[bulk_delete_students] ERROR: {repr(e)}")
-        flash('Bulk deletion failed.', 'error')
-        return redirect(url_for('students'))
-    finally:
-        if db:
-            try: db.close()
-            except: pass
-
-
-@app.route('/delete_all_students', methods=['POST'])
-@login_required
-@admin_required
-def delete_all_students():
-    """Permanently delete every student record in the system."""
-    db = None
-    try:
-        db = get_db()
-        # 1. Clear attendance first
-        db.execute("DELETE FROM attendance")
-        # 2. Clear student user accounts
-        db.execute("DELETE FROM users WHERE role = 'student' OR student_id IS NOT NULL")
-        # 3. Clear students table
-        db.execute("DELETE FROM students")
-        
-        db.commit()
-        flash("All student records have been permanently cleared.", "success")
-        return redirect(url_for('students'))
-    except Exception as e:
-        if db:
-            db.rollback()
-        print(f"[delete_all_students] ERROR: {repr(e)}")
-        flash("Failed to delete all students.", "error")
-        return redirect(url_for('students'))
-    finally:
-        if db:
-            try: db.close()
-            except: pass
 
 
 @app.route("/student_login", methods=["GET", "POST"])
@@ -4540,9 +1571,6 @@ def student_login():
             flash("Please enter username and password.", "error")
             return render_template("student_login.html", next=next_url)
 
-        # Normalize username to match stored enrollment (uppercase, no spaces)
-        username = re.sub(r"\s+", "", username).upper()
-
         db = None
         try:
             db = get_db()
@@ -4552,33 +1580,12 @@ def student_login():
                 (username,),
             ).fetchone()
 
-            password_ok = False
-            if user and row_get(user, "role") == "student":
-                stored = row_get(user, "password") or ""
-                try:
-                    password_ok = check_password_hash(stored, password)
-                except Exception:
-                    password_ok = (stored == password)
-                    if password_ok:
-                        try:
-                            db.execute(
-                                f"UPDATE users SET password = {placeholder} WHERE id = {placeholder}",
-                                (generate_password_hash(password), row_get(user, "id")),
-                            )
-                            db.commit()
-                        except Exception:
-                            try:
-                                db.rollback()
-                            except Exception:
-                                pass
-
-            if user and row_get(user, "role") == "student" and password_ok:
+            if user and row_get(user, "role") == "student" and check_password_hash(row_get(user, "password"), password):
                 session.clear()
                 session["user_id"] = row_get(user, "id")
                 session["username"] = row_get(user, "username")
                 session["role"] = row_get(user, "role")
                 session["student_id"] = row_get(user, "student_id")
-                session.permanent = True
                 if next_url:
                     return redirect(next_url)
                 return redirect(url_for("student_dashboard"))
@@ -4596,7 +1603,7 @@ def student_login():
             except Exception:
                 pass
 
-    return render_template("student_login.html", next=next_url, hide_nav=True)
+    return render_template("student_login.html", next=next_url)
 
 
 @app.route("/teacher_login", methods=["GET", "POST"])
@@ -4614,90 +1621,16 @@ def teacher_login():
             db = get_db()
             placeholder = get_placeholder()
             user = db.execute(
-                f"SELECT id, username, password, name, subject_id FROM teachers WHERE username = {placeholder}",
+                f"SELECT id, username, password, role FROM users WHERE username = {placeholder}",
                 (username,),
             ).fetchone()
 
-            password_ok = False
-            assigned_branches = []
-            assigned_subjects = []
-            if user:
-                stored = row_get(user, "password") or ""
-                try:
-                    password_ok = check_password_hash(stored, password)
-                except Exception:
-                    password_ok = (stored == password)
-                    if password_ok:
-                        try:
-                            db.execute(
-                                f"UPDATE teachers SET password = {placeholder} WHERE id = {placeholder}",
-                                (generate_password_hash(password), row_get(user, "id")),
-                            )
-                            db.commit()
-                        except Exception:
-                            try:
-                                db.rollback()
-                            except Exception:
-                                pass
-
-                teacher_id = row_get(user, "id")
-                assigned_branches = db.execute(f"""
-                    SELECT b.id, b.name
-                    FROM branches b
-                    JOIN teacher_branches tb ON b.id = tb.branch_id
-                    WHERE tb.teacher_id = {placeholder}
-                    ORDER BY b.name
-                """, (teacher_id,)).fetchall()
-                assigned_subjects = db.execute(f"""
-                    SELECT s.id, s.name, s.branch_id
-                    FROM subjects s
-                    JOIN teacher_subjects ts ON s.id = ts.subject_id
-                    WHERE ts.teacher_id = {placeholder}
-                    ORDER BY s.name
-                """, (teacher_id,)).fetchall()
-
-                if not assigned_subjects and row_get(user, "subject_id"):
-                    fallback_subject = db.execute(
-                        f"SELECT id, name, branch_id FROM subjects WHERE id = {placeholder}",
-                        (row_get(user, "subject_id"),),
-                    ).fetchone()
-                    if fallback_subject:
-                        assigned_subjects = [fallback_subject]
-
-            if user and password_ok:
-                teacher_id = row_get(user, "id")
+            if user and row_get(user, "role") == "teacher" and check_password_hash(row_get(user, "password"), password):
                 session.clear()
-                session["user_id"] = teacher_id
+                session["user_id"] = row_get(user, "id")
                 session["username"] = row_get(user, "username")
-                session["role"] = "teacher"
-                session["teacher_id"] = teacher_id
-                session["teacher_name"] = row_get(user, "name")
-                first_subject_id = row_get(assigned_subjects[0], "id") if assigned_subjects else row_get(user, "subject_id")
-                if first_subject_id is not None:
-                    session["teacher_subject_id"] = first_subject_id
-                session.permanent = True
-
-                if not assigned_subjects:
-                    session.clear()
-                    flash("No subjects assigned to your account. Contact admin.", "error")
-                    return render_template("teacher_login.html")
-
-                if not assigned_branches:
-                    session.clear()
-                    flash("No branches assigned to your account. Contact admin.", "error")
-                    return render_template("teacher_login.html")
-                
-                # If teacher has multiple branches, show branch selection page
-                if len(assigned_branches) > 1:
-                    return redirect(url_for("teacher_select_branch"))
-                elif len(assigned_branches) == 1:
-                    session["teacher_branch_id"] = row_get(assigned_branches[0], "id")
-                    return redirect(url_for("teacher_dashboard"))
-                else:
-                    # No branches assigned - show error
-                    session.clear()
-                    flash("No branches assigned to your account. Contact admin.", "error")
-                    return render_template("teacher_login.html")
+                session["role"] = row_get(user, "role")
+                return redirect(url_for("dashboard"))
 
             flash("Invalid teacher login credentials.", "error")
 
@@ -4712,495 +1645,11 @@ def teacher_login():
             except Exception:
                 pass
 
-    return render_template("teacher_login.html", hide_nav=True)
-
-
-@app.route("/teacher/select-branch", methods=["GET", "POST"])
-@teacher_login_required
-@teacher_required
-def teacher_select_branch():
-    """Allow teacher to select which branch to mark attendance for."""
-    db = None
-    try:
-        db = get_db()
-        teacher_id = session.get("teacher_id")
-        placeholder = get_placeholder()
-        
-        if request.method == "POST":
-            selected_branch_id = request.form.get("branch_id")
-            selected_section = _normalize_branch_name(request.form.get("section"))
-            if selected_branch_id:
-                # Verify this branch/section pair is assigned to this teacher.
-                assigned = db.execute(
-                    f"""
-                    SELECT id, section FROM teacher_assignments
-                    WHERE teacher_id = {placeholder} AND branch_id = {placeholder}
-                    """,
-                    (teacher_id, selected_branch_id),
-                ).fetchall()
-                if not assigned:
-                    assigned = db.execute(f"""
-                        SELECT tb.branch_id AS branch_id, b.name AS branch_name
-                        FROM teacher_branches tb
-                        JOIN branches b ON b.id = tb.branch_id
-                        WHERE tb.teacher_id = {placeholder} AND tb.branch_id = {placeholder}
-                    """, (teacher_id, selected_branch_id)).fetchall()
-
-                if assigned:
-                    session["teacher_branch_id"] = selected_branch_id
-                    branch_name, branch_section = _get_branch_name_and_section(db, selected_branch_id)
-                    session["teacher_section"] = selected_section or branch_section or _branch_section_from_name(branch_name)
-                    return redirect(url_for("teacher_dashboard"))
-                else:
-                    flash("Invalid branch selection.", "error")
-        
-        branches = _resolve_teacher_assignments(db, teacher_id)
-        
-        teacher = db.execute(
-            f"SELECT name FROM teachers WHERE id = {placeholder}",
-            (teacher_id,)
-        ).fetchone()
-        
-        return render_template("teacher_select_branch.html", 
-                             branches=branches,
-                             teacher_name=row_get(teacher, "name") if teacher else "Teacher")
-    except Exception as e:
-        print(f"[teacher_select_branch] ERROR: {repr(e)}")
-        flash("Error loading branch selection.", "error")
-        return redirect(url_for("teacher_login"))
-    finally:
-        if db:
-            try:
-                db.close()
-            except Exception:
-                pass
-
-
-@app.route("/teacher/select-subject", methods=["GET", "POST"])
-@teacher_login_required
-@teacher_required
-def teacher_select_subject():
-    """Allow teacher to select which assigned subject is active."""
-    db = None
-    try:
-        db = get_db()
-        teacher = get_teacher_context(db)
-        if not teacher:
-            return "Unauthorized Access", 403
-
-        if request.method == "POST":
-            selected_subject_id = (request.form.get("subject_id") or "").strip()
-            allowed_ids = {
-                str(row_get(subject, "id"))
-                for subject in (teacher.get("assigned_subjects") or [])
-                if row_get(subject, "id") is not None
-            }
-
-            if selected_subject_id and selected_subject_id in allowed_ids:
-                session["teacher_subject_id"] = selected_subject_id
-                return redirect(url_for("teacher_dashboard"))
-
-            flash("Invalid subject selection.", "error")
-            return redirect(url_for("teacher_select_subject"))
-
-        return render_template(
-            "teacher_select_subject.html",
-            subjects=teacher.get("assigned_subjects") or [],
-            teacher_name=teacher.get("name") or "Teacher",
-            current_subject_id=teacher.get("current_subject_id"),
-        )
-    except Exception as e:
-        print(f"[teacher_select_subject] ERROR: {repr(e)}")
-        flash("Error loading subject selection.", "error")
-        return redirect(url_for("teacher_dashboard"))
-    finally:
-        if db:
-            try:
-                db.close()
-            except Exception:
-                pass
-
-
-@app.route("/teacher/dashboard")
-@app.route("/teacher-dashboard")
-@teacher_login_required
-@teacher_required
-def teacher_dashboard():
-    db = None
-    try:
-        db = get_db()
-        teacher = get_teacher_context(db)
-        if not teacher:
-            return "Unauthorized Access", 403
-
-        placeholder = get_placeholder()
-        subject_name = teacher["subject_name"]
-        current_branch_id = teacher["current_branch_id"]
-        current_branch_name = teacher["current_branch_name"] or ""
-        current_section = teacher.get("current_section") or ""
-        subject_row = teacher["subject_row"]
-        subject_id = row_get(subject_row, "id") if subject_row else None
-        teacher_id = session.get("teacher_id") or row_get(teacher, "id")
-
-        if not current_branch_id:
-            flash("No branch selected. Please select a branch.", "error")
-            return redirect(url_for("teacher_select_branch"))
-
-        student_count = db.execute(
-            f"SELECT COUNT(*) AS count FROM students WHERE branch_id = {placeholder}",
-            (current_branch_id,),
-        ).fetchone()
-
-        attendance_count = db.execute(
-            f"SELECT COUNT(*) AS count FROM attendance WHERE subject_id = {placeholder} AND branch_id = {placeholder}",
-            (subject_id, current_branch_id),
-        ).fetchone()
-
-        records = db.execute(
-            f"""
-            SELECT attendance.date, attendance.status, attendance.note,
-                   students.name AS student_name, students.enrollment
-            FROM attendance
-            JOIN students ON attendance.student_id = students.id
-            WHERE attendance.branch_id = {placeholder}
-              AND attendance.subject_id = {placeholder}
-                        ORDER BY COALESCE(students.import_order, students.id), students.id, attendance.id DESC
-            LIMIT 20
-            """,
-            (current_branch_id, subject_id),
-        ).fetchall()
-
-        # Determine active slot for this teacher (prefer normalized timetable)
-        active_slot = None
-        try:
-            import timetable as _timetable
-            app.logger.info(
-                "teacher_dashboard active-slot lookup branch=%s section=%s subject_id=%s teacher_id=%s",
-                current_branch_name or "",
-                current_section or "",
-                subject_id,
-                teacher_id,
-            )
-            try:
-                active_slot = _timetable.get_current_slot(db, current_branch_name or "", current_section or "")
-            except Exception:
-                active_slot = None
-            try:
-                global_active_slot = _timetable.get_global_active_class(db)
-            except Exception:
-                global_active_slot = None
-            try:
-                upcoming_classes = _timetable.get_upcoming_classes(db, "", "", limit=4)
-            except Exception:
-                upcoming_classes = []
-            app.logger.info(
-                "teacher_dashboard active-slot result branch=%s section=%s matched=%s subject=%s teacher=%s",
-                current_branch_name or "",
-                current_section or "",
-                bool(active_slot),
-                (active_slot.get("subject_name") if isinstance(active_slot, dict) else active_slot["subject_name"] if active_slot and hasattr(active_slot, "keys") and "subject_name" in active_slot.keys() else None),
-                (active_slot.get("teacher_name") if isinstance(active_slot, dict) else active_slot["teacher_name"] if active_slot and hasattr(active_slot, "keys") and "teacher_name" in active_slot.keys() else None),
-            )
-        except Exception:
-            active_slot = None
-            global_active_slot = None
-            upcoming_classes = []
-
-        return render_template(
-            "teacher_dashboard.html",
-            teacher=teacher,
-            student_count=row_get(student_count, "count", 0) or 0,
-            attendance_count=row_get(attendance_count, "count", 0) or 0,
-            recent_records=records,
-            subject_id=subject_id,
-            active_slot=active_slot,
-            global_active_slot=global_active_slot,
-            upcoming_classes=upcoming_classes,
-        )
-    except Exception as e:
-        print(f"[teacher_dashboard] ERROR: {repr(e)}")
-        try:
-            import traceback as _tb
-            print(_tb.format_exc())
-        except Exception:
-            pass
-        # Log minimal session/teacher context to help debug transient failures
-        try:
-            print(f"[teacher_dashboard] session_keys={list(session.keys())}")
-            print(f"[teacher_dashboard] teacher_context={repr(teacher)[:1000]}")
-        except Exception:
-            pass
-        flash("Teacher dashboard is temporarily unavailable.", "error")
-        return redirect(url_for("teacher_login"))
-    finally:
-        if db:
-            try:
-                db.close()
-            except Exception:
-                pass
-
-
-@app.route("/teacher/attendance", methods=["GET", "POST"])
-@app.route("/teacher-mark-attendance", methods=["GET", "POST"])
-@teacher_login_required
-@teacher_required
-def teacher_mark_attendance():
-    db = None
-    try:
-        db = get_db()
-        teacher = get_teacher_context(db)
-        if not teacher:
-            return "Unauthorized Access", 403
-
-        placeholder = get_placeholder()
-        branch_request_id = (request.args.get("branch_id") or "").strip()
-        subject_request_id = (request.args.get("subject_id") or "").strip()
-
-        allowed_branch_ids = {
-            str(row_get(branch, "id"))
-            for branch in (teacher.get("assigned_branches") or [])
-            if row_get(branch, "id") is not None
-        }
-        allowed_subject_ids = {
-            str(row_get(subject, "id"))
-            for subject in (teacher.get("assigned_subjects") or [])
-            if row_get(subject, "id") is not None
-        }
-
-        if branch_request_id:
-            if branch_request_id in allowed_branch_ids:
-                session["teacher_branch_id"] = branch_request_id
-            else:
-                flash("Invalid branch selection.", "error")
-                return "Unauthorized Access", 403
-
-        if subject_request_id:
-            if subject_request_id in allowed_subject_ids:
-                session["teacher_subject_id"] = subject_request_id
-            else:
-                flash("Invalid subject selection.", "error")
-                return "Unauthorized Access", 403
-
-        if branch_request_id or subject_request_id:
-            teacher = get_teacher_context(db)
-
-        current_branch_id = teacher["current_branch_id"]
-        current_branch_name = teacher["current_branch_name"]
-        current_section = teacher.get("current_section") or _branch_section_from_name(current_branch_name or "") or current_branch_name or ""
-        subject_name = teacher["subject_name"]
-        subject_row = teacher["subject_row"]
-        subject_id = row_get(subject_row, "id") if subject_row else None
-
-        if not subject_row or subject_id is None or not current_branch_id:
-            flash("No subject or branch selected.", "error")
-            return redirect(url_for("teacher_select_branch"))
-
-        today_str = date.today().isoformat()
-        selected_date = request.args.get("date") or today_str
-        period = request.args.get("period", "1")
-
-        # Determine whether attendance is allowed now based on timetable entries
-        try:
-            from datetime import datetime
-            now_dt = datetime.now()
-            current_slot = get_current_class(db, current_branch_id, current_section, current_time=now_dt, teacher_id=teacher.get("teacher_id"))
-            attendance_allowed = False
-            if current_slot:
-                # ensure the slot matches this teacher's subject or teacher id
-                slot_subject_id = row_get(current_slot, "subject_id")
-                slot_teacher_id = row_get(current_slot, "teacher_id")
-                if (slot_teacher_id and str(slot_teacher_id) == str(teacher.get("teacher_id"))) or (
-                    slot_subject_id and str(slot_subject_id) == str(subject_id)
-                ):
-                    attendance_allowed = True
-            else:
-                attendance_allowed = False
-        except Exception:
-            attendance_allowed = False
-
-        if request.method == "POST":
-            selected_date = request.form.get("date") or today_str
-            period = request.form.get("period", "1")
-            # Re-check active slot for POST (prevent forged requests)
-            try:
-                from datetime import datetime
-                now_dt = datetime.now()
-                current_slot = get_current_class(db, current_branch_id, current_section, current_time=now_dt, teacher_id=teacher.get("teacher_id"))
-                if not current_slot:
-                    flash("No active class found at this time. Attendance can only be recorded during scheduled class time.", "error")
-                    return redirect(url_for("teacher_mark_attendance", date=selected_date, period=period))
-            except Exception:
-                flash("Unable to verify timetable for current time.", "error")
-                return redirect(url_for("teacher_mark_attendance", date=selected_date, period=period))
-            student_ids = request.form.getlist("student_id")
-            if not student_ids:
-                flash("Please select at least one student.", "error")
-            else:
-                saved_ids = []
-                blocked_overwrites = 0
-                invalid_students = 0
-                try:
-                    for student_id in student_ids:
-                        status = request.form.get(f"status_{student_id}", "Absent")
-                        note = request.form.get(f"note_{student_id}", "")
-
-                        # Validate student belongs to this branch
-                        ok_student = db.execute(
-                            f"SELECT 1 FROM students WHERE id = {placeholder} AND branch_id = {placeholder} AND (COALESCE(section, '') = COALESCE({placeholder}, '') OR COALESCE(section, '') = '')",
-                            (student_id, current_branch_id, current_section),
-                        ).fetchone()
-                        if not ok_student:
-                            invalid_students += 1
-                            continue
-
-                        # Do not allow overwriting attendance created by another teacher
-                        existing = db.execute(
-                            f"""
-                            SELECT teacher_id
-                            FROM attendance
-                            WHERE student_id = {placeholder}
-                              AND subject_id = {placeholder}
-                              AND date = {placeholder}
-                              AND period = {placeholder}
-                            """,
-                            (student_id, subject_id, selected_date, period),
-                        ).fetchone()
-                        existing_teacher_id = row_get(existing, "teacher_id") if existing else None
-                        if existing_teacher_id and str(existing_teacher_id) != str(teacher["teacher_id"]):
-                            blocked_overwrites += 1
-                            continue
-
-                        db.execute(
-                            f"""
-                            INSERT INTO attendance (
-                                student_id, branch_id, branch_section, subject_id, teacher_id, subject_name,
-                                date, period, status, note
-                            ) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})
-                            ON CONFLICT (student_id, subject_id, date, period) DO UPDATE
-                            SET status = EXCLUDED.status,
-                                note = EXCLUDED.note,
-                                teacher_id = EXCLUDED.teacher_id,
-                                subject_name = EXCLUDED.subject_name,
-                                branch_section = EXCLUDED.branch_section
-                            """,
-                            (student_id, current_branch_id, current_section, subject_id, teacher["teacher_id"], subject_name, selected_date, period, status, note),
-                        )
-                        if str(student_id).isdigit():
-                            saved_ids.append(int(student_id))
-                    db.commit()
-                    if invalid_students:
-                        flash(f"Skipped {invalid_students} invalid student(s).", "warning")
-                    if blocked_overwrites:
-                        flash(f"Skipped {blocked_overwrites} record(s) already owned by another teacher.", "warning")
-                    flash(f"Attendance for Period {period} saved successfully.", "success")
-                    return redirect(url_for("teacher_mark_attendance", date=selected_date, period=period))
-                except Exception as save_error:
-                    db.rollback()
-                    print(f"[teacher_mark_attendance] ERROR: {repr(save_error)}")
-                    flash("Failed to save attendance.", "error")
-
-        students = db.execute(
-            f"SELECT id, name, enrollment, roll_no, section FROM students WHERE branch_id = {placeholder} AND (COALESCE(section, '') = COALESCE({placeholder}, '') OR COALESCE(section, '') = '') ORDER BY COALESCE(import_order, id), id",
-            (current_branch_id, current_section),
-        ).fetchall()
-
-        attendance_map = {}
-        for row in db.execute(
-            f"""
-            SELECT student_id, status, note
-            FROM attendance
-            WHERE branch_id = {placeholder}
-              AND subject_id = {placeholder}
-              AND date = {placeholder}
-              AND period = {placeholder}
-            """,
-            (current_branch_id, subject_id, selected_date, period),
-        ).fetchall():
-            attendance_map[str(row_get(row, "student_id"))] = row
-
-        return render_template(
-            "teacher_mark_attendance.html",
-            teacher=teacher,
-            students=students,
-            attendance_map=attendance_map,
-            selected_date=selected_date,
-            period=period,
-            today_date=today_str,
-            current_section=current_section,
-            attendance_allowed=attendance_allowed,
-            current_slot=(dict(current_slot) if current_slot else None),
-        )
-    except Exception as e:
-        print(f"[teacher_mark_attendance] ERROR: {repr(e)}")
-        flash("Teacher attendance page is temporarily unavailable.", "error")
-        return redirect(url_for("teacher_dashboard"))
-    finally:
-        if db:
-            try:
-                db.close()
-            except Exception:
-                pass
-
-
-@app.route("/teacher/records")
-@app.route("/teacher-records")
-@teacher_login_required
-@teacher_required
-def teacher_attendance_records():
-    db = None
-    try:
-        db = get_db()
-        teacher = get_teacher_context(db)
-        if not teacher:
-            return "Unauthorized Access", 403
-
-        placeholder = get_placeholder()
-        subject_id = row_get(teacher["subject_row"], "id") if teacher["subject_row"] else None
-        current_branch_id = teacher["current_branch_id"]
-        search = (request.args.get("search") or "").strip()
-
-        if not subject_id or not current_branch_id:
-            flash("No subject or branch assigned.", "error")
-            return redirect(url_for("teacher_dashboard"))
-
-        query = (
-            "SELECT attendance.date, attendance.status, attendance.note, attendance.subject_name, "
-            "students.name AS student_name, students.enrollment, branches.name AS branch_name "
-            "FROM attendance "
-            "JOIN students ON attendance.student_id = students.id "
-            "JOIN branches ON attendance.branch_id = branches.id "
-            f"WHERE attendance.branch_id = {placeholder} AND attendance.subject_id = {placeholder}"
-        )
-        params = [current_branch_id, subject_id]
-        if search:
-            like_op = "ILIKE" if str(app.config.get("DATABASE", "")).startswith("postgres") else "LIKE"
-            query += f" AND (students.name {like_op} {placeholder} OR students.enrollment {like_op} {placeholder})"
-            params.extend([f"%{search}%", f"%{search}%"])
-        query += " ORDER BY COALESCE(students.import_order, students.id), students.id, attendance.id DESC"
-
-        records = db.execute(query, params).fetchall()
-        return render_template(
-            "teacher_records.html",
-            teacher=teacher,
-            records=records,
-            search=search,
-        )
-    except Exception as e:
-        print(f"[teacher_attendance_records] ERROR: {repr(e)}")
-        flash("Teacher records are temporarily unavailable.", "error")
-        return redirect(url_for("teacher_dashboard"))
-    finally:
-        if db:
-            try:
-                db.close()
-            except Exception:
-                pass
+    return render_template("teacher_login.html")
 
 
 @app.route("/student_dashboard")
-@app.route("/student/dashboard")
-@student_login_required
-@student_required
+@login_required
 def student_dashboard():
     student_id = session.get("student_id")
     if not student_id:
@@ -5228,20 +1677,22 @@ def student_dashboard():
         attendance_query += "ORDER BY attendance.date DESC"
         
         attendance_records = db.execute(attendance_query, tuple(params)).fetchall()
-        
-        # Calculate conducted sessions for this branch (and optionally subject)
-        sessions_query = f"SELECT COUNT(*) FROM (SELECT 1 FROM attendance WHERE branch_id = {placeholder} "
-        sessions_params = [row_get(student, "branch_id")]
-        if selected_subject_id:
-            sessions_query += f"AND subject_id = {placeholder} "
-            sessions_params.append(selected_subject_id)
-        sessions_query += "GROUP BY date, subject_id, branch_id, period) sub"
-        
-        total_conducted = db.execute(sessions_query, tuple(sessions_params)).fetchone()[0]
-        
+        total = len(attendance_records)
         present = len([a for a in attendance_records if row_get(a, "status") == "Present"])
-        absent = total_conducted - present
-        percentage = round((present / total_conducted) * 100, 1) if total_conducted > 0 else 0
+        absent = total - present
+        percentage = round((present / total) * 100, 1) if total > 0 else 0
+
+        subject_stats = []
+        for sub in subjects:
+            sub_id = row_get(sub, "id")
+            sub_records = [r for r in attendance_records if row_get(r, "subject_id") == sub_id]
+            sub_total = len(sub_records)
+            sub_present = len([r for r in sub_records if row_get(r, "status") == "Present"])
+            sub_pct = round((sub_present / sub_total) * 100, 1) if sub_total > 0 else 0
+            subject_stats.append({"name": row_get(sub, "name"), "percentage": sub_pct})
+
+        subject_chart_labels = [s["name"] for s in subject_stats]
+        subject_chart_percentages = [s["percentage"] for s in subject_stats]
 
         student_qr_data_uri = None
         try:
@@ -5258,49 +1709,8 @@ def student_dashboard():
             student_qr_data_uri = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
         except: pass
 
-        # Calculate subject-wise attendance analytics
-        subject_analytics = []
-        for subj in subjects:
-            subj_id = row_get(subj, "id")
-            subj_name = row_get(subj, "name")
-            
-            # Total conducted for this subject
-            s_total_q = f"SELECT COUNT(*) FROM (SELECT 1 FROM attendance WHERE branch_id = {placeholder} AND subject_id = {placeholder} GROUP BY date, subject_id, branch_id, period) sub"
-            s_total = db.execute(s_total_q, (row_get(student, "branch_id"), subj_id)).fetchone()[0]
-            
-            if s_total > 0:
-                s_present = len([a for a in attendance_records if row_get(a, "subject_id") == subj_id and row_get(a, "status") == "Present"])
-                subject_analytics.append({
-                    "subject": subj_name,
-                    "percentage": round((s_present / s_total) * 100, 1)
-                })
-
-        # Calculate monthly attendance analytics
-        monthly_analytics_raw = {}
-        for record in attendance_records:
-            date_str = row_get(record, "date")
-            if not date_str: continue
-            month_prefix = date_str[:7] # YYYY-MM
-            if month_prefix not in monthly_analytics_raw:
-                monthly_analytics_raw[month_prefix] = {"present": 0, "total": 0}
-            
-            # We can't easily get total conducted per month per student from just attendance_records unless we query it.
-            # But we can approximate based on recorded attendance for this student:
-            monthly_analytics_raw[month_prefix]["total"] += 1
-            if row_get(record, "status") == "Present":
-                monthly_analytics_raw[month_prefix]["present"] += 1
-
-        monthly_analytics = []
-        for month in sorted(monthly_analytics_raw.keys()):
-            data = monthly_analytics_raw[month]
-            if data["total"] > 0:
-                monthly_analytics.append({
-                    "month": month,
-                    "percentage": round((data["present"] / data["total"]) * 100, 1)
-                })
-
         db.close()
-        return render_template("student_dashboard.html", student=student, attendance_records=attendance_records, total_classes=total_conducted, present_count=present, absent_count=absent, percentage=percentage, subjects=subjects, selected_subject_id=selected_subject_id, student_qr_data_uri=student_qr_data_uri, subject_analytics=subject_analytics, monthly_analytics=monthly_analytics)
+        return render_template("student_dashboard.html", student=student, attendance_records=attendance_records, total_classes=total, present_count=present, absent_count=absent, percentage=percentage, subjects=subjects, subject_chart_labels=subject_chart_labels, subject_chart_percentages=subject_chart_percentages, selected_subject_id=selected_subject_id, student_qr_data_uri=student_qr_data_uri)
     except Exception as e:
         print(f"[student_dashboard] ERROR: {repr(e)}")
         if db:
@@ -5312,7 +1722,6 @@ def student_dashboard():
 
 @app.route("/student_dashboard/<int:student_id>")
 @login_required
-@admin_required
 def student_dashboard_by_id(student_id):
     db = get_db()
     placeholder = get_placeholder()
@@ -5351,140 +1760,304 @@ def student_dashboard_by_id(student_id):
 
     attendance_records = db.execute(attendance_query, tuple(params)).fetchall()
 
-    # Calculate conducted sessions for this branch (and optionally subject)
-    sessions_query = f"SELECT COUNT(*) FROM (SELECT 1 FROM attendance WHERE branch_id = {placeholder} "
-    sessions_params = [row_get(student, "branch_id")]
-    if selected_subject_id:
-        sessions_query += f"AND subject_id = {placeholder} "
-        sessions_params.append(selected_subject_id)
-    sessions_query += "GROUP BY date, subject_id, branch_id, period) sub"
-    
-    total_conducted = db.execute(sessions_query, tuple(sessions_params)).fetchone()[0]
-
-    present = len([a for a in attendance_records if row_get(a, "status") == "Present"])
-    percentage = round((present / total_conducted) * 100, 1) if total_conducted > 0 else 0
+    total = len(attendance_records)
+    present = len([a for a in attendance_records if a["status"] == "Present"])
+    percentage = round((present / total) * 100, 1) if total > 0 else 0
 
     db.close()
     return render_template(
         "student_dashboard.html",
         student=student,
         attendance_records=attendance_records,
-        total_classes=total_conducted,
         percentage=percentage,
         subjects=subjects,
         selected_subject_id=selected_subject_id,
     )
 
 
-@app.route("/mark_attendance", methods=["GET", "POST"])
+@app.route("/attendance", methods=["GET", "POST"])
 @login_required
-@admin_required
 def mark_attendance():
-    """Clean, high-performance route to mark student attendance."""
-    db = None
+    db = get_db()
+    placeholder = get_placeholder()
+    branches = db.execute(f"SELECT * FROM branches ORDER BY name").fetchall()
+    branch_id = request.args.get("branch_id") or ""
+    subject_id = request.args.get("subject_id") or ""
+    selected_date = request.args.get("date") or date.today().isoformat()
+    today_date = date.today()
     try:
-        db = get_db()
-        placeholder = get_placeholder()
-        today_str = date.today().isoformat()
-        
-        # 1. Fetch initial selection data
-        branches = db.execute("SELECT id, name FROM branches ORDER BY name").fetchall()
-        branch_id = request.args.get("branch_id")
-        subject_id = request.args.get("subject_id")
-        selected_date = request.args.get("date") or today_str
-        period = request.args.get("period", "1")
+        selected_date_obj = date.fromisoformat(selected_date)
+    except ValueError:
+        selected_date_obj = today_date
 
-        # 2. Handle POST (Saving Attendance)
-        if request.method == "POST":
-            # Re-read form data to avoid stale context
-            branch_id = request.form.get("branch_id")
-            subject_id = request.form.get("subject_id")
-            selected_date = request.form.get("date") or today_str
-            period = request.form.get("period", "1")
-            student_ids = request.form.getlist("student_id")
-            
-            if branch_id and subject_id and student_ids:
-                try:
-                    saved_ids = []
-                    for student_id in student_ids:
-                        status = request.form.get(f"status_{student_id}", "Absent")
-                        note = request.form.get(f"note_{student_id}", "")
-                        
-                        # Use ON CONFLICT for PostgreSQL stability, or manual check for SQLite
-                        is_pg = str(app.config.get("DATABASE", "")).startswith("postgres")
-                        if is_pg:
-                            db.execute(f"""
-                                INSERT INTO attendance (student_id, branch_id, branch_section, subject_id, date, period, status, note)
-                                VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})
-                                ON CONFLICT (student_id, subject_id, date, period) DO UPDATE 
-                                SET status = EXCLUDED.status, note = EXCLUDED.note, branch_section = EXCLUDED.branch_section
-                            """, (student_id, branch_id, _get_branch_section_name(db, branch_id), subject_id, selected_date, period, status, note))
-                        else:
-                            # SQLite manual update
-                            db.execute(f"DELETE FROM attendance WHERE student_id={placeholder} AND subject_id={placeholder} AND date={placeholder} AND period={placeholder}", (student_id, subject_id, selected_date, period))
-                            db.execute(f"INSERT INTO attendance (student_id, branch_id, branch_section, subject_id, date, period, status, note) VALUES ({placeholder},{placeholder},{placeholder},{placeholder},{placeholder},{placeholder},{placeholder},{placeholder})", (student_id, branch_id, _get_branch_section_name(db, branch_id), subject_id, selected_date, period, status, note))
-                        
-                        if str(student_id).isdigit():
-                            saved_ids.append(int(student_id))
-                    
-                    db.commit()
-                    flash(f"Attendance for Period {period} saved successfully.", "success")
-                    dispatch_low_attendance_notifications(saved_ids)
-                    return redirect(url_for("attendance_success", branch_id=branch_id, subject_id=subject_id, date=selected_date, period=period))
-                except Exception as e:
-                    db.rollback()
-                    print(f"[mark_attendance] Save Error: {repr(e)}")
-                    flash("Failed to save attendance. Please check your data.", "error")
+    if selected_date_obj > today_date:
+        selected_date_obj = today_date
 
-        # 3. Fetch data for display
-        subjects = []
-        if branch_id:
-            subjects = db.execute(f"SELECT id, name FROM subjects WHERE branch_id = {placeholder} ORDER BY name", (branch_id,)).fetchall()
+    selected_date = selected_date_obj.isoformat()
+    subjects = []
+    students = []
+    existing_dates = []
 
-        students = []
-        attendance_map = {}
-        if branch_id and subject_id:
-            students = db.execute(f"SELECT id, name, enrollment FROM students WHERE branch_id = {placeholder} ORDER BY COALESCE(import_order, id), id", (branch_id,)).fetchall()
-            att_rows = db.execute(f"SELECT student_id, status, note FROM attendance WHERE subject_id = {placeholder} AND date = {placeholder} AND period = {placeholder}", (subject_id, selected_date, period)).fetchall()
-            attendance_map = {str(row_get(r, "student_id")): r for r in att_rows}
+    # Calculate previous and next dates
+    current_date_obj = selected_date_obj
+    prev_date = (current_date_obj - timedelta(days=1)).isoformat()
+    next_date = (current_date_obj + timedelta(days=1)).isoformat()
 
-        prev_date = (date.fromisoformat(selected_date) - timedelta(days=1)).isoformat() if selected_date else today_str
+    if branch_id:
+        subjects = db.execute(
+            f"SELECT * FROM subjects WHERE branch_id = {placeholder} ORDER BY name", (branch_id,)
+        ).fetchall()
+    if branch_id and subject_id:
+        students = db.execute(
+            f"SELECT * FROM students WHERE branch_id = {placeholder} ORDER BY name", (branch_id,)
+        ).fetchall()
+        # Get existing attendance dates for this branch/subject
+        existing_dates = db.execute(
+            f"SELECT date, COUNT(*) as count FROM attendance WHERE branch_id = {placeholder} AND subject_id = {placeholder} GROUP BY date ORDER BY date DESC",
+            (branch_id, subject_id)
+        ).fetchall()
 
-        return render_template(
-            "mark_attendance.html",
-            branches=branches,
-            subjects=subjects,
-            students=students,
-            branch_id=branch_id,
-            subject_id=subject_id,
-            selected_date=selected_date,
-            period=period,
-            attendance_map=attendance_map,
-            today_date=today_str,
-            prev_date=prev_date
+    if request.method == "POST":
+        branch_id = request.form.get("branch_id") or ""
+        subject_id = request.form.get("subject_id") or ""
+        selected_date = request.form.get("date") or date.today().isoformat()
+        try:
+            selected_date_obj = date.fromisoformat(selected_date)
+        except ValueError:
+            selected_date_obj = today_date
+
+        if selected_date_obj > today_date:
+            selected_date_obj = today_date
+
+        selected_date = selected_date_obj.isoformat()
+        student_ids = request.form.getlist("student_id")
+
+        if branch_id and subject_id and student_ids:
+            saved_student_ids = []
+            try:
+                for student_id in student_ids:
+                    status = request.form.get(f"status_{student_id}", "Absent")
+                    note = request.form.get(f"note_{student_id}", "")
+                    existing = db.execute(
+                        f"SELECT id FROM attendance WHERE student_id = {placeholder} AND subject_id = {placeholder} AND date = {placeholder}",
+                        (student_id, subject_id, selected_date),
+                    ).fetchone()
+                    if existing:
+                        db.execute(
+                            f"UPDATE attendance SET status = {placeholder}, note = {placeholder} WHERE id = {placeholder}",
+                            (status, note, existing["id"]),
+                        )
+                    else:
+                        db.execute(
+                            f"INSERT INTO attendance (student_id, branch_id, subject_id, date, status, note) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})",
+                            (student_id, branch_id, subject_id, selected_date, status, note),
+                        )
+                    if student_id.isdigit():
+                        saved_student_ids.append(int(student_id))
+                db.commit()
+                print(f"Committed attendance for {len(saved_student_ids)} students on {selected_date}")
+                
+                # Verify the data was saved
+                count = db.execute(
+                    f"SELECT COUNT(*) FROM attendance WHERE date = {placeholder}",
+                    (selected_date,)
+                ).fetchone()[0]
+                print(f"Total attendance records for {selected_date}: {count}")
+
+                flash("Attendance saved successfully.", "success")
+                emailed_students = notify_low_attendance(db, saved_student_ids)
+                session["attendance_email_summary"] = emailed_students
+            except Exception as e:
+                db.rollback()
+                print(f"Error saving attendance: {e}")
+                flash("Error saving attendance. Please try again.", "error")
+                saved_student_ids = []
+
+            # Emit real-time update (disabled for Render)
+            # socketio.emit('attendance_saved', {
+            #     'branch_id': branch_id,
+            #     'subject_id': subject_id,
+            #     'date': selected_date,
+            #     'count': attendance_count,
+            #     'message': f'Attendance saved for {attendance_count} students on {selected_date}'
+            # })
+
+            db.close()
+            return redirect(
+                url_for(
+                    "attendance_success",
+                    branch_id=branch_id,
+                    subject_id=subject_id,
+                    date=selected_date,
+                )
+            )
+        else:
+            flash("Please select a branch, subject, and mark attendance for students.", "error")
+
+    attendance_map = {}
+    if branch_id and subject_id:
+        rows = db.execute(
+            f"SELECT student_id, status, note FROM attendance WHERE subject_id = {placeholder} AND date = {placeholder}",
+            (subject_id, selected_date),
+        ).fetchall()
+        attendance_map = {str(row["student_id"]): row for row in rows}
+
+    db.close()
+    return render_template(
+        "mark_attendance.html",
+        branches=branches,
+        subjects=subjects,
+        students=students,
+        branch_id=branch_id,
+        subject_id=subject_id,
+        selected_date=selected_date,
+        attendance_map=attendance_map,
+        existing_dates=existing_dates,
+        prev_date=prev_date,
+        next_date=next_date,
+        today_date=today_date.isoformat(),
+    )
+
+
+@app.route("/api/current-period")
+@login_required
+def api_current_period():
+    """Return the current/next period matching date/section/subject and auto-return students.
+
+    Query params:
+      - date (YYYY-MM-DD) optional, defaults to today
+      - section optional
+      - subject optional (id or name)
+      - time optional (HH:MM) override current time for testing
+    """
+    selected_date = request.args.get("date") or date.today().isoformat()
+    section = (request.args.get("section") or "").strip()
+    subject_q = (request.args.get("subject") or "").strip()
+    time_override = (request.args.get("time") or "").strip()
+
+    try:
+        sel_date_obj = date.fromisoformat(selected_date)
+    except Exception:
+        sel_date_obj = date.today()
+
+    day = sel_date_obj.strftime("%a")
+    now_time = datetime.now().strftime("%H:%M")
+    if time_override:
+        try:
+            now_time = datetime.fromisoformat(time_override).strftime("%H:%M")
+        except Exception:
+            pass
+
+    db = get_db()
+    placeholder = get_placeholder()
+
+    # Try to find an active slot (start_time <= now <= end_time)
+    sql = (
+        "SELECT te.*, s.name AS subject_name, t.name AS teacher_name, te.branch_id "
+        "FROM timetable_entries te LEFT JOIN subjects s ON te.subject_id = s.id LEFT JOIN teachers t ON te.teacher_id = t.id "
+        "WHERE LOWER(TRIM(COALESCE(te.day,''))) = LOWER(TRIM(?)) AND te.start_time <= ? AND te.end_time >= ?"
+    )
+    params = [day, now_time, now_time]
+    if section:
+        sql += " AND LOWER(TRIM(COALESCE(te.section,''))) = LOWER(TRIM(?))"
+        params.append(section)
+    if subject_q:
+        if subject_q.isdigit():
+            sql += f" AND te.subject_id = {placeholder}"
+            params.append(int(subject_q))
+        else:
+            sql += " AND LOWER(TRIM(COALESCE(te.subject_name,''))) = LOWER(TRIM(?))"
+            params.append(subject_q)
+    sql += " ORDER BY te.start_time LIMIT 1"
+
+    row = db.execute(sql, tuple(params)).fetchone()
+
+    # Fallback: if no active slot, find the next upcoming slot today matching filters
+    if not row:
+        sql2 = (
+            "SELECT te.*, s.name AS subject_name, t.name AS teacher_name, te.branch_id "
+            "FROM timetable_entries te LEFT JOIN subjects s ON te.subject_id = s.id LEFT JOIN teachers t ON te.teacher_id = t.id "
+            "WHERE LOWER(TRIM(COALESCE(te.day,''))) = LOWER(TRIM(?))"
         )
-    except Exception as e:
-        print(f"[mark_attendance] General Error: {repr(e)}")
-        flash("Unable to load attendance page.", "error")
-        return redirect(url_for("dashboard"))
-    finally:
-        if db:
-            try: db.close()
-            except: pass
+        params2 = [day]
+        if section:
+            sql2 += " AND LOWER(TRIM(COALESCE(te.section,''))) = LOWER(TRIM(?))"
+            params2.append(section)
+        if subject_q:
+            if subject_q.isdigit():
+                sql2 += f" AND te.subject_id = {placeholder}"
+                params2.append(int(subject_q))
+            else:
+                sql2 += " AND LOWER(TRIM(COALESCE(te.subject_name,''))) = LOWER(TRIM(?))"
+                params2.append(subject_q)
+        sql2 += " AND te.start_time >= ? ORDER BY te.start_time LIMIT 1"
+        params2.append(now_time)
+        row = db.execute(sql2, tuple(params2)).fetchone()
+
+    if not row:
+        db.close()
+        return jsonify({"error": "no_matching_period"}), 404
+
+    subject_id = row_get(row, "subject_id")
+    branch_id = row_get(row, "branch_id")
+    start_time = row_get(row, "start_time") or ""
+    end_time = row_get(row, "end_time") or ""
+    faculty = row_get(row, "teacher_name") or row_get(row, "faculty_name") or ""
+    section_val = row_get(row, "section") or section or ""
+
+    # Prevent duplicate attendance sessions: check if attendance rows exist for this subject/date
+    try:
+        existing = db.execute(
+            f"SELECT COUNT(*) AS c FROM attendance WHERE subject_id = {placeholder} AND date = {placeholder}",
+            (subject_id, selected_date),
+        ).fetchone()
+        already_marked = int(row_get(existing, "c", 0) or 0) > 0
+    except Exception:
+        already_marked = False
+
+    # Load students for the section: prefer section filter if students table has section column
+    students = []
+    try:
+        students = db.execute(
+            f"SELECT id, name, enrollment FROM students WHERE branch_id = {placeholder} AND (COALESCE(section,'') = COALESCE({placeholder}, '') OR COALESCE(section,'') = '') ORDER BY COALESCE(import_order, id), id",
+            (branch_id, section_val),
+        ).fetchall()
+    except Exception:
+        # Fallback to branch-only selection if `section` column is not present
+        students = db.execute(
+            f"SELECT id, name, enrollment FROM students WHERE branch_id = {placeholder} ORDER BY COALESCE(import_order, id), id",
+            (branch_id,),
+        ).fetchall()
+
+    student_list = [{"id": r["id"], "name": r["name"], "enrollment": row_get(r, "enrollment")} for r in students]
+
+    resp = {
+        "subject": row_get(row, "subject_name") or "",
+        "section": section_val,
+        "faculty": faculty,
+        "start_time": start_time,
+        "end_time": end_time,
+        # Extra fields helpful to the frontend
+        "branch_id": branch_id,
+        "subject_id": subject_id,
+        "already_marked": already_marked,
+        "students": student_list,
+    }
+
+    db.close()
+    return jsonify(resp)
 
 
 @app.route("/attendance/qr")
 @login_required
-@admin_required
 def generate_qr():
     branch_id = request.args.get("branch_id")
     subject_id = request.args.get("subject_id")
     selected_date = request.args.get("date") or date.today().isoformat()
-    period = request.args.get("period", "1")
 
     if not branch_id or not subject_id:
         flash("Please select a branch and subject before generating a QR code.", "error")
-        return redirect(url_for("mark_attendance", branch_id=branch_id, subject_id=subject_id, date=selected_date, period=period))
+        return redirect(url_for("mark_attendance", branch_id=branch_id, subject_id=subject_id, date=selected_date))
 
     db = get_db()
     placeholder = get_placeholder()
@@ -5500,7 +2073,7 @@ def generate_qr():
 
     if not branch or not subject:
         flash("Selected branch or subject was not found.", "error")
-        return redirect(url_for("mark_attendance", branch_id=branch_id, subject_id=subject_id, date=selected_date, period=period))
+        return redirect(url_for("mark_attendance", branch_id=branch_id, subject_id=subject_id, date=selected_date))
 
     return render_template(
         "qr_display.html",
@@ -5509,7 +2082,6 @@ def generate_qr():
         branch_name=branch["name"],
         subject_name=subject["name"],
         date=selected_date,
-        period=period
     )
 
 
@@ -5518,7 +2090,6 @@ def attendance_scan():
     branch_id = request.args.get("branch_id")
     subject_id = request.args.get("subject_id")
     selected_date = request.args.get("date") or date.today().isoformat()
-    period = request.args.get("period", "1")
 
     if not branch_id or not subject_id:
         flash("Invalid attendance scan link.", "error")
@@ -5550,15 +2121,15 @@ def attendance_scan():
         return redirect(url_for("student_dashboard"))
 
     existing = db.execute(
-        f"SELECT id, status FROM attendance WHERE student_id = {placeholder} AND subject_id = {placeholder} AND date = {placeholder} AND period = {placeholder}",
-        (student_id, subject_id, selected_date, period),
+        f"SELECT id, status FROM attendance WHERE student_id = {placeholder} AND subject_id = {placeholder} AND date = {placeholder}",
+        (student_id, subject_id, selected_date),
     ).fetchone()
 
     if existing:
-        if row_get(existing, "status") != "Present":
+        if existing["status"] != "Present":
             db.execute(
-                f"UPDATE attendance SET status = {placeholder}, note = {placeholder}, branch_section = {placeholder} WHERE id = {placeholder}",
-                ("Present", "Marked via QR scan", row_get(branch, "name"), row_get(existing, "id")),
+                f"UPDATE attendance SET status = {placeholder}, note = {placeholder} WHERE id = {placeholder}",
+                ("Present", "Marked via QR scan", existing["id"]),
             )
             db.commit()
             message = "Your attendance has been updated to Present."
@@ -5566,8 +2137,8 @@ def attendance_scan():
             message = "Your attendance is already marked as Present."
     else:
         db.execute(
-            f"INSERT INTO attendance (student_id, branch_id, branch_section, subject_id, date, period, status, note) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})",
-            (student_id, branch_id, row_get(branch, "name"), subject_id, selected_date, period, "Present", "Marked via QR scan"),
+            f"INSERT INTO attendance (student_id, branch_id, subject_id, date, status, note) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})",
+            (student_id, branch_id, subject_id, selected_date, "Present", "Marked via QR scan"),
         )
         db.commit()
         message = "Attendance recorded successfully."
@@ -5576,11 +2147,10 @@ def attendance_scan():
 
     return render_template(
         "attendance_scan.html",
-        branch_name=row_get(branch, "name"),
-        subject_name=row_get(subject, "name"),
+        branch_name=branch["name"],
+        subject_name=subject["name"],
         date=selected_date,
-        period=period,
-        message=message
+        message=message,
     )
 
 
@@ -5590,7 +2160,6 @@ def generate_qr_token():
     branch_id = request.args.get("branch_id")
     subject_id = request.args.get("subject_id")
     selected_date = request.args.get("date") or date.today().isoformat()
-    period = request.args.get("period", "1")
 
     if not branch_id or not subject_id:
         return jsonify({"error": "branch_id and subject_id are required."}), 400
@@ -5600,7 +2169,6 @@ def generate_qr_token():
         branch_id=branch_id,
         subject_id=subject_id,
         date=selected_date,
-        period=period,
         _external=True,
     )
     return jsonify({"scan_url": scan_url})
@@ -5612,14 +2180,13 @@ def attendance_success():
     branch_id = request.args.get("branch_id") or ""
     subject_id = request.args.get("subject_id") or ""
     selected_date = request.args.get("date") or date.today().isoformat()
-    period = request.args.get("period", "1")
     db = get_db()
     placeholder = get_placeholder()
     branch = db.execute(f"SELECT name FROM branches WHERE id = {placeholder}", (branch_id,)).fetchone()
     subject = db.execute(f"SELECT name FROM subjects WHERE id = {placeholder}", (subject_id,)).fetchone()
     attendance_count = db.execute(
-        f"SELECT COUNT(*) AS count FROM attendance WHERE branch_id = {placeholder} AND subject_id = {placeholder} AND date = {placeholder} AND period = {placeholder}",
-        (branch_id, subject_id, selected_date, period),
+        f"SELECT COUNT(*) AS count FROM attendance WHERE branch_id = {placeholder} AND subject_id = {placeholder} AND date = {placeholder}",
+        (branch_id, subject_id, selected_date),
     ).fetchone()["count"]
     db.close()
 
@@ -5628,10 +2195,9 @@ def attendance_success():
 
     return render_template(
         "attendance_success.html",
-        branch_name=row_get(branch, "name"),
-        subject_name=row_get(subject, "name"),
+        branch_name=branch["name"] if branch else "",
+        subject_name=subject["name"] if subject else "",
         selected_date=selected_date,
-        period=period,
         attendance_count=attendance_count,
         email_summary=email_summary,
         mail_configured=mail_configured,
@@ -5646,8 +2212,6 @@ def get_report_filters():
         "from_date": request.args.get("from_date") or request.form.get("from_date"),
         "to_date": request.args.get("to_date") or request.form.get("to_date"),
         "search": request.args.get("search") or request.form.get("search"),
-        "year": request.args.get("year") or request.form.get("year"),
-        "semester": request.args.get("semester") or request.form.get("semester"),
     }
 
 
@@ -5655,7 +2219,7 @@ def fetch_report_records(db, filters):
     placeholder = get_placeholder()
     query = (
         "SELECT attendance.*, students.name AS student_name, students.enrollment, "
-        "COALESCE(attendance.branch_section, branches.name) AS branch_name, subjects.name AS subject_name "
+        "branches.name AS branch_name, subjects.name AS subject_name "
         "FROM attendance "
         "JOIN students ON attendance.student_id = students.id "
         "JOIN branches ON attendance.branch_id = branches.id "
@@ -5685,27 +2249,10 @@ def fetch_report_records(db, filters):
         clauses.append(f"(students.name {like_op} {placeholder} OR students.enrollment {like_op} {placeholder})")
         params.extend([s, s])
 
-    if filters.get("year"):
-        like_op = "ILIKE" if str(app.config.get("DATABASE", "")).startswith("postgres") else "LIKE"
-        clauses.append(f"attendance.date {like_op} {placeholder}")
-        params.append(f"{filters['year']}-%")
-    
-    if filters.get("semester"):
-        sem = filters["semester"]
-        like_op = "ILIKE" if str(app.config.get("DATABASE", "")).startswith("postgres") else "LIKE"
-        if sem == "1":
-            # Semester 1: Jan to Jun
-            clauses.append(f"(attendance.date {like_op} {placeholder} OR attendance.date {like_op} {placeholder} OR attendance.date {like_op} {placeholder} OR attendance.date {like_op} {placeholder} OR attendance.date {like_op} {placeholder} OR attendance.date {like_op} {placeholder})")
-            params.extend(["%-01-%", "%-02-%", "%-03-%", "%-04-%", "%-05-%", "%-06-%"])
-        elif sem == "2":
-            # Semester 2: Jul to Dec
-            clauses.append(f"(attendance.date {like_op} {placeholder} OR attendance.date {like_op} {placeholder} OR attendance.date {like_op} {placeholder} OR attendance.date {like_op} {placeholder} OR attendance.date {like_op} {placeholder} OR attendance.date {like_op} {placeholder})")
-            params.extend(["%-07-%", "%-08-%", "%-09-%", "%-10-%", "%-11-%", "%-12-%"])
-
     if clauses:
         query += " WHERE " + " AND ".join(clauses)
 
-    query += " ORDER BY COALESCE(students.import_order, students.id), students.id, attendance.id"
+    query += " ORDER BY attendance.date DESC, students.name"
     return db.execute(query, params).fetchall()
 
 
@@ -5765,276 +2312,12 @@ def build_report_stats(records):
     return stats
 
 
-def _parse_time(t):
-    from datetime import datetime
-    if not t:
-        return None
-    if isinstance(t, (int, float)):
-        # treat as HHMM or epoch - not expected
-        return None
-    t = str(t).strip()
-    for fmt in ("%H:%M", "%H.%M", "%I:%M %p", "%I.%M %p", "%H%M"):
-        try:
-            return datetime.strptime(t, fmt).time()
-        except Exception:
-            continue
-    # fallback: try to extract digits
-    try:
-        hh = int(t.split(":")[0])
-        mm = int(t.split(":")[1]) if ":" in t else 0
-        return datetime.strptime(f"{hh:02d}:{mm:02d}", "%H:%M").time()
-    except Exception:
-        return None
-
-
-def get_current_class(db, branch_id, section, current_time=None, teacher_id=None, subject_id=None):
-    """Return the timetable entry matching current weekday + time for given branch+section.
-
-    Returns a single row dict or None. Expects `timetable_entries` table with
-    columns: day, start_time, end_time, branch_id, section, subject_id, teacher_id, subject_name, teacher_name, room, lab_theory
-    """
-    from datetime import datetime
-    placeholder = get_placeholder()
-    if current_time is None:
-        current_time = datetime.now()
-    weekday = current_time.strftime("%A")
-    time_str = current_time.strftime("%H:%M")
-
-    params = [branch_id, section, weekday, time_str, time_str]
-    sql = (
-        f"SELECT * FROM timetable_entries WHERE branch_id = {placeholder} AND (COALESCE(section,'') = COALESCE({placeholder},''))"
-        f" AND (day = {placeholder} OR lower(day) = lower({placeholder}))"
-        f" AND start_time <= {placeholder} AND end_time > {placeholder}"
-    )
-    if teacher_id:
-        sql += f" AND teacher_id = {placeholder}"
-        params.append(teacher_id)
-    if subject_id:
-        sql += f" AND subject_id = {placeholder}"
-        params.append(subject_id)
-
-    row = db.execute(sql, tuple(params)).fetchone()
-    return row
-
-
-def generate_attendance_periods_for_date(db, date_str):
-    """Generate a list of validated timetable rows (dicts) for the given date string (YYYY-MM-DD).
-
-    Applies validation rules: must have subject, teacher, valid section, not blocked (BREAK/PRINCIPAL), and removes duplicates.
-    """
-    from datetime import datetime
-    placeholder = get_placeholder()
-    try:
-        dt = datetime.fromisoformat(date_str)
-    except Exception:
-        dt = datetime.now()
-    weekday = dt.strftime("%A")
-
-    rows = db.execute(
-        f"SELECT * FROM timetable_entries WHERE (day = {placeholder} OR lower(day) = lower({placeholder})) ORDER BY branch_id, section, start_time",
-        (weekday, weekday),
-    ).fetchall()
-
-    seen = set()
-    valid = []
-    for r in rows:
-        subject_name = row_get(r, "subject_name") or ""
-        teacher_name = row_get(r, "teacher_name") or ""
-        section = row_get(r, "section") or ""
-        # skip blocked rows
-        if not subject_name.strip() or not teacher_name.strip():
-            continue
-        if any(tok in subject_name.upper() for tok in ("BREAK", "PRINCIPAL")):
-            continue
-        # semantic key to avoid duplicates
-        key = (
-            str(row_get(r, "branch_id")),
-            section.strip(),
-            row_get(r, "day"),
-            row_get(r, "start_time"),
-            row_get(r, "end_time"),
-            subject_name.strip().lower(),
-            teacher_name.strip().lower(),
-        )
-        if key in seen:
-            continue
-        seen.add(key)
-        valid.append({
-            "day": row_get(r, "day"),
-            "start_time": row_get(r, "start_time"),
-            "end_time": row_get(r, "end_time"),
-            "branch_id": row_get(r, "branch_id"),
-            "section": section,
-            "semester": row_get(r, "semester"),
-            "subject_id": row_get(r, "subject_id"),
-            "subject": subject_name,
-            "teacher_id": row_get(r, "teacher_id"),
-            "faculty": teacher_name,
-            "room": row_get(r, "room"),
-            "lab_theory": row_get(r, "lab_theory"),
-        })
-    return valid
-
-
-def validate_timetable_for_branch_section(db, branch_id, section):
-    """Validate timetable entries for a branch+section.
-
-    Checks: no empty subject/faculty, no overlapping periods, valid times.
-    Returns list of problems (empty if OK).
-    """
-    from datetime import datetime
-    placeholder = get_placeholder()
-    rows = db.execute(
-        f"SELECT * FROM timetable_entries WHERE branch_id = {placeholder} AND (COALESCE(section,'') = COALESCE({placeholder},'')) ORDER BY day, start_time",
-        (branch_id, section),
-    ).fetchall()
-    problems = []
-    by_day = {}
-    for r in rows:
-        day = row_get(r, "day") or ""
-        by_day.setdefault(day, []).append(r)
-        if not (row_get(r, "subject_name") or "").strip():
-            problems.append({"type": "empty_subject", "row": r})
-        if not (row_get(r, "teacher_name") or "").strip():
-            problems.append({"type": "empty_teacher", "row": r})
-        st = _parse_time(row_get(r, "start_time"))
-        et = _parse_time(row_get(r, "end_time"))
-        if not st or not et:
-            problems.append({"type": "invalid_time", "row": r})
-        elif st >= et:
-            problems.append({"type": "bad_interval", "row": r})
-
-    # overlapping check
-    for day, day_rows in by_day.items():
-        intervals = []
-        for r in day_rows:
-            st = _parse_time(row_get(r, "start_time"))
-            et = _parse_time(row_get(r, "end_time"))
-            if not st or not et:
-                continue
-            intervals.append((st, et, r))
-        # check pairwise
-        intervals.sort(key=lambda x: x[0])
-        for i in range(len(intervals) - 1):
-            a_st, a_et, a_row = intervals[i]
-            b_st, b_et, b_row = intervals[i + 1]
-            if a_et > b_st:
-                problems.append({"type": "overlap", "a": a_row, "b": b_row})
-    return problems
-
-
-def attendance_summary(db, branch_id=None, subject_id=None, from_date=None, to_date=None):
-    """Compute attendance summary: present %, absent %, per-subject and daily aggregates."""
-    placeholder = get_placeholder()
-    clauses = []
-    params = []
-    if branch_id:
-        clauses.append(f"branch_id = {placeholder}")
-        params.append(branch_id)
-    if subject_id:
-        clauses.append(f"subject_id = {placeholder}")
-        params.append(subject_id)
-    if from_date:
-        clauses.append(f"date >= {placeholder}")
-        params.append(from_date)
-    if to_date:
-        clauses.append(f"date <= {placeholder}")
-        params.append(to_date)
-
-    query = "SELECT date, subject_id, subject_name, status, COUNT(*) as cnt FROM attendance"
-    if clauses:
-        query += " WHERE " + " AND ".join(clauses)
-    query += " GROUP BY date, subject_id, subject_name, status ORDER BY date"
-
-    rows = db.execute(query, tuple(params)).fetchall()
-    # aggregate
-    daily = {}
-    subject_agg = {}
-    total_present = 0
-    total = 0
-    for r in rows:
-        date_key = row_get(r, "date")
-        subj = row_get(r, "subject_name")
-        status = row_get(r, "status")
-        cnt = row_get(r, "cnt") or 0
-        daily.setdefault(date_key, {"present": 0, "total": 0})
-        subject_agg.setdefault(subj, {"present": 0, "total": 0})
-        subject_agg[subj]["total"] += cnt
-        daily[date_key]["total"] += cnt
-        total += cnt
-        if status == "Present":
-            daily[date_key]["present"] += cnt
-            subject_agg[subj]["present"] += cnt
-            total_present += cnt
-
-    # prepare percentages
-    for k, v in daily.items():
-        v["percentage"] = round((v["present"] / v["total"]) * 100, 1) if v["total"] > 0 else 0
-    for k, v in subject_agg.items():
-        v["percentage"] = round((v["present"] / v["total"]) * 100, 1) if v["total"] > 0 else 0
-
-    overall_percentage = round((total_present / total) * 100, 1) if total > 0 else 0
-    return {"daily": daily, "subject": subject_agg, "overall_percentage": overall_percentage}
-
-
-def regenerate_attendance_schedules(db, start_date, days=7):
-    """Regenerate upcoming attendance schedules from timetable entries for `days` days starting at `start_date`.
-
-    This is a read-only regeneration that returns a list of schedule dicts and does not modify existing attendance history.
-    Use this to preview or to generate session templates safely before deciding to persist them.
-    """
-    from datetime import datetime, timedelta
-    try:
-        dt = datetime.fromisoformat(start_date)
-    except Exception:
-        dt = datetime.now()
-    schedules = []
-    for i in range(days):
-        d = dt + timedelta(days=i)
-        schedules.extend(generate_attendance_periods_for_date(db, d.date().isoformat()))
-    return schedules
-
-
-@app.route("/api/get_current_class")
-@login_required
-def api_get_current_class():
-    db = get_db()
-    branch_id = request.args.get("branch_id") or request.args.get("b")
-    section = request.args.get("section") or ""
-    teacher_id = request.args.get("teacher_id")
-    time_str = request.args.get("time")
-    from datetime import datetime
-    try:
-        current_time = datetime.fromisoformat(time_str) if time_str else None
-    except Exception:
-        current_time = None
-    row = get_current_class(db, branch_id, section, current_time=current_time, teacher_id=teacher_id)
-    if not row:
-        return jsonify({"current": None})
-    # convert row to dict
-    out = {k: row[k] for k in row.keys()}
-    return jsonify({"current": out})
-
-
-@app.route("/api/attendance_summary")
-@login_required
-def api_attendance_summary():
-    db = get_db()
-    branch_id = request.args.get("branch_id")
-    subject_id = request.args.get("subject_id")
-    from_date = request.args.get("from_date")
-    to_date = request.args.get("to_date")
-    summary = attendance_summary(db, branch_id=branch_id, subject_id=subject_id, from_date=from_date, to_date=to_date)
-    return jsonify(summary)
-
-
 def build_report_excel(records):
     rows = []
     for record in records:
         rows.append(
             {
                 "Date": row_get(record, "date"),
-                "Period": row_get(record, "period") or "1",
                 "Student": row_get(record, "student_name"),
                 "Enrollment": row_get(record, "enrollment"),
                 "Branch": row_get(record, "branch_name"),
@@ -6055,134 +2338,6 @@ def build_report_excel(records):
     output.seek(0)
 
     filename = f"attendance_report_{date.today().isoformat()}.xlsx"
-    return output.getvalue(), filename
-
-
-def build_report_pdf(records):
-    """Build a simple PDF attendance report with professional table styling."""
-    try:
-        from reportlab.lib import colors
-        from reportlab.lib.pagesizes import A4, landscape
-        from reportlab.lib.units import mm
-        from reportlab.lib.styles import getSampleStyleSheet
-        from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
-    except Exception as e:
-        raise RuntimeError("PDF export requires reportlab. Add reportlab to requirements.txt") from e
-
-    output = BytesIO()
-    doc = SimpleDocTemplate(
-        output,
-        pagesize=landscape(A4),
-        rightMargin=12 * mm,
-        leftMargin=12 * mm,
-        topMargin=10 * mm,
-        bottomMargin=10 * mm,
-    )
-    styles = getSampleStyleSheet()
-
-    table_data = [["Name", "Enrollment", "Subject", "Date", "Period", "Status"]]
-    for r in records:
-        table_data.append(
-            [
-                str(row_get(r, "student_name") or ""),
-                str(row_get(r, "enrollment") or ""),
-                str(row_get(r, "subject_name") or ""),
-                str(row_get(r, "date") or ""),
-                str(row_get(r, "period") or "1"),
-                str(row_get(r, "status") or ""),
-            ]
-        )
-
-    elements = [
-        Paragraph("Attendance Report", styles["Title"]),
-        Paragraph(f"Generated on: {date.today().isoformat()}", styles["Normal"]),
-        Spacer(1, 8),
-    ]
-
-    table = Table(table_data, repeatRows=1)
-    table.setStyle(
-        TableStyle(
-            [
-                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#4361ee")),
-                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-                ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#d9dce3")),
-                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f7f9fc")]),
-                ("ALIGN", (0, 0), (-1, -1), "LEFT"),
-                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-                ("FONTSIZE", (0, 0), (-1, -1), 9),
-                ("BOTTOMPADDING", (0, 0), (-1, 0), 8),
-                ("TOPPADDING", (0, 0), (-1, 0), 8),
-            ]
-        )
-    )
-    elements.append(table)
-    doc.build(elements)
-    output.seek(0)
-    filename = f"attendance_report_{date.today().isoformat()}.pdf"
-    return output.getvalue(), filename
-
-
-def build_report_docx(records):
-    """Build a DOCX attendance report using python-docx."""
-    try:
-        from docx import Document
-        from docx.shared import Inches, Pt, RGBColor
-        from docx.enum.text import WD_ALIGN_PARAGRAPH
-    except Exception as e:
-        raise RuntimeError("DOCX export requires python-docx. Add python-docx to requirements.txt") from e
-
-    doc = Document()
-    
-    # Add title
-    title = doc.add_heading("Attendance Report", 0)
-    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    
-    # Add generated date
-    date_para = doc.add_paragraph(f"Generated on: {date.today().isoformat()}")
-    date_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    
-    # Add table
-    table = doc.add_table(rows=1, cols=6)
-    table.style = "Light Grid Accent 1"
-    
-    # Add header row
-    header_cells = table.rows[0].cells
-    headers = ["Name", "Enrollment", "Subject", "Date", "Period", "Status"]
-    for i, header_text in enumerate(headers):
-        header_cells[i].text = header_text
-        # Style header
-        for paragraph in header_cells[i].paragraphs:
-            for run in paragraph.runs:
-                run.bold = True
-                run.font.color.rgb = RGBColor(255, 255, 255)
-            paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        from docx.oxml import parse_xml
-        from docx.oxml.ns import nsdecls
-        shading_elm = parse_xml(r'<w:shd {} w:fill="4361EE"/>'.format(nsdecls('w')))
-        header_cells[i]._element.get_or_add_tcPr().append(shading_elm)
-    
-    # Add data rows
-    for record in records:
-        row_cells = table.add_row().cells
-        row_data = [
-            str(row_get(record, "student_name") or ""),
-            str(row_get(record, "enrollment") or ""),
-            str(row_get(record, "subject_name") or ""),
-            str(row_get(record, "date") or ""),
-            str(row_get(record, "period") or "1"),
-            str(row_get(record, "status") or ""),
-        ]
-        for i, cell_text in enumerate(row_data):
-            row_cells[i].text = cell_text
-            for paragraph in row_cells[i].paragraphs:
-                paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
-    
-    output = BytesIO()
-    doc.save(output)
-    output.seek(0)
-    
-    filename = f"attendance_report_{date.today().isoformat()}.docx"
     return output.getvalue(), filename
 
 
@@ -6241,44 +2396,44 @@ def download_attendance():
         return redirect(url_for("dashboard"))
 
 
-@app.route("/attendance/report")
+@app.route("/reports", methods=["GET", "POST"])
 @login_required
-@admin_required
 def attendance_report():
-    db = None
-    try:
-        db = get_db()
-        placeholder = get_placeholder()
-        filters = {
-            "branch_id": request.args.get("branch_id"),
-            "subject_id": request.args.get("subject_id"),
-            "student_id": request.args.get("student_id"),
-            "from_date": request.args.get("from_date"),
-            "to_date": request.args.get("to_date"),
-            "search": request.args.get("search"),
-        }
-        
-        records = fetch_report_records(db, filters)
-        stats = build_report_stats(records)
-        
-        branches = db.execute("SELECT id, name FROM branches ORDER BY name").fetchall()
-        subjects = db.execute("SELECT id, name FROM subjects ORDER BY name").fetchall()
-        students = db.execute("SELECT id, name FROM students ORDER BY COALESCE(import_order, id), id").fetchall()
-        
-        return render_template("attendance_report.html", records=records, stats=stats, filters=filters, branches=branches, subjects=subjects, students=students)
-    except Exception as e:
-        print(f"[attendance_report] ERROR: {repr(e)}")
-        flash("Reports are temporarily unavailable.", "error")
-        return redirect(url_for("dashboard"))
-    finally:
-        if db:
-            try: db.close()
-            except: pass
+    db = get_db()
+    branches = db.execute(f"SELECT * FROM branches ORDER BY name").fetchall()
+    subjects = []
+    records = []
+    filters = get_report_filters()
+    placeholder = get_placeholder()
+
+    if filters["branch_id"]:
+        subjects = db.execute(
+            f"SELECT * FROM subjects WHERE branch_id = {placeholder} ORDER BY name", (filters["branch_id"],)
+        ).fetchall()
+
+    records = fetch_report_records(db, filters)
+    students = []
+    if filters["branch_id"]:
+        students = db.execute(
+            f"SELECT * FROM students WHERE branch_id = {placeholder} ORDER BY name", (filters["branch_id"],)
+        ).fetchall()
+
+    stats = build_report_stats(records)
+
+    db.close()
+    return render_template(
+        "attendance_report.html",
+        branches=branches,
+        subjects=subjects,
+        students=students,
+        records=records,
+        filters=filters,
+        stats=stats,
+    )
 
 
 @app.route("/reports/export")
 @login_required
-@admin_required
 def export_excel():
     db = get_db()
     try:
@@ -6291,37 +2446,6 @@ def export_excel():
             download_name=filename,
             mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
-    except Exception as e:
-        print(f"[export_excel] ERROR: {repr(e)}")
-        flash("Failed to export Excel report.", "error")
-        return redirect(url_for("attendance_report", **{k: v for k, v in get_report_filters().items() if v}))
-    finally:
-        try:
-            db.close()
-        except Exception:
-            pass
-
-
-@app.route("/reports/export/pdf")
-@login_required
-@admin_required
-def export_pdf():
-    db = get_db()
-    filters = get_report_filters()
-    redirect_params = {k: v for k, v in filters.items() if v}
-    try:
-        records = fetch_report_records(db, filters)
-        content, filename = build_report_pdf(records)
-        return send_file(
-            BytesIO(content),
-            as_attachment=True,
-            download_name=filename,
-            mimetype="application/pdf",
-        )
-    except Exception as e:
-        print(f"[export_pdf] ERROR: {repr(e)}")
-        flash("Failed to export PDF report. Ensure reportlab is installed.", "error")
-        return redirect(url_for("attendance_report", **redirect_params))
     finally:
         try:
             db.close()
@@ -6336,7 +2460,7 @@ def report_email():
     redirect_params = {k: v for k, v in filters.items() if v}
 
     if not is_mail_configured():
-        flash("Email is not configured. Please set RESEND_API_KEY and MAIL_FROM.", "error")
+        flash("Email is not configured. Please set MAIL_USERNAME and MAIL_PASSWORD.", "error")
         return redirect(url_for("attendance_report", **redirect_params))
 
     recipient = (app.config.get("REPORT_ADMIN_EMAIL") or "").strip()
@@ -6399,23 +2523,10 @@ def report_email():
             ]
         )
 
-        html_summary = (
-            "<div style='font-family:Arial,sans-serif;line-height:1.6;color:#1f2937'>"
-            "<h2 style='margin-bottom:8px;color:#4361ee'>Attendance Report</h2>"
-            f"<p><strong>Branch:</strong> {branch_name}<br>"
-            f"<strong>Subject:</strong> {subject_name}<br>"
-            f"<strong>Student:</strong> {student_name}<br>"
-            f"<strong>Total records:</strong> {stats.get('total_records', 0)}<br>"
-            f"<strong>Overall attendance:</strong> {stats.get('overall_percentage', 0)}%</p>"
-            "<p>The detailed report is attached as an Excel file.</p>"
-            "</div>"
-        )
-
         email_sent = safe_send_email(
             subject="Attendance Report",
             recipient=recipient,
             body="\n".join(body_lines),
-            html_body=html_summary,
             attachments=[
                 {
                     "filename": filename,
@@ -6429,10 +2540,6 @@ def report_email():
             flash(f"Report emailed successfully to {recipient}.", "success")
         else:
             flash("Failed to send the report email.", "error")
-    except Exception as e:
-        print(f"[report_email] ERROR: {repr(e)}")
-        print(traceback.format_exc())
-        flash("Failed to build or send the report email.", "error")
     finally:
         try:
             db.close()
@@ -6442,66 +2549,67 @@ def report_email():
     return redirect(url_for("attendance_report", **redirect_params))
 
 
-# SocketIO Event Handlers for Real-time Updates
-@socketio.on('connect')
-def handle_connect():
-    app.logger.debug("SocketIO client connected")
-    emit('status', {'message': 'Connected to real-time system'})
+# # SocketIO Event Handlers for Real-time Updates (disabled for Render)
+# @socketio.on('connect')
+# def handle_connect():
+#     print('Client connected')
+#     emit('status', {'message': 'Connected to real-time attendance system'})
 
-@socketio.on('disconnect')
-def handle_disconnect():
-    app.logger.debug("SocketIO client disconnected")
+# @socketio.on('disconnect')
+# def handle_disconnect():
+#     print('Client disconnected')
 
-@socketio.on('join_room')
-def handle_join_room(data):
-    room = data.get('room')
-    if room:
-        join_room(room)
-        app.logger.debug("SocketIO client joined room: %s", room)
+# @socketio.on('join_room')
+# def handle_join_room(data):
+#     """Join a room for real-time updates"""
+#     room = data.get('room', 'general')
+#     join_room(room)
+#     emit('status', {'message': f'Joined room: {room}'})
 
-@socketio.on('request_stats')
-def handle_request_stats():
-    """Fetch and emit latest stats to the dashboard."""
-    db = None
-    try:
-        db = get_db()
-        stats = {
-            'total_records': db.execute("SELECT COUNT(*) FROM attendance").fetchone()[0],
-            'overall_percentage': 0,
-            'recent_activity': []
-        }
-        
-        total = db.execute("SELECT COUNT(*) FROM attendance").fetchone()[0]
-        present = db.execute("SELECT COUNT(*) FROM attendance WHERE status='Present'").fetchone()[0]
-        if total > 0:
-            stats['overall_percentage'] = round((present / total) * 100, 1)
-            
-        # Get last 5 activity items
-        activity_rows = db.execute("""
-            SELECT a.date, s.name as student_name, sub.name as subject_name, a.status, COALESCE(a.branch_section, b.name) AS branch_name
-            FROM attendance a
-            JOIN students s ON a.student_id = s.id
-            JOIN subjects sub ON a.subject_id = sub.id
-            JOIN branches b ON a.branch_id = b.id
-            ORDER BY a.id DESC LIMIT 5
-        """).fetchall()
-        
-        stats['recent_activity'] = [
-            {
-                'date': str(r['date']),
-                'student': r['student_name'],
-                'subject': r['subject_name'],
-                'status': r['status'],
-                'branch': r['branch_name']
-            } for r in activity_rows
-        ]
-        
-        emit('stats_update', stats)
-    except Exception as e:
-        app.logger.exception("SocketIO Stats Error")
-    finally:
-        if db: db.close()
+# @socketio.on('request_stats')
+# def handle_request_stats():
+#     """Send current attendance statistics to client"""
+#     db = get_db()
+#     try:
+#         # Get overall attendance stats
+#         total_records = db.execute("SELECT COUNT(*) FROM attendance").fetchone()[0]
+#         present_count = db.execute("SELECT COUNT(*) FROM attendance WHERE status = 'Present'").fetchone()[0]
+#         overall_percentage = (present_count / total_records * 100) if total_records > 0 else 0
 
+#         # Get today's attendance
+#         today = date.today().isoformat()
+#         today_count = db.execute("SELECT COUNT(*) FROM attendance WHERE date = ?", (today,)).fetchone()[0]
+
+#         # Get recent activity (last 5 attendance records)
+#         recent_activity = db.execute("""
+#             SELECT attendance.date, students.name as student_name, subjects.name as subject_name,
+#                    attendance.status, branches.name as branch_name
+#             FROM attendance
+#             JOIN students ON attendance.student_id = students.id
+#             JOIN subjects ON attendance.subject_id = subjects.id
+#             JOIN branches ON attendance.branch_id = branches.id
+#             ORDER BY attendance.id DESC LIMIT 5
+#         """).fetchall()
+
+#         stats_data = {
+#             'overall_percentage': round(overall_percentage, 1),
+#             'total_records': total_records,
+#             'today_count': today_count,
+#             'recent_activity': [{
+#                 'date': activity['date'],
+#                 'student': activity['student_name'],
+#                 'subject': activity['subject_name'],
+#                 'status': activity['status'],
+#                 'branch': activity['branch_name']
+#             } for activity in recent_activity]
+#         }
+
+#         emit('stats_update', stats_data)
+#     except Exception as e:
+#         print(f"Error getting stats: {e}")
+#         emit('error', {'message': 'Failed to load statistics'})
+#     finally:
+#         db.close()
 
 @app.route("/forgot-password", methods=["GET", "POST"])
 @app.route("/forgot_password", methods=["GET", "POST"])
@@ -6604,21 +2712,10 @@ def forgot_password():
                     "Regards,\n"
                     "Attendance Management Team"
                 )
-                html_body = (
-                    "<div style='font-family:Arial,sans-serif;line-height:1.6;color:#1f2937'>"
-                    "<h2 style='margin-bottom:8px;color:#4361ee'>Reset Your Password</h2>"
-                    "<p>We received a request to reset your password.</p>"
-                    f"<p><a href='{reset_link}' style='display:inline-block;padding:10px 14px;background:#4361ee;color:#fff;text-decoration:none;border-radius:6px'>Reset Password</a></p>"
-                    f"<p>If the button does not work, use this link:<br><a href='{reset_link}'>{reset_link}</a></p>"
-                    "<p>If you did not request this, you can ignore this email.</p>"
-                    "<p>Regards,<br>Attendance Management Team</p>"
-                    "</div>"
-                )
                 email_sent = safe_send_email(
                     subject="Reset your password",
                     recipient=student_email,
                     body=body,
-                    html_body=html_body,
                 )
                 print(f"[forgot_password] email_attempted=True email_sent={email_sent}")
             else:
@@ -6705,30 +2802,15 @@ def admin_check_smtp():
     if session.get('role') != 'admin':
         abort(403)
 
-    timeout = float(os.environ.get("RESEND_TIMEOUT_SECONDS", 8))
-    api_key = (app.config.get("RESEND_API_KEY") or "").strip()
-    host = app.config.get('MAIL_SERVER', 'api.resend.com')
-
-    if not api_key:
-        return jsonify({'ok': False, 'provider': 'resend', 'server': host, 'error': 'RESEND_API_KEY not configured'})
-
+    host = app.config.get('MAIL_SERVER')
+    port = int(app.config.get('MAIL_PORT', 587))
+    timeout = 8
     try:
-        response = requests.get(
-            'https://api.resend.com/domains',
-            headers={'Authorization': f'Bearer {api_key}'},
-            timeout=timeout,
-        )
-        if 200 <= response.status_code < 300:
-            return jsonify({'ok': True, 'provider': 'resend', 'server': host, 'message': 'Resend API connection successful'})
-        return jsonify({
-            'ok': False,
-            'provider': 'resend',
-            'server': host,
-            'status': response.status_code,
-            'error': (response.text or '')[:500],
-        })
-    except requests.RequestException as e:
-        return jsonify({'ok': False, 'provider': 'resend', 'server': host, 'error': str(e)})
+        s = socket.create_connection((host, port), timeout=timeout)
+        s.close()
+        return jsonify({'ok': True, 'server': host, 'port': port, 'message': 'Connection successful'})
+    except Exception as e:
+        return jsonify({'ok': False, 'server': host, 'port': port, 'error': str(e)})
 
 
 @app.route('/admin/check-db')
@@ -6835,15 +2917,6 @@ def trigger_low_attendance_scan():
 @app.errorhandler(500)
 def internal_error(error):
     """Global handler for Internal Server Errors."""
-
-
-@app.route("/attendance-analytics")
-@app.route("/attendance_analytics")
-@login_required
-def attendance_analytics():
-    # Lightweight compatibility route so existing dashboard links render safely.
-    # Detailed analytics were moved into the reports module.
-    return redirect(url_for("reports_index"))
     print(f"[CRITICAL] 500 ERROR: {repr(error)}")
     print(traceback.format_exc())
     return "<h1>Internal Server Error</h1><p>Our team has been notified. Please try again later.</p>", 500
@@ -6852,425 +2925,5 @@ def attendance_analytics():
 def not_found_error(error):
     return "<h1>404 Not Found</h1><p>The page you requested does not exist.</p>", 404
 
-def _parse_date_param(val):
-    if not val:
-        return None
-    try:
-        return date.fromisoformat(val)
-    except Exception:
-        try:
-            return date.fromtimestamp(int(val))
-        except Exception:
-            return None
-
-
-def _parse_int_param(val):
-    if val is None or val == "":
-        return None
-    try:
-        return int(val)
-    except Exception:
-        return None
-
-
-def _exists_id(db, table, id_val):
-    try:
-        placeholder = get_placeholder()
-        row = db.execute(f"SELECT 1 FROM {table} WHERE id = {placeholder}", (id_val,)).fetchone()
-        return bool(row)
-    except Exception:
-        return False
-
-
-def _get_report_rows(db, subject_id=None, branch_id=None, start_date=None, end_date=None):
-    placeholder = get_placeholder()
-    where_clauses = []
-    params = []
-
-    if subject_id:
-        where_clauses.append(f"attendance.subject_id = {placeholder}")
-        params.append(subject_id)
-    if branch_id:
-        where_clauses.append(f"attendance.branch_id = {placeholder}")
-        params.append(branch_id)
-    if start_date:
-        where_clauses.append(f"attendance.date >= {placeholder}")
-        params.append(start_date.isoformat())
-    if end_date:
-        where_clauses.append(f"attendance.date <= {placeholder}")
-        params.append(end_date.isoformat())
-
-    where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
-
-    query = f"""
-        SELECT attendance.id AS attendance_id, attendance.date, attendance.status, attendance.note,
-               students.id AS student_id, students.name AS student_name, students.enrollment,
-               subjects.id AS subject_id, subjects.name AS subject_name,
-                             branches.id AS branch_id, COALESCE(attendance.branch_section, branches.name) AS branch_name
-        FROM attendance
-        JOIN students ON attendance.student_id = students.id
-        LEFT JOIN subjects ON attendance.subject_id = subjects.id
-        LEFT JOIN branches ON attendance.branch_id = branches.id
-        {where_sql}
-        ORDER BY attendance.date DESC
-    """
-
-    # Allow caller to append a LIMIT by passing max_rows through params via special key
-    rows = db.execute(query, tuple(params)).fetchall()
-    return rows
-
-
-@app.route("/reports", methods=["GET"])
-@login_required
-@admin_required
-def reports_index():
-    db = None
-    try:
-        db = get_db()
-        placeholder = get_placeholder()
-        subjects = db.execute(f"SELECT id, name FROM subjects ORDER BY name").fetchall()
-        branches = db.execute(f"SELECT id, name FROM branches ORDER BY name").fetchall()
-
-        # Parse and validate filters from query params
-        subject_id_raw = request.args.get("subject_id") or None
-        branch_id_raw = request.args.get("branch_id") or None
-        subject_id = _parse_int_param(subject_id_raw)
-        branch_id = _parse_int_param(branch_id_raw)
-        start_date = _parse_date_param(request.args.get("start_date"))
-        end_date = _parse_date_param(request.args.get("end_date"))
-
-        # Validate date range
-        if start_date and end_date and start_date > end_date:
-            flash("Start date cannot be after end date.", "error")
-            return redirect(url_for("reports_index"))
-
-        # Validate provided subject/branch IDs exist
-        if subject_id_raw and subject_id is None:
-            flash("Invalid subject id.", "error")
-            return redirect(url_for("reports_index"))
-        if branch_id_raw and branch_id is None:
-            flash("Invalid branch id.", "error")
-            return redirect(url_for("reports_index"))
-
-        if subject_id and not _exists_id(db, "subjects", subject_id):
-            flash("Subject not found.", "error")
-            return redirect(url_for("reports_index"))
-        if branch_id and not _exists_id(db, "branches", branch_id):
-            flash("Branch not found.", "error")
-            return redirect(url_for("reports_index"))
-
-        rows = None
-        if request.args.get("preview"):
-            # small preview limit for UI responsiveness
-            rows = _get_report_rows(db, subject_id=subject_id, branch_id=branch_id, start_date=start_date, end_date=end_date)[:200]
-
-        return render_template("reports_index.html", subjects=subjects, branches=branches, rows=rows, filters={"subject_id":(subject_id_raw or ""),"branch_id":(branch_id_raw or ""),"start_date":request.args.get("start_date"),"end_date":request.args.get("end_date")})
-    except Exception as e:
-        print(f"[reports_index] ERROR: {repr(e)}")
-        flash("Reports are temporarily unavailable.", "error")
-        return redirect(url_for("dashboard"))
-    finally:
-        if db:
-            try:
-                db.close()
-            except Exception:
-                pass
-
-
-def _rows_to_dataframe(rows):
-    import pandas as _pd
-    data = []
-    for r in rows:
-        data.append({
-            "attendance_id": row_get(r, "attendance_id"),
-            "date": row_get(r, "date"),
-            "status": row_get(r, "status"),
-            "note": row_get(r, "note"),
-            "student_id": row_get(r, "student_id"),
-            "student_name": row_get(r, "student_name"),
-            "enrollment": row_get(r, "enrollment"),
-            "subject_id": row_get(r, "subject_id"),
-            "subject_name": row_get(r, "subject_name"),
-            "branch_id": row_get(r, "branch_id"),
-            "branch_name": row_get(r, "branch_name"),
-        })
-    return _pd.DataFrame(data)
-
-
-def _register_timetable_routes_and_log():
-    """Register timetable routes at import time and emit startup diagnostics."""
-    try:
-        import timetable as _timetable
-    except Exception as e:
-        print(f"[timetable] Timetable module unavailable: {type(e).__name__}: {str(e)}")
-        return False
-
-    try:
-        _timetable.register_routes(app, get_db)
-        print("[timetable] Timetable routes loaded")
-    except Exception as e:
-        print(f"[timetable] Failed to register timetable routes: {type(e).__name__}: {str(e)}")
-        return False
-
-    route_lines = []
-    for rule in sorted(app.url_map.iter_rules(), key=lambda r: (r.rule, r.endpoint)):
-        methods = ",".join(sorted(m for m in rule.methods if m not in {"HEAD", "OPTIONS"}))
-        route_lines.append(f"[routes] {rule.rule} -> {rule.endpoint} [{methods}]")
-
-    print(f"[routes] Total registered Flask routes: {len(route_lines)}")
-    for line in route_lines:
-        print(line)
-
-    try:
-        db = get_db()
-        try:
-            _timetable.ensure_timetable_tables(db)
-            row = db.execute("SELECT COUNT(1) AS c FROM timetable_slots").fetchone()
-            count = row_get(row, "c", 0)
-            print("[timetable] Timetable tables verified")
-            print(f"[timetable] Timetable schema initialized: timetable_slots_count={count}")
-            # Check normalized entries if possible
-            try:
-                row2 = db.execute("SELECT COUNT(1) AS c FROM timetable_entries").fetchone()
-                count2 = row_get(row2, "c", 0)
-                print(f"[timetable] Timetable entries detected: {count2}")
-            except Exception:
-                # ignore absence of normalized table
-                pass
-            # Postgres compatibility note
-            try:
-                is_pg = False
-                if hasattr(db, "_conn"):
-                    is_pg = "psycopg2" in type(db._conn).__module__
-                elif type(db).__name__ == "_PostgresDB":
-                    is_pg = True
-                if is_pg:
-                    print("[timetable] PostgreSQL timetable compatibility OK")
-            except Exception:
-                pass
-        finally:
-            try:
-                db.close()
-            except Exception:
-                pass
-    except Exception as e:
-        print(f"[timetable] Failed to verify timetable tables: {type(e).__name__}: {str(e)}")
-
-    return True
-
-
-# Register timetable routes at import time so template `url_for` lookups
-# for `timetable_home` work under WSGI and other non-__main__ runtimes.
-try:
-    _register_timetable_routes_and_log()
-except Exception as _t_err:
-    print(f"[timetable] Auto-registration skipped: {type(_t_err).__name__}: {_t_err}")
-
-
-@app.route("/reports/export.xlsx")
-@login_required
-@admin_required
-def reports_export_xlsx():
-    db = None
-    try:
-        db = get_db()
-        # Validate params
-        subject_id_raw = request.args.get("subject_id") or None
-        branch_id_raw = request.args.get("branch_id") or None
-        subject_id = _parse_int_param(subject_id_raw)
-        branch_id = _parse_int_param(branch_id_raw)
-        start_date = _parse_date_param(request.args.get("start_date"))
-        end_date = _parse_date_param(request.args.get("end_date"))
-
-        if start_date and end_date and start_date > end_date:
-            flash("Start date cannot be after end date.", "error")
-            return redirect(url_for("reports_index"))
-
-        if subject_id_raw and subject_id is None:
-            flash("Invalid subject id.", "error")
-            return redirect(url_for("reports_index"))
-        if branch_id_raw and branch_id is None:
-            flash("Invalid branch id.", "error")
-            return redirect(url_for("reports_index"))
-
-        if subject_id and not _exists_id(db, "subjects", subject_id):
-            flash("Subject not found.", "error")
-            return redirect(url_for("reports_index"))
-        if branch_id and not _exists_id(db, "branches", branch_id):
-            flash("Branch not found.", "error")
-            return redirect(url_for("reports_index"))
-
-        # Enforce maximum export rows
-        MAX_EXPORT_ROWS = int(os.environ.get("REPORT_MAX_ROWS", "10000"))
-        rows = _get_report_rows(db, subject_id=subject_id, branch_id=branch_id, start_date=start_date, end_date=end_date)
-        if len(rows) > MAX_EXPORT_ROWS:
-            # Limit results to keep exports lightweight
-            rows = rows[:MAX_EXPORT_ROWS]
-            flash(f"Export limited to first {MAX_EXPORT_ROWS} rows.", "warning")
-        df = _rows_to_dataframe(rows)
-
-        bio = BytesIO()
-        with pd.ExcelWriter(bio, engine="openpyxl") as writer:
-            if df.empty:
-                # create an empty sheet
-                pd.DataFrame([{"info":"No records"}]).to_excel(writer, index=False, sheet_name="Report")
-            else:
-                df.to_excel(writer, index=False, sheet_name="Report")
-        bio.seek(0)
-        filename = f"attendance_report_{date.today().isoformat()}.xlsx"
-        return send_file(bio, download_name=filename, as_attachment=True, mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-    except Exception as e:
-        print(f"[reports_export_xlsx] ERROR: {repr(e)}")
-        flash("Export failed.", "error")
-        return redirect(url_for("reports_index"))
-    finally:
-        if db:
-            try: db.close()
-            except: pass
-
-
-@app.route("/reports/export.pdf")
-@login_required
-@admin_required
-def reports_export_pdf():
-    db = None
-    try:
-        db = get_db()
-        # Validate params
-        subject_id_raw = request.args.get("subject_id") or None
-        branch_id_raw = request.args.get("branch_id") or None
-        subject_id = _parse_int_param(subject_id_raw)
-        branch_id = _parse_int_param(branch_id_raw)
-        start_date = _parse_date_param(request.args.get("start_date"))
-        end_date = _parse_date_param(request.args.get("end_date"))
-
-        if start_date and end_date and start_date > end_date:
-            flash("Start date cannot be after end date.", "error")
-            return redirect(url_for("reports_index"))
-
-        if subject_id_raw and subject_id is None:
-            flash("Invalid subject id.", "error")
-            return redirect(url_for("reports_index"))
-        if branch_id_raw and branch_id is None:
-            flash("Invalid branch id.", "error")
-            return redirect(url_for("reports_index"))
-
-        if subject_id and not _exists_id(db, "subjects", subject_id):
-            flash("Subject not found.", "error")
-            return redirect(url_for("reports_index"))
-        if branch_id and not _exists_id(db, "branches", branch_id):
-            flash("Branch not found.", "error")
-            return redirect(url_for("reports_index"))
-
-        # Enforce maximum export rows
-        MAX_EXPORT_ROWS = int(os.environ.get("REPORT_MAX_ROWS", "10000"))
-        rows = _get_report_rows(db, subject_id=subject_id, branch_id=branch_id, start_date=start_date, end_date=end_date)
-        if len(rows) > MAX_EXPORT_ROWS:
-            rows = rows[:MAX_EXPORT_ROWS]
-            flash(f"Export limited to first {MAX_EXPORT_ROWS} rows.", "warning")
-        df = _rows_to_dataframe(rows)
-
-        bio = BytesIO()
-        doc = SimpleDocTemplate(bio, pagesize=landscape(letter))
-        elements = []
-
-        # Build table data
-        if df.empty:
-            data = [["No records for the selected filters"]]
-        else:
-            cols = ["date", "status", "student_name", "enrollment", "subject_name", "branch_name", "note"]
-            data = [cols]
-            for _, row in df.iterrows():
-                data.append([str(row.get(c, "")) for c in cols])
-
-        table = Table(data)
-        table.setStyle(TableStyle([
-            ("BACKGROUND", (0,0), (-1,0), colors.lightgrey),
-            ("GRID", (0,0), (-1,-1), 0.25, colors.black),
-            ("VALIGN", (0,0), (-1,-1), "TOP"),
-        ]))
-        elements.append(table)
-        doc.build(elements)
-        bio.seek(0)
-        filename = f"attendance_report_{date.today().isoformat()}.pdf"
-        return send_file(bio, download_name=filename, as_attachment=True, mimetype="application/pdf")
-    except Exception as e:
-        print(f"[reports_export_pdf] ERROR: {repr(e)}")
-        flash("PDF export failed.", "error")
-        return redirect(url_for("reports_index"))
-    finally:
-        if db:
-            try: db.close()
-            except: pass
-
-
-@app.route("/reports/export.docx")
-@login_required
-@admin_required
-def reports_export_docx():
-    db = None
-    try:
-        db = get_db()
-        # Validate params
-        subject_id_raw = request.args.get("subject_id") or None
-        branch_id_raw = request.args.get("branch_id") or None
-        subject_id = _parse_int_param(subject_id_raw)
-        branch_id = _parse_int_param(branch_id_raw)
-        start_date = _parse_date_param(request.args.get("start_date"))
-        end_date = _parse_date_param(request.args.get("end_date"))
-
-        if start_date and end_date and start_date > end_date:
-            flash("Start date cannot be after end date.", "error")
-            return redirect(url_for("reports_index"))
-
-        if subject_id_raw and subject_id is None:
-            flash("Invalid subject id.", "error")
-            return redirect(url_for("reports_index"))
-        if branch_id_raw and branch_id is None:
-            flash("Invalid branch id.", "error")
-            return redirect(url_for("reports_index"))
-
-        if subject_id and not _exists_id(db, "subjects", subject_id):
-            flash("Subject not found.", "error")
-            return redirect(url_for("reports_index"))
-        if branch_id and not _exists_id(db, "branches", branch_id):
-            flash("Branch not found.", "error")
-            return redirect(url_for("reports_index"))
-
-        # Enforce maximum export rows
-        MAX_EXPORT_ROWS = int(os.environ.get("REPORT_MAX_ROWS", "10000"))
-        rows = _get_report_rows(db, subject_id=subject_id, branch_id=branch_id, start_date=start_date, end_date=end_date)
-        if len(rows) > MAX_EXPORT_ROWS:
-            rows = rows[:MAX_EXPORT_ROWS]
-            flash(f"Export limited to first {MAX_EXPORT_ROWS} rows.", "warning")
-
-        content, filename = build_report_docx(rows)
-        return send_file(
-            BytesIO(content),
-            as_attachment=True,
-            download_name=filename,
-            mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-        )
-    except Exception as e:
-        print(f"[reports_export_docx] ERROR: {repr(e)}")
-        flash("DOCX export failed.", "error")
-        return redirect(url_for("reports_index"))
-    finally:
-        if db:
-            try: db.close()
-            except: pass
-
 if __name__ == "__main__":
-    # Initialize database
-    with app.app_context():
-        get_db()
-    
-    # Register timetable routes
-    try:
-        from timetable import register_routes
-        register_routes(app)
-    except ImportError:
-        print("[INFO] timetable module not found; skipping timetable routes")
-
-    port = int(os.environ.get("PORT", 10000))
-    socketio.run(app, host="0.0.0.0", port=port, debug=False)
+    app.run(host="0.0.0.0", port=10000)
