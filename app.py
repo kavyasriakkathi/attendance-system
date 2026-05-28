@@ -3534,5 +3534,76 @@ def api_close_attendance_session(session_id):
                 pass
 
 
+@app.route("/api/attendance/session/<int:session_id>/bulk-mark", methods=["POST"])
+def api_bulk_mark_attendance(session_id):
+    data = request.get_json() or {}
+    records = data.get("records")
+    
+    if not isinstance(records, list):
+        return jsonify({"success": False, "error": "Invalid payload format."}), 400
+
+    db = None
+    try:
+        db = get_db()
+        placeholder = get_placeholder()
+        
+        sess = db.execute(f"SELECT is_closed FROM attendance_sessions WHERE id = {placeholder}", (session_id,)).fetchone()
+        if not sess or row_get(sess, "is_closed"):
+            return jsonify({"success": False, "error": "Session closed or not found."}), 403
+
+        for rec in records:
+            student_id = rec.get("student_id")
+            status = rec.get("status")
+            if not student_id or not status: continue
+            
+            existing = db.execute(f"SELECT id FROM attendance_records WHERE session_id = {placeholder} AND student_id = {placeholder}", (session_id, student_id)).fetchone()
+            if existing:
+                db.execute(f"UPDATE attendance_records SET status = {placeholder} WHERE session_id = {placeholder} AND student_id = {placeholder}", (status, session_id, student_id))
+            else:
+                db.execute(f"INSERT INTO attendance_records (session_id, student_id, status) VALUES ({placeholder}, {placeholder}, {placeholder})", (session_id, student_id, status))
+                
+        db.commit()
+        return jsonify({"success": True})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+    finally:
+        if db:
+            try: db.close()
+            except: pass
+
+
+@app.route("/attendance/session/<int:session_id>/mark", methods=["GET"])
+@login_required
+def session_mark_attendance_ui(session_id):
+    db = None
+    try:
+        db = get_db()
+        placeholder = get_placeholder()
+        
+        session_row = db.execute(f"SELECT * FROM attendance_sessions WHERE id = {placeholder}", (session_id,)).fetchone()
+        if not session_row:
+            flash("Session not found.", "error")
+            return redirect(url_for("dashboard"))
+            
+        session_section = row_get(session_row, "section")
+        
+        # Fetch students for this section
+        students = db.execute(f"SELECT id, name, roll_no, enrollment, section FROM students WHERE LOWER(TRIM(section)) = LOWER(TRIM({placeholder})) ORDER BY roll_no, name", (session_section,)).fetchall()
+        
+        # Fetch existing records to pre-populate UI
+        records = db.execute(f"SELECT student_id, status FROM attendance_records WHERE session_id = {placeholder}", (session_id,)).fetchall()
+        record_map = {row_get(r, "student_id"): row_get(r, "status") for r in records}
+        
+        return render_template("session_mark_attendance.html", session=session_row, students=students, record_map=record_map)
+    except Exception as e:
+        print(f"Error loading marking UI: {e}")
+        flash("Internal error loading marking UI.", "error")
+        return redirect(url_for("dashboard"))
+    finally:
+        if db:
+            try: db.close()
+            except: pass
+
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)

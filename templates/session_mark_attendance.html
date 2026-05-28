@@ -1,0 +1,256 @@
+{% extends "layout.html" %}
+
+{% block head %}
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+  tailwind.config = {
+    corePlugins: {
+      preflight: false,
+    }
+  }
+</script>
+<style>
+  /* Modern glassmorphism container styles */
+  .glass-card {
+      background: rgba(255, 255, 255, 0.85);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border: 1px solid rgba(255, 255, 255, 0.3);
+      box-shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.05);
+  }
+  
+  /* Status button transition and explicit active states */
+  .status-btn {
+      transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+  .status-btn:active {
+      transform: scale(0.95);
+  }
+  
+  .selected-Present { background-color: #10B981 !important; color: white !important; border-color: #10B981 !important; }
+  .selected-Absent { background-color: #EF4444 !important; color: white !important; border-color: #EF4444 !important; }
+  .selected-Late { background-color: #F59E0B !important; color: white !important; border-color: #F59E0B !important; }
+
+  /* Ensure the table layout doesn't break preflight-disabled styles */
+  .tw-container table {
+      border-collapse: collapse;
+      width: 100%;
+  }
+  .tw-container th, .tw-container td {
+      padding: 1rem;
+      border-bottom: 1px solid #f3f4f6;
+  }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="tw-container mx-auto p-4 sm:p-6 lg:p-8" style="max-width: 1200px; min-height: 80vh;">
+    <!-- Header Section -->
+    <div class="glass-card rounded-2xl p-6 mb-8 flex flex-col md:flex-row justify-between items-center gap-6">
+        <div>
+            <h1 class="text-3xl font-extrabold text-gray-900 tracking-tight" style="font-family: 'Outfit', sans-serif;">Mark Attendance</h1>
+            <div class="mt-3 flex flex-wrap gap-2 text-sm font-semibold">
+                <span class="bg-blue-100 text-blue-800 px-4 py-1.5 rounded-full flex items-center gap-2"><i class="fa-solid fa-book"></i> {{ session.subject_name }}</span>
+                <span class="bg-purple-100 text-purple-800 px-4 py-1.5 rounded-full flex items-center gap-2"><i class="fa-solid fa-users"></i> Section {{ session.section }}</span>
+                <span class="bg-gray-100 text-gray-800 px-4 py-1.5 rounded-full flex items-center gap-2"><i class="fa-solid fa-clock"></i> {{ session.start_time }} - {{ session.end_time }}</span>
+            </div>
+        </div>
+        <div class="flex flex-wrap gap-3">
+            <button type="button" onclick="markAll('Present')" class="bg-emerald-100 hover:bg-emerald-200 text-emerald-800 font-bold py-2.5 px-5 rounded-xl transition shadow-sm border border-emerald-200 flex items-center gap-2">
+                <i class="fa-solid fa-check-double"></i> Mark All Present
+            </button>
+            <button type="button" onclick="clearAll()" class="bg-gray-100 hover:bg-gray-200 text-gray-700 font-bold py-2.5 px-5 rounded-xl transition shadow-sm border border-gray-200 flex items-center gap-2">
+                <i class="fa-solid fa-eraser"></i> Clear
+            </button>
+        </div>
+    </div>
+
+    <!-- Student List Section -->
+    <form id="attendanceForm" class="space-y-6 relative">
+        <div class="glass-card rounded-2xl overflow-hidden shadow-sm border border-gray-200">
+            <div class="overflow-x-auto">
+                <table class="tw-container">
+                    <thead>
+                        <tr class="bg-gray-50 text-sm font-bold text-gray-600 uppercase tracking-widest text-left">
+                            <th class="w-16 text-center bg-gray-100/50">#</th>
+                            <th class="bg-gray-100/50">Roll Number</th>
+                            <th class="bg-gray-100/50">Student Name</th>
+                            <th class="text-center bg-gray-100/50">Status</th>
+                        </tr>
+                    </thead>
+                    <tbody class="divide-y divide-gray-100 bg-white/40">
+                        {% for student in students %}
+                        <tr class="hover:bg-white/80 transition-colors" data-student-id="{{ student.id }}">
+                            <td class="text-center text-gray-400 font-bold text-sm">{{ loop.index }}</td>
+                            <td class="font-mono text-sm text-gray-700 font-semibold">{{ student.roll_no or student.enrollment }}</td>
+                            <td class="font-bold text-gray-900 text-base">{{ student.name }}</td>
+                            <td class="text-center py-3">
+                                {% set cur_status = record_map.get(student.id, '') %}
+                                <div class="inline-flex rounded-xl border border-gray-200 p-1 bg-gray-50/80 shadow-inner status-group">
+                                    <button type="button" onclick="setStatus(this, 'Present')" 
+                                            class="status-btn px-4 sm:px-6 py-2 rounded-lg text-sm font-bold text-gray-600 hover:bg-white hover:shadow-sm focus:outline-none {% if cur_status == 'Present' %}selected-Present{% endif %}">
+                                        Present
+                                    </button>
+                                    <button type="button" onclick="setStatus(this, 'Absent')" 
+                                            class="status-btn px-4 sm:px-6 py-2 rounded-lg text-sm font-bold text-gray-600 hover:bg-white hover:shadow-sm focus:outline-none {% if cur_status == 'Absent' %}selected-Absent{% endif %}">
+                                        Absent
+                                    </button>
+                                    <button type="button" onclick="setStatus(this, 'Late')" 
+                                            class="status-btn px-4 sm:px-6 py-2 rounded-lg text-sm font-bold text-gray-600 hover:bg-white hover:shadow-sm focus:outline-none {% if cur_status == 'Late' %}selected-Late{% endif %}">
+                                        Late
+                                    </button>
+                                    <input type="hidden" name="status_{{ student.id }}" class="status-input" value="{{ cur_status }}">
+                                </div>
+                            </td>
+                        </tr>
+                        {% else %}
+                        <tr>
+                            <td colspan="4" class="p-12 text-center text-gray-500">
+                                <div class="text-5xl mb-4">📭</div>
+                                <p class="text-xl font-bold text-gray-700">No students found</p>
+                                <p class="text-sm mt-1">There are no students enrolled in Section {{ session.section }} yet.</p>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Sticky Floating Save Button -->
+        <div class="sticky bottom-6 mt-8 flex justify-end px-4 pb-4">
+            <button type="submit" id="saveBtn" class="bg-blue-600 hover:bg-blue-700 text-white font-extrabold py-4 px-10 rounded-2xl shadow-2xl transition-all transform hover:-translate-y-1 hover:shadow-[0_15px_30px_-10px_rgba(37,99,235,0.5)] focus:outline-none flex items-center gap-3 text-lg border-b-4 border-blue-800 active:border-b-0 active:translate-y-1">
+                <i class="fa-solid fa-cloud-arrow-up text-xl"></i>
+                <span>Save Attendance</span>
+            </button>
+        </div>
+    </form>
+</div>
+
+<script>
+    function setStatus(btn, status) {
+        const group = btn.closest('.status-group');
+        const input = group.querySelector('.status-input');
+        
+        // Remove active styling classes
+        const buttons = group.querySelectorAll('.status-btn');
+        buttons.forEach(b => {
+            b.classList.remove('selected-Present', 'selected-Absent', 'selected-Late', 'shadow-sm');
+        });
+        
+        // Toggle selection
+        if (input.value === status) {
+            input.value = '';
+        } else {
+            input.value = status;
+            btn.classList.add('selected-' + status, 'shadow-sm');
+        }
+    }
+
+    function markAll(status) {
+        const rows = document.querySelectorAll('tbody tr[data-student-id]');
+        rows.forEach(row => {
+            const group = row.querySelector('.status-group');
+            if (group) {
+                const targetBtn = Array.from(group.querySelectorAll('.status-btn')).find(b => b.textContent.trim() === status);
+                if (targetBtn) {
+                    const input = group.querySelector('.status-input');
+                    input.value = ''; // Reset to ensure toggle works as setter
+                    setStatus(targetBtn, status);
+                }
+            }
+        });
+    }
+
+    function clearAll() {
+        const rows = document.querySelectorAll('tbody tr[data-student-id]');
+        rows.forEach(row => {
+            const group = row.querySelector('.status-group');
+            if (group) {
+                const input = group.querySelector('.status-input');
+                input.value = '';
+                const buttons = group.querySelectorAll('.status-btn');
+                buttons.forEach(b => {
+                    b.classList.remove('selected-Present', 'selected-Absent', 'selected-Late', 'shadow-sm');
+                });
+            }
+        });
+    }
+
+    document.getElementById('attendanceForm').addEventListener('submit', async function(e) {
+        e.preventDefault();
+        
+        const saveBtn = document.getElementById('saveBtn');
+        const originalText = saveBtn.innerHTML;
+        
+        const records = [];
+        const rows = document.querySelectorAll('tbody tr[data-student-id]');
+        let allFilled = true;
+        
+        rows.forEach(row => {
+            const studentId = row.getAttribute('data-student-id');
+            const input = row.querySelector('.status-input');
+            if (input && input.value) {
+                records.push({
+                    student_id: parseInt(studentId),
+                    status: input.value
+                });
+            } else {
+                allFilled = false;
+            }
+        });
+        
+        if (records.length === 0) {
+            alert('Please mark attendance for at least one student before saving.');
+            return;
+        }
+        
+        if (!allFilled) {
+            const proceed = confirm('Some students do not have their attendance marked. Do you want to save anyway?');
+            if (!proceed) return;
+        }
+
+        // State lock to prevent duplicate submissions
+        saveBtn.disabled = true;
+        saveBtn.innerHTML = '<i class="fa-solid fa-circle-notch fa-spin text-xl"></i><span>Saving...</span>';
+        saveBtn.classList.add('opacity-75', 'cursor-not-allowed', 'transform-none');
+        saveBtn.classList.remove('hover:-translate-y-1', 'active:translate-y-1');
+
+        try {
+            const response = await fetch('/api/attendance/session/{{ session.id }}/bulk-mark', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ records: records })
+            });
+            
+            const result = await response.json();
+            if (result.success) {
+                saveBtn.innerHTML = '<i class="fa-solid fa-check text-xl"></i><span>Attendance Saved!</span>';
+                saveBtn.classList.remove('bg-blue-600', 'hover:bg-blue-700', 'border-blue-800');
+                saveBtn.classList.add('bg-emerald-500', 'border-emerald-700');
+                
+                setTimeout(() => {
+                    // Redirect back to dashboard or records page dynamically
+                    const redirectUrl = "{{ url_for('teacher_dashboard' if session.role == 'teacher' else 'dashboard') }}";
+                    window.location.href = redirectUrl;
+                }, 1500);
+            } else {
+                alert('Error saving attendance: ' + (result.error || 'Unknown error'));
+                resetBtn(saveBtn, originalText);
+            }
+        } catch (error) {
+            alert('Network error while saving attendance. Please try again.');
+            resetBtn(saveBtn, originalText);
+        }
+    });
+
+    function resetBtn(btn, text) {
+        btn.disabled = false;
+        btn.innerHTML = text;
+        btn.classList.remove('opacity-75', 'cursor-not-allowed', 'transform-none');
+        btn.classList.add('hover:-translate-y-1', 'active:translate-y-1');
+    }
+</script>
+{% endblock %}
