@@ -2889,6 +2889,14 @@ try:
 except Exception as e:
     print(f"[INFO] timetable routes registration skipped: {repr(e)}")
 
+# Final safety net: ensure `timetable_home` always exists so templates using
+# url_for('timetable_home') never crash with BuildError in production.
+if "timetable_home" not in app.view_functions:
+    @app.route("/timetable")
+    def timetable_home():
+        flash("Timetable module is unavailable right now. Please try again shortly.", "warning")
+        return redirect(url_for("dashboard"))
+
 @app.route("/admin/notify-low-attendance", methods=["POST"])
 @login_required
 def trigger_low_attendance_scan():
