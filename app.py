@@ -2,6 +2,7 @@ import os
 import re
 from datetime import date, timedelta, datetime
 from io import BytesIO
+import sys
 import sqlite3
 import smtplib
 import ssl
@@ -47,6 +48,53 @@ def _safe_url_build_error_handler(error, endpoint, values):
         pass
 
     return "#"
+
+
+# TIMETABLE MODULE SAFE IMPORT: attempt to import now and log detailed errors.
+_timetable = None
+try:
+    existing_endpoints = set(app.view_functions.keys())
+    import timetable as _timetable
+    new_endpoints = set(app.view_functions.keys()) - existing_endpoints
+    print("TIMETABLE MODULE LOADED: new endpoints registered:", sorted(list(new_endpoints)))
+    print("TIMETABLE BLUEPRINT LOADED")
+    # Verify expected timetable endpoints
+    expected = [
+        "/timetable",
+        "/timetable/manage",
+        "/api/timetable-subjects",
+        "/api/timetable-slots",
+        "/api/current-period",
+        "/api/attendance-periods",
+    ]
+    registered_paths = {rule.rule for rule in app.url_map.iter_rules()}
+    for ep in expected:
+        registered = ep in registered_paths
+        print(f"TIMETABLE ROUTE CHECK: {ep} registered={registered}")
+    try:
+        # Quick DB check: open and close a connection
+        db_test = get_db()
+        try:
+            db_test.execute("SELECT 1")
+        finally:
+            try:
+                db_test.close()
+            except Exception:
+                pass
+        print("TIMETABLE DB CONNECTION OK")
+    except Exception as db_check_err:
+        print("TIMETABLE DB CHECK FAILED:", repr(db_check_err))
+        traceback.print_exc()
+except Exception as imp_err:
+    _timetable = None
+    print("[TIMETABLE LOAD ERROR] Could not import timetable module:", repr(imp_err))
+    exc_type, exc_value, exc_tb = sys.exc_info()
+    try:
+        tb_last = traceback.extract_tb(exc_tb)[-1]
+        print(f"[TIMETABLE LOAD ERROR] exception_type={exc_type.__name__} message={exc_value} file={tb_last.filename} line={tb_last.lineno} in {tb_last.name}")
+    except Exception:
+        pass
+    traceback.print_exc()
 
 # Use a stable SQLite file path relative to the application folder unless a PostgreSQL URL is provided.
 db_env = os.environ.get("DATABASE_URL")
@@ -1779,11 +1827,32 @@ def dashboard():
         current_active_period = None
         upcoming_timetable = []
         try:
-            import timetable as _timetable
-            current_active_period = _timetable.get_global_active_class(db)
-            upcoming_timetable = _timetable.get_upcoming_classes(db, "", "", limit=4)
-        except Exception as timetable_err:
-            print(f"[dashboard] timetable lookup failed: {repr(timetable_err)}")
+            # Use module imported at startup if available, else attempt import safely
+            if '_timetable' not in globals() or _timetable is None:
+                try:
+                    import timetable as _timetable
+                    print("[dashboard] timetable module imported at lookup time")
+                except Exception as imp_err:
+                    _timetable = None
+                    print("[dashboard] timetable import failed:", repr(imp_err))
+                    traceback.print_exc()
+            if _timetable:
+                try:
+                    current_active_period = _timetable.get_global_active_class(db)
+                    upcoming_timetable = _timetable.get_upcoming_classes(db, "", "", limit=4)
+                except Exception as timetable_err:
+                    print(f"[dashboard] timetable function call failed: {repr(timetable_err)}")
+                    traceback.print_exc()
+                    current_active_period = None
+                    upcoming_timetable = []
+            else:
+                current_active_period = None
+                upcoming_timetable = []
+        except Exception as e:
+            print(f"[dashboard] unexpected timetable error: {repr(e)}")
+            traceback.print_exc()
+            current_active_period = None
+            upcoming_timetable = []
 
         # Recent activity feed (last 10 attendance records)
         recent_activity = _safe_rows("""
