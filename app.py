@@ -2978,19 +2978,44 @@ def mark_attendance():
 
     if branch_id:
         try:
-            subjects = db.execute(
-                f"""
-                SELECT DISTINCT
-                    COALESCE(s.id, te.subject_id) AS id,
-                    COALESCE(s.name, te.subject_name, '') AS name
-                FROM timetable_entries te
-                LEFT JOIN subjects s ON te.subject_id = s.id
-                WHERE te.branch_id = {placeholder}
-                  AND COALESCE(s.name, te.subject_name, '') <> ''
-                ORDER BY name
-                """,
-                (branch_id,),
-            ).fetchall()
+            # Resolve numeric or token branch and allow matching timetable entries stored
+            # under the base branch (e.g., 'CSE') as well as specific section branches
+            branch_id_val = _coerce_int(branch_id)
+            branch_ids_to_match = []
+            if branch_id_val is not None:
+                branch_ids_to_match = [branch_id_val]
+                try:
+                    # If the branch name includes a section (CSE-A), also include base branch id
+                    row = db.execute(f"SELECT name FROM branches WHERE id = {placeholder}", (branch_id_val,)).fetchone()
+                    br_name = row_get(row, 'name') if row else None
+                    if br_name:
+                        base_branch, sec = split_branch_section(br_name)
+                        if base_branch:
+                            base_row = db.execute(f"SELECT id FROM branches WHERE UPPER(name) = {placeholder}", (base_branch,)).fetchone()
+                            base_id = row_get(base_row, 'id') if base_row else None
+                            if base_id and base_id not in branch_ids_to_match:
+                                branch_ids_to_match.append(base_id)
+                except Exception:
+                    pass
+            else:
+                # Branch provided as string token like 'CSE-A' or 'CSE'
+                try:
+                    br_token, sec_token = split_branch_section(branch_id)
+                    if br_token:
+                        row = db.execute(f"SELECT id FROM branches WHERE UPPER(name) = {placeholder}", (br_token,)).fetchone()
+                        if row:
+                            branch_ids_to_match.append(row_get(row, 'id'))
+                except Exception:
+                    pass
+
+            if branch_ids_to_match:
+                placeholders = ", ".join([placeholder] * len(branch_ids_to_match))
+                subjects = db.execute(
+                    f"SELECT DISTINCT COALESCE(s.id, te.subject_id) AS id, COALESCE(s.name, te.subject_name, '') AS name FROM timetable_entries te LEFT JOIN subjects s ON te.subject_id = s.id WHERE te.branch_id IN ({placeholders}) AND COALESCE(s.name, te.subject_name, '') <> '' ORDER BY name",
+                    tuple(branch_ids_to_match),
+                ).fetchall()
+            else:
+                subjects = []
         except Exception:
             subjects = db.execute(
                 f"SELECT * FROM subjects WHERE branch_id = {placeholder} ORDER BY name", (branch_id,)
