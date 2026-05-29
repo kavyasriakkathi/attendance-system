@@ -4,8 +4,13 @@ sys.path.insert(0, os.getcwd())
 from app import get_db
 import timetable
 
-docx = os.path.join(os.getcwd(), 'uploads', 'timetable_upload.docx')
-pdf = os.path.join(os.getcwd(), 'uploads', 'CSE-A.pdf')
+upload_dir = os.path.join(os.getcwd(), 'uploads')
+docx_candidates = [
+    os.path.join(upload_dir, 'B.TECH I-2 TIMETABLE.docx'),
+    os.path.join(upload_dir, 'timetable_upload.docx'),
+]
+docx = next((path for path in docx_candidates if os.path.exists(path)), docx_candidates[0])
+pdf = os.path.join(upload_dir, 'CSE-A.pdf')
 print('DOCX path:', docx)
 print('PDF path:', pdf)
 

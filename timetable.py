@@ -167,6 +167,8 @@ def _create_normalized_sql(db):
                 end_time TEXT,
                 subject_id INTEGER,
                 teacher_id INTEGER,
+                subject_name TEXT,
+                faculty_name TEXT,
                 is_lab INTEGER DEFAULT 0,
                 room TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -186,6 +188,8 @@ def _create_normalized_sql(db):
                 end_time TEXT,
                 subject_id INTEGER,
                 teacher_id INTEGER,
+                subject_name TEXT,
+                faculty_name TEXT,
                 is_lab INTEGER DEFAULT 0,
                 room TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -225,6 +229,26 @@ def ensure_timetable_tables(db):
         db.commit()
     except Exception:
         pass
+
+    # Backfill text fallback columns if an older schema is already present.
+    try:
+        cols = set()
+        if _is_postgres_db(db):
+            rows = _db_execute(db, "SELECT column_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'timetable_entries'").fetchall()
+            cols = {_clean_text(row[0] if not hasattr(row, 'keys') else row['column_name']).lower() for row in rows}
+        else:
+            rows = _db_execute(db, "PRAGMA table_info(timetable_entries)").fetchall()
+            cols = {_clean_text(row[1] if not hasattr(row, 'keys') else row['name']).lower() for row in rows}
+        if 'subject_name' not in cols:
+            _db_execute(db, "ALTER TABLE timetable_entries ADD COLUMN subject_name TEXT")
+        if 'faculty_name' not in cols:
+            _db_execute(db, "ALTER TABLE timetable_entries ADD COLUMN faculty_name TEXT")
+        try:
+            db.commit()
+        except Exception:
+            pass
+    except Exception:
+        logger.exception("Failed to ensure fallback timetable columns")
 
 
 def _clean_text(value) -> str:
@@ -275,6 +299,22 @@ def _normalize_timetable_branch_name(value: str, row_text: str = "") -> str:
     return ""
 
 
+def split_branch_section(value: str) -> tuple[str, str]:
+    """Split branch-section values like CSE-A, cse a, or CSEA."""
+    text = _clean_text(value)
+    if not text:
+        return "", ""
+    text = re.sub(r"[\s._]+", "-", text)
+    text = re.sub(r"-+", "-", text).strip("-")
+    parts = [part for part in re.split(r"[-/]+", text) if part]
+    if len(parts) >= 2:
+        return parts[0].upper(), parts[-1].upper()
+    match = re.fullmatch(r"([A-Za-z]{2,5})([A-Za-z0-9]{1,4})", text)
+    if match:
+        return match.group(1).upper(), match.group(2).upper()
+    return text.upper(), ""
+
+
 def _normalize_timetable_section_name(value: str, branch_value: str = "", row_text: str = "") -> str:
     text = _clean_text(value)
     if not text:
@@ -286,6 +326,10 @@ def _normalize_timetable_section_name(value: str, branch_value: str = "", row_te
     text = re.sub(r"-+", "-", text).strip("-")
     if not text:
         return ""
+
+    branch_part, section_part = split_branch_section(text)
+    if branch_part and section_part and branch_part in _ACADEMIC_DEPARTMENT_CODES:
+        return f"{branch_part}-{section_part}"
 
     match = re.fullmatch(r"(CSM|CSE|ECE|EEE|IT|MECH|CIVIL|AIML|AIDS|DS)[- ]([A-Z0-9]{1,4})", text, flags=re.IGNORECASE)
     if match:
@@ -2909,6 +2953,22 @@ def _build_subject_lookup_index(db) -> Dict[str, int]:
         for variant in _subject_lookup_variants(subject_name):
             if variant not in index:
                 index[variant] = int(subject_id)
+
+    try:
+        alias_rows = _db_execute(db, "SELECT alias, canonical_name FROM subject_aliases").fetchall()
+    except Exception:
+        alias_rows = []
+    if alias_rows:
+        subject_rows = { _normalize_subject_name(row[1] if not hasattr(row, "keys") else row["name"]): int(row[0] if not hasattr(row, "keys") else row["id"]) for row in rows }
+        for row in alias_rows:
+            alias = _normalize_subject_name(row[0] if not hasattr(row, "keys") else row["alias"])
+            canonical = _normalize_subject_name(row[1] if not hasattr(row, "keys") else row["canonical_name"])
+            subject_id = subject_rows.get(canonical)
+            if subject_id is None:
+                continue
+            for variant in _subject_lookup_variants(alias) + _subject_lookup_variants(canonical):
+                if variant and variant not in index:
+                    index[variant] = subject_id
     return index
 
 
@@ -3283,6 +3343,8 @@ def import_slots_streaming(db, slots_iter: Iterable[Dict]):
                 "day": row["day"],
                 "start_time": row["start_time"],
                 "end_time": row["end_time"],
+                "subject_name": row["subject_name"],
+                "faculty_name": row["faculty_name"],
                 "subject_id": subject_id,
                 "teacher_id": teacher_id,
                 "is_lab": row["is_lab"],
@@ -3309,8 +3371,8 @@ def import_slots_streaming(db, slots_iter: Iterable[Dict]):
             try:
                 cur = _db_execute(
                     db,
-                    _insert_ignore_sql(db, "timetable_entries", ["branch_id", "section", "semester", "day", "start_time", "end_time", "subject_id", "teacher_id", "is_lab", "room"]),
-                    (norm_row["branch_id"], norm_row["section"], norm_row["semester"], norm_row["day"], norm_row["start_time"], norm_row["end_time"], norm_row["subject_id"], norm_row["teacher_id"], norm_row["is_lab"], norm_row["room"]),
+                    _insert_ignore_sql(db, "timetable_entries", ["branch_id", "section", "semester", "day", "start_time", "end_time", "subject_id", "teacher_id", "subject_name", "faculty_name", "is_lab", "room"]),
+                    (norm_row["branch_id"], norm_row["section"], norm_row["semester"], norm_row["day"], norm_row["start_time"], norm_row["end_time"], norm_row["subject_id"], norm_row["teacher_id"], norm_row["subject_name"], norm_row["faculty_name"], norm_row["is_lab"], norm_row["room"]),
                 )
                 if hasattr(cur, "rowcount") and int(cur.rowcount or 0) == 0:
                     normalized_counters["skipped_total"] += 1

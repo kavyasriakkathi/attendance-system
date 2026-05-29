@@ -27,7 +27,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
     function slotLabel(slot) {
         const subject = slot.subject_name || '';
-        const faculty = slot.faculty_name || '';
+        const faculty = slot.faculty_name || slot.faculty || '';
         const room = slot.room || '';
         return `${slot.start_time} - ${slot.end_time}${subject ? ` (${subject})` : ''}${faculty ? ` • ${faculty}` : ''}${room ? ` • Room ${room}` : ''}`;
     }
@@ -41,7 +41,7 @@ document.addEventListener('DOMContentLoaded', function() {
         badgesWrap.innerHTML = `
             <span class="badge">Period: ${slot.period}</span>
             <span class="badge">Subject: ${slot.subject_name || ''}</span>
-            <span class="badge">Faculty: ${slot.faculty_name || ''}</span>
+            <span class="badge">Faculty: ${slot.faculty_name || slot.faculty || ''}</span>
             <span class="badge">Room: ${slot.room || ''}</span>
             <span class="badge">${slot.start_time || ''} - ${slot.end_time || ''}</span>
         `;
@@ -91,7 +91,6 @@ document.addEventListener('DOMContentLoaded', function() {
         const branch = branchSelect ? branchSelect.value.trim() : '';
         const subject = subjectSelect ? subjectSelect.value.trim() : '';
         const date = dateInput ? dateInput.value.trim() : '';
-        const section = sectionInput ? sectionInput.value.trim() : '';
         if (!branch || !subject || !date) {
             renderPeriods({ slots: [] });
             return;
@@ -102,7 +101,6 @@ document.addEventListener('DOMContentLoaded', function() {
         if (periodWrap) periodWrap.innerHTML = '<div class="slot-empty">Loading timetable...</div>';
 
         const query = new URLSearchParams({ branch_id: branch, subject_id: subject, date });
-        if (section) query.set('section', section);
 
         fetch('/api/timetable-slots?' + query.toString())
             .then(response => response.json())
@@ -152,6 +150,9 @@ document.head.appendChild(style);
     <h1><i class="fa-solid fa-calendar-check"></i> Mark Attendance</h1>
     <p class="notice">Select a branch, subject, and date to manage attendance.</p>
     <form method="get" class="form-row">
+        {% if section %}
+        <input type="hidden" name="section" value="{{ section }}" />
+        {% endif %}
         <div>
             <label>Branch</label>
             <select name="branch_id" required onchange="this.form.submit()">
@@ -167,7 +168,7 @@ document.head.appendChild(style);
             <select name="subject_id" required onchange="this.form.submit()">
                 <option value="">Choose subject</option>
                 {% for subject in subjects %}
-                <option value="{{ subject.id }}" {% if subject_id and subject.id|string == subject_id|string %}selected{% endif %}>{{ subject.name }}</option>
+                <option value="{{ subject.id if subject.id is not none else subject.name }}" {% if subject_id and (subject.id|string == subject_id|string or subject.name|string == subject_id|string) %}selected{% endif %}>{{ subject.name }}</option>
                 {% endfor %}
             </select>
         </div>
@@ -187,13 +188,13 @@ document.head.appendChild(style);
                 {% if selected_period %}
                 <span class="badge">Period: {{ selected_period.period }}</span>
                 <span class="badge">Subject: {{ selected_period.subject_name }}</span>
-                <span class="badge">Faculty: {{ selected_period.faculty }}</span>
+                <span class="badge">Faculty: {{ selected_period.faculty_name or selected_period.faculty or '' }}</span>
                 <span class="badge">Room: {{ selected_period.room }}</span>
                 <span class="badge">{{ selected_period.start_time }} - {{ selected_period.end_time }}</span>
                 {% elif current_active_period %}
                 <span class="badge">Period: {{ current_active_period.period }}</span>
                 <span class="badge">Subject: {{ current_active_period.subject_name }}</span>
-                <span class="badge">Faculty: {{ current_active_period.faculty }}</span>
+                <span class="badge">Faculty: {{ current_active_period.faculty_name or current_active_period.faculty or '' }}</span>
                 <span class="badge">Room: {{ current_active_period.room }}</span>
                 <span class="badge">{{ current_active_period.start_time }} - {{ current_active_period.end_time }}</span>
                 {% else %}

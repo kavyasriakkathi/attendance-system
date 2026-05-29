@@ -251,6 +251,83 @@ SUBJECT_ALIASES = {
 }
 
 
+DEFAULT_SUBJECT_ALIAS_ROWS = [
+    ("BEE", "Basic Electrical Engineering"),
+    ("ODEVC", "Ordinary Differential Equations and Vector Calculus"),
+    ("DS", "Data Structures"),
+    ("PHYSICS", "Advanced Engineering Physics"),
+    ("CHEMISTRY", "Engineering Chemistry"),
+]
+
+
+def _ensure_subject_alias_table(db):
+    placeholder = get_placeholder()
+    try:
+        db.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS subject_aliases (
+                id {'SERIAL PRIMARY KEY' if str(app.config.get('DATABASE', '')).startswith('postgres') else 'INTEGER PRIMARY KEY AUTOINCREMENT'},
+                alias TEXT UNIQUE NOT NULL,
+                canonical_name TEXT NOT NULL
+            )
+            """
+        )
+        for alias, canonical_name in DEFAULT_SUBJECT_ALIAS_ROWS:
+            if str(app.config.get("DATABASE", "")).startswith("postgres"):
+                db.execute(
+                    f"INSERT INTO subject_aliases (alias, canonical_name) VALUES ({placeholder}, {placeholder}) ON CONFLICT (alias) DO UPDATE SET canonical_name = EXCLUDED.canonical_name",
+                    (alias, canonical_name),
+                )
+            else:
+                db.execute(
+                    f"INSERT OR REPLACE INTO subject_aliases (alias, canonical_name) VALUES ({placeholder}, {placeholder})",
+                    (alias, canonical_name),
+                )
+        try:
+            db.commit()
+        except Exception:
+            pass
+    except Exception:
+        print("[schema] subject_aliases table initialization failed")
+
+
+def _load_subject_alias_map(db):
+    alias_map = {key: list(values) for key, values in SUBJECT_ALIASES.items()}
+    try:
+        rows = db.execute("SELECT alias, canonical_name FROM subject_aliases").fetchall()
+    except Exception:
+        rows = []
+    for row in rows:
+        alias = _normalize_lookup_key(row_get(row, "alias"))
+        canonical = str(row_get(row, "canonical_name") or "").strip()
+        if not alias or not canonical:
+            continue
+        alias_map.setdefault(alias, [])
+        if canonical not in alias_map[alias]:
+            alias_map[alias].append(canonical)
+    return alias_map
+
+
+def _ensure_timetable_entry_text_columns(db):
+    try:
+        cols = {name.lower() for name in _table_columns(db, "timetable_entries")}
+    except Exception:
+        cols = set()
+    if not cols:
+        return
+    try:
+        if "subject_name" not in cols:
+            db.execute("ALTER TABLE timetable_entries ADD COLUMN subject_name TEXT")
+        if "faculty_name" not in cols:
+            db.execute("ALTER TABLE timetable_entries ADD COLUMN faculty_name TEXT")
+        try:
+            db.commit()
+        except Exception:
+            pass
+    except Exception:
+        print("[schema] timetable_entries fallback column initialization skipped")
+
+
 def split_branch_section(value):
     """Split a combined branch-section string into (branch, section).
 
@@ -777,6 +854,14 @@ def init_db(db=None):
         """)
 
         db.execute("""
+        CREATE TABLE IF NOT EXISTS subject_aliases (
+            id SERIAL PRIMARY KEY,
+            alias TEXT UNIQUE NOT NULL,
+            canonical_name TEXT NOT NULL
+        );
+        """)
+
+        db.execute("""
         CREATE UNIQUE INDEX IF NOT EXISTS idx_attendance_student_subject_date
         ON attendance(student_id, subject_id, date);
         """)
@@ -853,6 +938,12 @@ def init_db(db=None):
             value TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS subject_aliases (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            alias TEXT UNIQUE NOT NULL,
+            canonical_name TEXT NOT NULL
+        );
+
         CREATE UNIQUE INDEX IF NOT EXISTS idx_attendance_student_subject_date
         ON attendance(student_id, subject_id, date);
 
@@ -879,6 +970,9 @@ def init_db(db=None):
             UNIQUE(session_id, student_id)
         );
         """)
+
+    _ensure_subject_alias_table(db)
+    _ensure_timetable_entry_text_columns(db)
 
     # ✅ Admin check
     admin = db.execute(
@@ -2291,7 +2385,7 @@ def _resolve_attendance_periods(db, branch_id="", subject_id="", selected_date=N
     placeholder = get_placeholder()
 
     base_sql = (
-        "SELECT te.*, COALESCE(s.name, '') AS subject_name, COALESCE(t.name, '') AS faculty_name, "
+        "SELECT te.*, COALESCE(s.name, te.subject_name, '') AS subject_name, COALESCE(t.name, te.faculty_name, '') AS faculty_name, "
         "COALESCE(b.name, '') AS branch_name "
         "FROM timetable_entries te "
         "LEFT JOIN subjects s ON te.subject_id = s.id "
@@ -2474,6 +2568,8 @@ def _resolve_timetable_slots(db, branch_id="", subject_id="", selected_date=None
             subject_name = row_get(subject_row, "name", "") or ""
     except Exception:
         subject_name = ""
+    if not subject_name and subject_id and subject_id_val is None:
+        subject_name = str(subject_id).strip()
 
     print(
         "[attendance] resolve slots",
@@ -2498,22 +2594,25 @@ def _resolve_timetable_slots(db, branch_id="", subject_id="", selected_date=None
         return str(v).strip().lower().replace(' ', '').replace('-', '')
 
     def split_branch_section(value):
+        """Split branch/section strings like CSE-A, cse a, or CSEA."""
         if not value:
             return None, None
-        parts = re.split(r"[^A-Za-z0-9]+", value)
+        text = re.sub(r"[\s._]+", "-", str(value).strip())
+        text = re.sub(r"-+", "-", text).strip("-")
+        parts = [part for part in re.split(r"[-/]+", text) if part]
         if len(parts) >= 2:
-            return parts[0], parts[-1]
-        # try dash split
-        if '-' in value:
-            a, b = value.split('-', 1)
-            return a.strip(), b.strip()
-        return value, None
+            return parts[0].upper(), parts[-1].upper()
+        if re.fullmatch(r"[A-Za-z]{3,6}[A-Za-z0-9]{1,3}", text):
+            branch = text[:3].upper()
+            section = text[3:].upper()
+            if branch and section:
+                return branch, section
+        return text.upper(), None
 
-    # Subject alias map: common short forms -> possible long names
-    SUBJECT_ALIAS_MAP = {
-        'bee': ['basic electrical engineering', 'basic electricals', 'basic electrical'],
-        'odevc': ['ordinary differential equations and vector calculus', 'ordinary differential equations', 'vector calculus'],
-        'ds': ['data structures', 'data structure'],
+    subject_alias_map = _load_subject_alias_map(db)
+    normalized_subject_alias_map = {
+        _normalize_for_match(alias): [canonical for canonical in canonicals if canonical]
+        for alias, canonicals in subject_alias_map.items()
     }
 
     # Build base SQL with normalized day filter and branch
@@ -2522,7 +2621,7 @@ def _resolve_timetable_slots(db, branch_id="", subject_id="", selected_date=None
     sql = (
         "SELECT te.id AS timetable_entry_id, te.branch_id, te.section, te.subject_id, te.teacher_id, te.day, "
         "te.start_time, te.end_time, te.room, COALESCE(s.name, '') AS subject_name, "
-        "COALESCE(t.name, '') AS faculty_name, COALESCE(b.name, '') AS branch_name "
+        "COALESCE(t.name, te.faculty_name, '') AS faculty_name, COALESCE(b.name, '') AS branch_name "
         "FROM timetable_entries te "
         "LEFT JOIN subjects s ON te.subject_id = s.id "
         "LEFT JOIN teachers t ON te.teacher_id = t.id "
@@ -2538,11 +2637,11 @@ def _resolve_timetable_slots(db, branch_id="", subject_id="", selected_date=None
     normalized_subject = _normalize_for_match(subject_name or (subject_id or ""))
     if subject_id_val is not None:
         # match by subject id primarily
-        sql += f" AND (te.subject_id = {placeholder} OR { _sql_norm_expr('s.name') } LIKE ? )"
+        sql += f" AND (te.subject_id = {placeholder} OR { _sql_norm_expr('COALESCE(s.name, te.subject_name, \'\')') } LIKE ? )"
         params.append(subject_id_val)
         params.append(f"%{normalized_subject}%")
     elif subject_name:
-        sql += f" AND ({ _sql_norm_expr('s.name') } LIKE ? )"
+        sql += f" AND ({ _sql_norm_expr('COALESCE(s.name, te.subject_name, \'\')') } LIKE ? )"
         params.append(f"%{normalized_subject}%")
 
     # Section provided: try to match normalized
@@ -2564,7 +2663,7 @@ def _resolve_timetable_slots(db, branch_id="", subject_id="", selected_date=None
     # Fallbacks: if no rows and subject alias exists, try alias names
     if not rows and subject_name:
         key = _normalize_for_match(subject_name)
-        for alias, fulls in SUBJECT_ALIAS_MAP.items():
+        for alias, fulls in normalized_subject_alias_map.items():
             if key == alias or key == alias.lower():
                 for fullname in fulls:
                     try_sql = sql.replace(f"%{normalized_subject}%", f"%{_normalize_for_match(fullname)}%")
@@ -2625,7 +2724,13 @@ def _resolve_timetable_slots(db, branch_id="", subject_id="", selected_date=None
 
         if selected_subject_variants and not _subject_matches(selected_subject_key, row_subject_name):
             row_subject_id = row_get(row, "subject_id")
-            if str(row_subject_id) != str(subject_id_val):
+            row_subject_norm = normalize_text(row_subject_name)
+            alias_hit = False
+            for alias, fulls in normalized_subject_alias_map.items():
+                if row_subject_norm == alias or row_subject_norm in {_normalize_for_match(full) for full in fulls}:
+                    alias_hit = True
+                    break
+            if str(row_subject_id) != str(subject_id_val) and not alias_hit:
                 continue
 
         # Score subject match using priority: exact normalized, alias, partial, token similarity
@@ -2635,7 +2740,7 @@ def _resolve_timetable_slots(db, branch_id="", subject_id="", selected_date=None
         if sel_norm_subject and row_norm_subject and sel_norm_subject == row_norm_subject:
             score += 100
         # alias match
-        for alias, fulls in SUBJECT_ALIASES.items():
+        for alias, fulls in normalized_subject_alias_map.items():
             if sel_norm_subject == alias or sel_norm_subject == normalize_text(alias):
                 for fullname in fulls:
                     if normalize_text(fullname) == row_norm_subject:
@@ -2830,13 +2935,32 @@ def mark_attendance():
     next_date = (current_date_obj + timedelta(days=1)).isoformat()
 
     if branch_id:
-        subjects = db.execute(
-            f"SELECT * FROM subjects WHERE branch_id = {placeholder} ORDER BY name", (branch_id,)
-        ).fetchall()
+        try:
+            subjects = db.execute(
+                f"""
+                SELECT DISTINCT
+                    COALESCE(s.id, te.subject_id) AS id,
+                    COALESCE(s.name, te.subject_name, '') AS name
+                FROM timetable_entries te
+                LEFT JOIN subjects s ON te.subject_id = s.id
+                WHERE te.branch_id = {placeholder}
+                  AND COALESCE(s.name, te.subject_name, '') <> ''
+                ORDER BY name
+                """,
+                (branch_id,),
+            ).fetchall()
+        except Exception:
+            subjects = db.execute(
+                f"SELECT * FROM subjects WHERE branch_id = {placeholder} ORDER BY name", (branch_id,)
+            ).fetchall()
 
     timetable_context = {"slots": [], "selected_slot": None, "active_slot": None, "has_schedule": False, "is_today": False, "current_time": "", "weekday": "", "unique_slot": False}
     if branch_id and subject_id:
-        timetable_context = _resolve_timetable_slots(db, branch_id, subject_id, selected_date, section=section, period=period)
+        try:
+            timetable_context = _resolve_timetable_slots(db, branch_id, subject_id, selected_date, section=section, period=period)
+        except Exception as exc:
+            print(f"[attendance] timetable resolve failed: {repr(exc)}")
+            timetable_context = {"slots": [], "selected_slot": None, "active_slot": None, "has_schedule": False, "is_today": False, "current_time": "", "weekday": "", "unique_slot": False}
         if not period and timetable_context["selected_slot"]:
             period = str(timetable_context["selected_slot"].get("period") or "")
         elif period and timetable_context["selected_slot"]:
@@ -2865,7 +2989,11 @@ def mark_attendance():
             selected_date_obj = today_date
 
         selected_date = selected_date_obj.isoformat()
-        timetable_context = _resolve_timetable_slots(db, branch_id, subject_id, selected_date, section=section, period=period)
+        try:
+            timetable_context = _resolve_timetable_slots(db, branch_id, subject_id, selected_date, section=section, period=period)
+        except Exception as exc:
+            print(f"[attendance] timetable resolve failed on POST: {repr(exc)}")
+            timetable_context = {"slots": [], "selected_slot": None, "active_slot": None, "has_schedule": False, "is_today": False, "current_time": "", "weekday": "", "unique_slot": False}
         selected_slot = timetable_context["selected_slot"]
         valid_periods = {str(item.get("period")) for item in timetable_context["slots"]}
 
@@ -3018,7 +3146,7 @@ def api_current_period():
 
     # Try to find an active slot (start_time <= now <= end_time)
     sql = (
-        "SELECT te.*, s.name AS subject_name, t.name AS teacher_name, te.branch_id "
+        "SELECT te.*, COALESCE(s.name, te.subject_name, '') AS subject_name, COALESCE(t.name, te.faculty_name, '') AS teacher_name, te.branch_id "
         "FROM timetable_entries te LEFT JOIN subjects s ON te.subject_id = s.id LEFT JOIN teachers t ON te.teacher_id = t.id "
         "WHERE LOWER(TRIM(COALESCE(te.day,''))) = LOWER(TRIM(?)) AND te.start_time <= ? AND te.end_time >= ?"
     )
@@ -3031,7 +3159,7 @@ def api_current_period():
             sql += f" AND te.subject_id = {placeholder}"
             params.append(int(subject_q))
         else:
-            sql += " AND LOWER(TRIM(COALESCE(te.subject_name,''))) = LOWER(TRIM(?))"
+            sql += " AND LOWER(TRIM(COALESCE(s.name, te.subject_name, ''))) = LOWER(TRIM(?))"
             params.append(subject_q)
     sql += " ORDER BY te.start_time LIMIT 1"
 
@@ -3040,7 +3168,7 @@ def api_current_period():
     # Fallback: if no active slot, find the next upcoming slot today matching filters
     if not row:
         sql2 = (
-            "SELECT te.*, s.name AS subject_name, t.name AS teacher_name, te.branch_id "
+            "SELECT te.*, COALESCE(s.name, te.subject_name, '') AS subject_name, COALESCE(t.name, te.faculty_name, '') AS teacher_name, te.branch_id "
             "FROM timetable_entries te LEFT JOIN subjects s ON te.subject_id = s.id LEFT JOIN teachers t ON te.teacher_id = t.id "
             "WHERE LOWER(TRIM(COALESCE(te.day,''))) = LOWER(TRIM(?))"
         )
@@ -3053,7 +3181,7 @@ def api_current_period():
                 sql2 += f" AND te.subject_id = {placeholder}"
                 params2.append(int(subject_q))
             else:
-                sql2 += " AND LOWER(TRIM(COALESCE(te.subject_name,''))) = LOWER(TRIM(?))"
+                sql2 += " AND LOWER(TRIM(COALESCE(s.name, te.subject_name, ''))) = LOWER(TRIM(?))"
                 params2.append(subject_q)
         sql2 += " AND te.start_time >= ? ORDER BY te.start_time LIMIT 1"
         params2.append(now_time)
@@ -3123,7 +3251,11 @@ def api_timetable_slots():
     period = request.args.get("period") or ""
     db = get_db()
     try:
-        context = _resolve_timetable_slots(db, branch_id, subject_id, selected_date, section=section, period=period)
+        try:
+            context = _resolve_timetable_slots(db, branch_id, subject_id, selected_date, section=section, period=period)
+        except Exception as exc:
+            print(f"[attendance] api_timetable_slots resolve failed: {repr(exc)}")
+            context = {"slots": [], "selected_slot": None, "active_slot": None, "has_schedule": False, "is_today": False, "current_time": "", "weekday": "", "unique_slot": False}
         return jsonify({
             "slots": context["slots"],
             "selected_slot": context["selected_slot"],
