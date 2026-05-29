@@ -25,6 +25,14 @@ from werkzeug.utils import secure_filename
 app = Flask(__name__)
 # Email sending is handled by the `send_email` helper defined later in the file.
 
+@app.context_processor
+def inject_endpoint_helpers():
+    """Expose a safe endpoint checker for templates."""
+    return {
+        "has_endpoint": lambda endpoint_name: endpoint_name in app.view_functions,
+    }
+
+
 
 def _safe_url_build_error_handler(error, endpoint, values):
     """Prevent template crashes when optional endpoints are unavailable.
@@ -3200,20 +3208,20 @@ def api_current_period():
 
     # Try to find an active slot (start_time <= now <= end_time)
     sql = (
-        "SELECT te.*, COALESCE(s.name, te.subject_name, '') AS subject_name, COALESCE(t.name, te.faculty_name, '') AS teacher_name, te.branch_id "
-        "FROM timetable_entries te LEFT JOIN subjects s ON te.subject_id = s.id LEFT JOIN teachers t ON te.teacher_id = t.id "
-        "WHERE LOWER(TRIM(COALESCE(te.day,''))) = LOWER(TRIM(?)) AND te.start_time <= ? AND te.end_time >= ?"
+        f"SELECT te.*, COALESCE(s.name, te.subject_name, '') AS subject_name, COALESCE(t.name, te.faculty_name, '') AS teacher_name, te.branch_id "
+        f"FROM timetable_entries te LEFT JOIN subjects s ON te.subject_id = s.id LEFT JOIN teachers t ON te.teacher_id = t.id "
+        f"WHERE LOWER(TRIM(COALESCE(te.day,''))) = LOWER(TRIM({placeholder})) AND te.start_time <= {placeholder} AND te.end_time >= {placeholder}"
     )
     params = [day, now_time, now_time]
     if section:
-        sql += " AND LOWER(TRIM(COALESCE(te.section,''))) = LOWER(TRIM(?))"
+        sql += f" AND LOWER(TRIM(COALESCE(te.section,''))) = LOWER(TRIM({placeholder}))"
         params.append(section)
     if subject_q:
         if subject_q.isdigit():
             sql += f" AND te.subject_id = {placeholder}"
             params.append(int(subject_q))
         else:
-            sql += " AND LOWER(TRIM(COALESCE(s.name, te.subject_name, ''))) = LOWER(TRIM(?))"
+            sql += f" AND LOWER(TRIM(COALESCE(s.name, te.subject_name, ''))) = LOWER(TRIM({placeholder}))"
             params.append(subject_q)
     sql += " ORDER BY te.start_time LIMIT 1"
 
@@ -3222,22 +3230,22 @@ def api_current_period():
     # Fallback: if no active slot, find the next upcoming slot today matching filters
     if not row:
         sql2 = (
-            "SELECT te.*, COALESCE(s.name, te.subject_name, '') AS subject_name, COALESCE(t.name, te.faculty_name, '') AS teacher_name, te.branch_id "
-            "FROM timetable_entries te LEFT JOIN subjects s ON te.subject_id = s.id LEFT JOIN teachers t ON te.teacher_id = t.id "
-            "WHERE LOWER(TRIM(COALESCE(te.day,''))) = LOWER(TRIM(?))"
+            f"SELECT te.*, COALESCE(s.name, te.subject_name, '') AS subject_name, COALESCE(t.name, te.faculty_name, '') AS teacher_name, te.branch_id "
+            f"FROM timetable_entries te LEFT JOIN subjects s ON te.subject_id = s.id LEFT JOIN teachers t ON te.teacher_id = t.id "
+            f"WHERE LOWER(TRIM(COALESCE(te.day,''))) = LOWER(TRIM({placeholder}))"
         )
         params2 = [day]
         if section:
-            sql2 += " AND LOWER(TRIM(COALESCE(te.section,''))) = LOWER(TRIM(?))"
+            sql2 += f" AND LOWER(TRIM(COALESCE(te.section,''))) = LOWER(TRIM({placeholder}))"
             params2.append(section)
         if subject_q:
             if subject_q.isdigit():
                 sql2 += f" AND te.subject_id = {placeholder}"
                 params2.append(int(subject_q))
             else:
-                sql2 += " AND LOWER(TRIM(COALESCE(s.name, te.subject_name, ''))) = LOWER(TRIM(?))"
+                sql2 += f" AND LOWER(TRIM(COALESCE(s.name, te.subject_name, ''))) = LOWER(TRIM({placeholder}))"
                 params2.append(subject_q)
-        sql2 += " AND te.start_time >= ? ORDER BY te.start_time LIMIT 1"
+        sql2 += f" AND te.start_time >= {placeholder} ORDER BY te.start_time LIMIT 1"
         params2.append(now_time)
         row = db.execute(sql2, tuple(params2)).fetchone()
 
@@ -3293,6 +3301,59 @@ def api_current_period():
 
     db.close()
     return jsonify(resp)
+
+
+@app.route("/api/timetable-subjects")
+@login_required
+def api_timetable_subjects():
+    branch_id = request.args.get("branch_id") or ""
+    db = None
+    try:
+        db = get_db()
+        subjects = _get_timetable_subjects_for_branch(db, branch_id) if branch_id else []
+        return jsonify({"subjects": subjects, "count": len(subjects)})
+    except Exception as e:
+        print(f"[api_timetable_subjects] ERROR: {repr(e)}")
+        return jsonify({"subjects": [], "count": 0, "error": str(e)}), 500
+    finally:
+        if db:
+            try:
+                db.close()
+            except Exception:
+                pass
+
+
+@app.route("/api/timetable-slots")
+@login_required
+def api_timetable_slots():
+    branch_id = request.args.get("branch_id") or ""
+    subject_id = request.args.get("subject_id") or ""
+    selected_date = request.args.get("date") or date.today().isoformat()
+    section = (request.args.get("section") or "").strip()
+    period = request.args.get("period") or ""
+    time_override = (request.args.get("time") or "").strip()
+    db = None
+    try:
+        db = get_db()
+        context = _resolve_timetable_slots(
+            db,
+            branch_id,
+            subject_id,
+            selected_date,
+            section=section,
+            period=period,
+            time_override=time_override,
+        )
+        return jsonify(context)
+    except Exception as e:
+        print(f"[api_timetable_slots] ERROR: {repr(e)}")
+        return jsonify({"slots": [], "selected_slot": None, "active_slot": None, "has_schedule": False, "is_today": False, "current_time": "", "weekday": "", "unique_slot": False, "error": str(e)}), 500
+    finally:
+        if db:
+            try:
+                db.close()
+            except Exception:
+                pass
 
 
 @app.route("/api/attendance-periods")
