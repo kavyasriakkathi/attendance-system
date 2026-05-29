@@ -2559,6 +2559,23 @@ def _resolve_timetable_slots(db, branch_id="", subject_id="", selected_date=None
     except Exception:
         branch_name = ""
 
+    # If branch_id was provided as a non-numeric string (e.g., 'CSE-A' or 'CSE'), try to resolve it to a branch id.
+    # This allows the UI to pass branch tokens like 'CSE-A' directly and still match timetable entries.
+    if (not branch_name) and branch_id and branch_id_val is None:
+        try:
+            # split possible branch-section token
+            br_token, sec_token = split_branch_section(branch_id)
+            if br_token:
+                row = db.execute(f"SELECT id,name FROM branches WHERE UPPER(name) = {placeholder}", (br_token,)).fetchone()
+                if row:
+                    branch_id_val = row_get(row, "id")
+                    branch_name = row_get(row, "name") or br_token
+                    # if section wasn't provided explicitly, use the parsed section token
+                    if sec_token and not section_val:
+                        section_val = sec_token
+        except Exception:
+            pass
+
     try:
         if subject_id_val is not None:
             subject_row = db.execute(
@@ -2630,8 +2647,21 @@ def _resolve_timetable_slots(db, branch_id="", subject_id="", selected_date=None
     )
     params = [weekday_norm, weekday_short_norm]
     if branch_id_val is not None:
-        sql += f" AND te.branch_id = {placeholder}"
-        params.append(branch_id_val)
+        # Allow matching timetable entries that are stored under either the exact branch id
+        # or the base branch (e.g., timetable stored with branch 'CSE' and section 'CSE-A').
+        branch_ids_to_match = [branch_id_val]
+        try:
+            base_branch, parsed_section = split_branch_section(branch_name or branch_id)
+            if base_branch and base_branch != (branch_name or '').upper():
+                base_row = db.execute(f"SELECT id FROM branches WHERE UPPER(name) = {placeholder}", (base_branch,)).fetchone()
+                base_id = row_get(base_row, "id") if base_row else None
+                if base_id and base_id not in branch_ids_to_match:
+                    branch_ids_to_match.append(base_id)
+        except Exception:
+            pass
+        placeholders = ", ".join([placeholder] * len(branch_ids_to_match))
+        sql += f" AND te.branch_id IN ({placeholders})"
+        params.extend(branch_ids_to_match)
 
     # Try to add subject filter in SQL for efficiency where possible
     normalized_subject = _normalize_for_match(subject_name or (subject_id or ""))
@@ -2665,16 +2695,21 @@ def _resolve_timetable_slots(db, branch_id="", subject_id="", selected_date=None
     print(f"[attendance] timetable_entries raw row count={len(rows)}")
 
     # Fallbacks: if no rows and subject alias exists, try alias names
+    # Fallbacks: if no rows and subject alias exists, try alias names by adjusting the LIKE parameter
     if not rows and subject_name:
         key = _normalize_for_match(subject_name)
-        for alias, fulls in normalized_subject_alias_map.items():
-            if key == alias or key == alias.lower():
+        for alias_key, fulls in normalized_subject_alias_map.items():
+            if key == alias_key:
                 for fullname in fulls:
-                    try_sql = sql.replace(f"%{normalized_subject}%", f"%{_normalize_for_match(fullname)}%")
                     try:
-                        rows = db.execute(try_sql, tuple(params)).fetchall()
+                        new_params = list(params)
+                        # replace last LIKE parameter with normalized fullname
+                        if new_params:
+                            new_params[-1] = f"%{_normalize_for_match(fullname)}%"
+                        rows = db.execute(sql, tuple(new_params)).fetchall()
                         if rows:
-                            print(f"[attendance] fallback matched alias {alias} -> {fullname}, rows={len(rows)}")
+                            print(f"[attendance] fallback matched alias {alias_key} -> {fullname}, rows={len(rows)}")
+                            params = new_params
                             break
                     except Exception:
                         continue
@@ -2682,15 +2717,18 @@ def _resolve_timetable_slots(db, branch_id="", subject_id="", selected_date=None
                 break
 
     # Additional fallback: if still no rows, try partial token matching on subject
+    # Additional fallback: if still no rows, try partial token matching by changing the LIKE param
     if not rows and subject_name:
         tokens = [t for t in re.split(r"[^A-Za-z0-9]+", subject_name) if t]
         for tok in tokens:
             try:
-                like = f"%{_normalize_for_match(tok)}%"
-                partial_sql = sql.replace(f"%{normalized_subject}%", like)
-                rows = db.execute(partial_sql, tuple(params)).fetchall()
+                new_params = list(params)
+                if new_params:
+                    new_params[-1] = f"%{_normalize_for_match(tok)}%"
+                rows = db.execute(sql, tuple(new_params)).fetchall()
                 if rows:
                     print(f"[attendance] fallback partial token match {tok}, rows={len(rows)}")
+                    params = new_params
                     break
             except Exception:
                 continue
@@ -3270,6 +3308,50 @@ def api_timetable_slots():
             "weekday": context["weekday"],
             "unique_slot": context["unique_slot"],
         })
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass
+
+
+@app.route("/api/timetable-subjects")
+@login_required
+def api_timetable_subjects():
+    branch = request.args.get("branch_id") or ""
+    db = get_db()
+    placeholder = get_placeholder()
+    try:
+        branch_id_val = _coerce_int(branch)
+        # Attempt to resolve branch token like 'CSE-A' or 'CSE' to a branch id when a numeric id is not provided
+        if branch_id_val is None and branch:
+            try:
+                br_token, sec_token = split_branch_section(branch)
+                if br_token:
+                    row = db.execute(f"SELECT id,name FROM branches WHERE UPPER(name) = {placeholder}", (br_token,)).fetchone()
+                    if row:
+                        branch_id_val = row_get(row, "id")
+            except Exception:
+                pass
+
+        if branch_id_val is None:
+            return jsonify({"subjects": []})
+
+        rows = db.execute(
+            f"SELECT DISTINCT COALESCE(s.id, NULL) as subject_id, COALESCE(s.name, te.subject_name) as subject_name FROM timetable_entries te LEFT JOIN subjects s ON te.subject_id = s.id WHERE te.branch_id = {placeholder}",
+            (branch_id_val,)
+        ).fetchall()
+        subjects = []
+        seen = set()
+        for r in rows:
+            name = (row_get(r, "subject_name") or "").strip()
+            sid = row_get(r, "subject_id")
+            key = sid if sid is not None else name.lower()
+            if not name or key in seen:
+                continue
+            seen.add(key)
+            subjects.append({"id": sid, "name": name})
+        return jsonify({"subjects": subjects})
     finally:
         try:
             db.close()

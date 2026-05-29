@@ -117,12 +117,49 @@ document.addEventListener('DOMContentLoaded', function() {
             });
     }
 
+    // Fetch distinct subjects for the selected branch from timetable_entries and populate the subject select.
+    function fetchSubjects() {
+        return new Promise((resolve) => {
+            const branch = branchSelect ? branchSelect.value.trim() : '';
+            const container = document.getElementById('subject_container');
+            if (!branch || !container) return resolve();
+            // Show loading state
+            container.innerHTML = '<div><label>Subject</label><div class="slot-empty">Loading subjects…</div></div>';
+            fetch('/api/timetable-subjects?branch_id=' + encodeURIComponent(branch))
+                .then(r => r.json())
+                .then(data => {
+                    const subjects = Array.isArray(data && data.subjects) ? data.subjects : [];
+                    if (!subjects.length) {
+                        container.innerHTML = '<div><label>Subject</label><div class="slot-empty">No subjects found in timetable for this branch.</div></div>';
+                        return resolve();
+                    }
+                    let html = '<div><label>Subject</label><select name="subject_id" required><option value="">Choose subject</option>';
+                    subjects.forEach(s => {
+                        const val = (s.id !== null && s.id !== undefined) ? s.id : s.name;
+                        html += `<option value="${val}">${s.name}</option>`;
+                    });
+                    html += '</select></div>';
+                    container.innerHTML = html;
+                    // Re-bind subjectSelect variable and its change handler
+                    const newSubject = document.querySelector('select[name="subject_id"]');
+                    if (newSubject) {
+                        newSubject.addEventListener('change', queueFetch);
+                    }
+                    resolve();
+                })
+                .catch(() => {
+                    container.innerHTML = '<div><label>Subject</label><div class="slot-empty">Failed to load subjects.</div></div>';
+                    resolve();
+                });
+        });
+    }
+
     function queueFetch() {
         if (timer) clearTimeout(timer);
         timer = setTimeout(fetchPeriods, 120);
     }
 
-    if (branchSelect) branchSelect.addEventListener('change', queueFetch);
+    if (branchSelect) branchSelect.addEventListener('change', function() { fetchSubjects().then(() => { queueFetch(); }); });
     if (subjectSelect) subjectSelect.addEventListener('change', queueFetch);
     if (dateInput) dateInput.addEventListener('change', queueFetch);
 
@@ -155,24 +192,26 @@ document.head.appendChild(style);
         {% endif %}
         <div>
             <label>Branch</label>
-            <select name="branch_id" required onchange="this.form.submit()">
+            <select name="branch_id" required>
                 <option value="">Choose branch</option>
                 {% for branch in branches %}
                 <option value="{{ branch.id }}" {% if branch_id and branch.id|string == branch_id|string %}selected{% endif %}>{{ branch.name }}</option>
                 {% endfor %}
             </select>
         </div>
-        {% if branch_id %}
-        <div>
-            <label>Subject</label>
-            <select name="subject_id" required onchange="this.form.submit()">
-                <option value="">Choose subject</option>
-                {% for subject in subjects %}
-                <option value="{{ subject.id if subject.id is not none else subject.name }}" {% if subject_id and (subject.id|string == subject_id|string or subject.name|string == subject_id|string) %}selected{% endif %}>{{ subject.name }}</option>
-                {% endfor %}
-            </select>
+        <div id="subject_container">
+            {% if branch_id %}
+            <div>
+                <label>Subject</label>
+                <select name="subject_id" required>
+                    <option value="">Choose subject</option>
+                    {% for subject in subjects %}
+                    <option value="{{ subject.id if subject.id is not none else subject.name }}" {% if subject_id and (subject.id|string == subject_id|string or subject.name|string == subject_id|string) %}selected{% endif %}>{{ subject.name }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            {% endif %}
         </div>
-        {% endif %}
         <div>
             <label>Date</label>
             <input type="date" name="date" value="{{ selected_date }}" max="{{ today_date }}" required />
