@@ -89,7 +89,8 @@ document.addEventListener('DOMContentLoaded', function() {
 
     function fetchPeriods() {
         const branch = branchSelect ? branchSelect.value.trim() : '';
-        const subject = subjectSelect ? subjectSelect.value.trim() : '';
+        const currentSubjectSelect = document.querySelector('select[name="subject_id"]');
+        const subject = currentSubjectSelect ? currentSubjectSelect.value.trim() : '';
         const date = dateInput ? dateInput.value.trim() : '';
         if (!branch || !subject || !date) {
             renderPeriods({ slots: [] });
