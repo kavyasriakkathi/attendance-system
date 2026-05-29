@@ -236,6 +236,11 @@ def _normalize_lookup_key(value):
     return "".join(ch.lower() for ch in text.strip() if ch.isalnum())
 
 
+def normalize_text(value):
+    """Public-normalization helper: returns a compact lower-alphanumeric form."""
+    return _normalize_lookup_key(value)
+
+
 _ACRONYM_STOPWORDS = {"and", "of", "the", "for", "with", "to", "in", "on", "at", "by", "from"}
 
 
@@ -2463,6 +2468,18 @@ def _resolve_timetable_slots(db, branch_id="", subject_id="", selected_date=None
     selected_section_variants = _section_variants(section_val) if section_val else set()
     selected_day_variants = _day_variants(weekday)
 
+    # Debug: normalized values to help diagnose matching problems
+    try:
+        print(
+            "[attendance] normalized:",
+            f"branch_norm={normalize_text(branch_name or branch_id)}",
+            f"subject_norm={normalize_text(selected_subject_key)}",
+            f"section_norm={normalize_text(section_val)}",
+            f"day_norm={normalize_text(weekday)}",
+        )
+    except Exception:
+        pass
+
     filtered_rows = []
     for row in rows:
         row_day = row_get(row, "day") or ""
@@ -2488,6 +2505,11 @@ def _resolve_timetable_slots(db, branch_id="", subject_id="", selected_date=None
         filtered_rows.append(row)
 
     print(f"[attendance] timetable_entries matched row count={len(filtered_rows)}")
+    try:
+        matched_ids = [str(row_get(r, 'timetable_entry_id')) for r in filtered_rows]
+        print(f"[attendance] matched timetable_entry_ids={matched_ids}")
+    except Exception:
+        pass
 
     slots = []
     seen = set()

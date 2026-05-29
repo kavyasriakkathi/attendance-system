@@ -234,36 +234,23 @@
                     if (periodWrap) {
                         if (!slots.length) {
                             periodWrap.innerHTML = '<div class="badge muted" style="border-radius:12px;">No timetable matches the selected class, subject, and date.</div>';
-                        } else if (slots.length === 1) {
-                            const slot = slots[0];
-                            periodWrap.innerHTML = `<input type="hidden" name="period" id="period_hidden" value="${slot.period}" /><div class="badge" style="border-radius:12px;">${slot.start_time} - ${slot.end_time} (${slot.subject_name})</div>`;
+                        } else {
+                            const sel = data.selected_slot || slots[0];
+                            periodWrap.innerHTML = `<input type="hidden" name="period" id="period_hidden" value="${sel.period}" /><div class="badge" style="border-radius:12px;">${sel.start_time} - ${sel.end_time} (${sel.subject_name})</div>`;
                             if (badgesWrap) {
                                 badgesWrap.innerHTML = `
-                                    <span class="badge">Period: ${slot.period}</span>
-                                    <span class="badge">Subject: ${slot.subject_name || ''}</span>
-                                    <span class="badge">Faculty: ${slot.faculty_name || ''}</span>
-                                    <span class="badge">Room: ${slot.room || ''}</span>
-                                    <span class="badge">${slot.start_time || ''} - ${slot.end_time || ''}</span>
+                                    <span class="badge">Period: ${sel.period}</span>
+                                    <span class="badge">Subject: ${sel.subject_name || ''}</span>
+                                    <span class="badge">Faculty: ${sel.faculty_name || ''}</span>
+                                    <span class="badge">Room: ${sel.room || ''}</span>
+                                    <span class="badge">${sel.start_time || ''} - ${sel.end_time || ''}</span>
                                 `;
                             }
-                        } else {
-                            const selectedPeriod = data.selected_slot ? String(data.selected_slot.period) : '';
-                            const options = slots.map(slot => `<option value="${slot.period}" ${(selectedPeriod && String(slot.period) === selectedPeriod) || (!selectedPeriod && slot.is_active) ? 'selected' : ''}>${slot.start_time} - ${slot.end_time} (${slot.subject_name}${slot.section ? ' - Section ' + slot.section : ''})</option>`).join('');
-                            periodWrap.innerHTML = `<select id="period_select" name="period" required>${options}</select>`;
-                            const periodSelect = document.getElementById('period_select');
-                            if (periodSelect && badgesWrap) {
-                                const paintBadges = () => {
-                                    const current = slots.find(slot => String(slot.period) === String(periodSelect.value)) || slots[0];
-                                    badgesWrap.innerHTML = `
-                                        <span class="badge">Period: ${current.period}</span>
-                                        <span class="badge">Subject: ${current.subject_name || ''}</span>
-                                        <span class="badge">Faculty: ${current.faculty_name || ''}</span>
-                                        <span class="badge">Room: ${current.room || ''}</span>
-                                        <span class="badge">${current.start_time || ''} - ${current.end_time || ''}</span>
-                                    `;
-                                };
-                                periodSelect.addEventListener('change', paintBadges);
-                                paintBadges();
+
+                            // Auto-submit form to load students immediately for active/unique slots
+                            if ((data.unique_slot || data.active_slot) && !document.querySelector('.table-responsive')) {
+                                const filterForm = document.querySelector('form.form-row');
+                                if (filterForm) setTimeout(() => filterForm.submit(), 150);
                             }
                         }
                     }

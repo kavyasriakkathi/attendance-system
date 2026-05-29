@@ -5,7 +5,6 @@ document.addEventListener('DOMContentLoaded', function() {
     const branchSelect = document.querySelector('select[name="branch_id"]');
     const subjectSelect = document.querySelector('select[name="subject_id"]');
     const dateInput = document.querySelector('input[name="date"]');
-    const sectionInput = document.getElementById('section_input');
     const loadBtn = document.getElementById('load_students_btn');
     const periodWrap = document.getElementById('timetable_period_wrap');
     const badgesWrap = document.getElementById('timetable_badges');
@@ -73,30 +72,19 @@ document.addEventListener('DOMContentLoaded', function() {
             return;
         }
 
-        if (slotsCache.length === 1) {
-            const slot = slotsCache[0];
-            periodWrap.innerHTML = `<input type="hidden" name="period" id="period_hidden" value="${slot.period}"><div class="slot-empty" style="border-style:solid;border-color:#c7d2fe;background:#eef2ff;">${slotLabel(slot)}</div>`;
-            if (loadBtn) loadBtn.disabled = false;
-            updateBadges(slot);
-            return;
-        }
-
-        const selectedPeriod = data.selected_slot ? String(data.selected_slot.period) : '';
-        const options = slotsCache.map(slot => {
-            const selected = String(slot.period) === selectedPeriod || (!selectedPeriod && slot.is_active);
-            return `<option value="${slot.period}" ${selected ? 'selected' : ''}>${slotLabel(slot)}</option>`;
-        }).join('');
-        periodWrap.innerHTML = `<select name="period" id="period_select" required>${options}</select>`;
-        const periodSelect = document.getElementById('period_select');
-        const applySelectedBadge = () => {
-            const current = slotsCache.find(slot => String(slot.period) === String(periodSelect.value)) || slotsCache[0];
-            updateBadges(current);
-        };
-        if (periodSelect) {
-            periodSelect.addEventListener('change', applySelectedBadge);
-            applySelectedBadge();
-        }
+        // Always use the resolver-selected slot; UI will not expose manual period controls.
+        const sel = data.selected_slot || slotsCache[0];
+        periodWrap.innerHTML = `<input type="hidden" name="period" id="period_hidden" value="${sel.period}"><div class="slot-empty" style="border-style:solid;border-color:#c7d2fe;background:#eef2ff;">${slotLabel(sel)}</div>`;
+        updateBadges(sel);
         if (loadBtn) loadBtn.disabled = false;
+
+        // Auto-submit GET form to load students immediately when a single active/unique slot is detected.
+        if ((data.unique_slot || data.active_slot) && !document.querySelector('.table-responsive')) {
+            const filterForm = document.querySelector('form.form-row');
+            if (filterForm) {
+                setTimeout(() => filterForm.submit(), 150);
+            }
+        }
     }
 
     function fetchPeriods() {
@@ -139,7 +127,6 @@ document.addEventListener('DOMContentLoaded', function() {
     if (branchSelect) branchSelect.addEventListener('change', queueFetch);
     if (subjectSelect) subjectSelect.addEventListener('change', queueFetch);
     if (dateInput) dateInput.addEventListener('change', queueFetch);
-    if (sectionInput) sectionInput.addEventListener('change', queueFetch);
 
     if (branchSelect && subjectSelect && dateInput && branchSelect.value && subjectSelect.value && dateInput.value) {
         fetchPeriods();
@@ -189,10 +176,7 @@ document.head.appendChild(style);
             <label>Date</label>
             <input type="date" name="date" value="{{ selected_date }}" max="{{ today_date }}" required />
         </div>
-        <div>
-            <label>Section</label>
-            <input type="text" name="section" id="section_input" value="{{ section }}" placeholder="e.g. A" />
-        </div>
+        <!-- Section removed: detected automatically from timetable entries -->
         <div>
             <label>Schedule</label>
             <div id="schedule_note">{{ schedule_message or '' }}</div>
