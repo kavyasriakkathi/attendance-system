@@ -241,6 +241,54 @@ def normalize_text(value):
     return _normalize_lookup_key(value)
 
 
+# Advanced alias map for common short forms
+SUBJECT_ALIASES = {
+    'bee': ['basic electrical engineering', 'basic electricals', 'basic electrical', 'bee'],
+    'odevc': ['ordinary differential equations and vector calculus', 'ordinary differential equations', 'vector calculus', 'odevc'],
+    'ds': ['data structures', 'data structure', 'ds'],
+    'physics': ['advanced engineering physics', 'physics'],
+    'chemistry': ['engineering chemistry', 'chemistry'],
+}
+
+
+def split_branch_section(value):
+    """Split a combined branch-section string into (branch, section).
+
+    Accepts formats like 'CSE-A', 'CSE A', 'CSEA', 'cse-a', 'cse a'.
+    Returns tuple (branch, section) where either may be None.
+    """
+    if not value:
+        return None, None
+    v = str(value).strip()
+    # remove extra punctuation
+    v_clean = re.sub(r"[.\s_]+", "-", v)
+    parts = v_clean.split("-")
+    if len(parts) >= 2 and parts[0] and parts[-1]:
+        return parts[0].upper(), parts[-1].upper()
+    # If no delimiter, try alpha+digits chunking, e.g., 'CSEA' -> 'CSE','A'
+    m = re.match(r"^([A-Za-z]+)([A-Za-z0-9]+)$", v)
+    if m:
+        a = m.group(1).upper()
+        b = m.group(2).upper()
+        # if branch seems longer than 1 char and section short, treat as branch+section
+        if len(b) <= 2:
+            return a, b
+    return v.upper(), None
+
+
+def _token_similarity(a, b):
+    """Return a simple token overlap similarity (0..1)."""
+    if not a or not b:
+        return 0.0
+    ta = set(t.lower() for t in re.split(r"[^A-Za-z0-9]+", str(a)) if t)
+    tb = set(t.lower() for t in re.split(r"[^A-Za-z0-9]+", str(b)) if t)
+    if not ta or not tb:
+        return 0.0
+    inter = ta & tb
+    union = ta | tb
+    return len(inter) / len(union)
+
+
 _ACRONYM_STOPWORDS = {"and", "of", "the", "for", "with", "to", "in", "on", "at", "by", "from"}
 
 
@@ -2561,7 +2609,7 @@ def _resolve_timetable_slots(db, branch_id="", subject_id="", selected_date=None
     except Exception:
         pass
 
-    filtered_rows = []
+    scored_rows = []
     for row in rows:
         row_day = row_get(row, "day") or ""
         row_subject_name = row_get(row, "subject_name") or ""
@@ -2580,17 +2628,55 @@ def _resolve_timetable_slots(db, branch_id="", subject_id="", selected_date=None
             if str(row_subject_id) != str(subject_id_val):
                 continue
 
-        if selected_section_variants and not _section_matches(section_val, row_section):
-            continue
+        # Score subject match using priority: exact normalized, alias, partial, token similarity
+        row_norm_subject = normalize_text(row_subject_name)
+        sel_norm_subject = normalize_text(selected_subject_key)
+        score = 0
+        if sel_norm_subject and row_norm_subject and sel_norm_subject == row_norm_subject:
+            score += 100
+        # alias match
+        for alias, fulls in SUBJECT_ALIASES.items():
+            if sel_norm_subject == alias or sel_norm_subject == normalize_text(alias):
+                for fullname in fulls:
+                    if normalize_text(fullname) == row_norm_subject:
+                        score += 80
+        # partial containment
+        if sel_norm_subject and row_norm_subject and sel_norm_subject in row_norm_subject:
+            score += 50
+        if sel_norm_subject and row_norm_subject and row_norm_subject in sel_norm_subject:
+            score += 40
+        # token similarity
+        sim = _token_similarity(selected_subject_key, row_subject_name)
+        score += int(sim * 30)
 
-        filtered_rows.append(row)
+        # Section/branch preference: prefer exact section and branch matches
+        sec_score = 0
+        if section_val:
+            if normalize_text(section_val) == normalize_text(row_section):
+                sec_score += 50
+            elif normalize_text(section_val) in normalize_text(row_section):
+                sec_score += 20
+        if branch_name and row_branch_name:
+            if normalize_text(branch_name) == normalize_text(row_branch_name):
+                sec_score += 30
 
-    print(f"[attendance] timetable_entries matched row count={len(filtered_rows)}")
+        # Day already matched earlier; collect row with composite score
+        scored_rows.append((score + sec_score, row))
+
+    print(f"[attendance] timetable_entries matched row count={len(scored_rows)}")
     try:
-        matched_ids = [str(row_get(r, 'timetable_entry_id')) for r in filtered_rows]
+        matched_ids = [str(row_get(r, 'timetable_entry_id')) for _, r in scored_rows]
         print(f"[attendance] matched timetable_entry_ids={matched_ids}")
     except Exception:
         pass
+
+    # Sort filtered rows by match score desc, prefer exact section/branch and then start_time
+    try:
+        scored_rows.sort(key=lambda item: item[0], reverse=True)
+    except Exception:
+        pass
+
+    filtered_rows = [row for _, row in scored_rows]
 
     slots = []
     seen = set()
@@ -2637,6 +2723,13 @@ def _resolve_timetable_slots(db, branch_id="", subject_id="", selected_date=None
             "day": row_get(row, "day") or weekday,
             "is_active": bool(is_today and start_time <= current_time <= end_time),
         }
+        # small improvement: if times equal boundary, consider active for inclusive end
+        try:
+            if is_today:
+                if start_time <= current_time <= end_time:
+                    slot['is_active'] = True
+        except Exception:
+            pass
         if slot["is_active"] and active_index is None:
             active_index = len(slots)
         slots.append(slot)
