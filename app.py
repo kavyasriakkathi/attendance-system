@@ -52,6 +52,8 @@ def _safe_url_build_error_handler(error, endpoint, values):
 
 # TIMETABLE MODULE SAFE IMPORT: attempt to import now and log detailed errors.
 _timetable = None
+# Preserve the original import error for diagnostics
+timetable_import_error = None
 try:
     existing_endpoints = set(app.view_functions.keys())
     import timetable as _timetable
@@ -87,6 +89,7 @@ try:
         traceback.print_exc()
 except Exception as imp_err:
     _timetable = None
+    timetable_import_error = imp_err
     print("[TIMETABLE LOAD ERROR] Could not import timetable module:", repr(imp_err))
     exc_type, exc_value, exc_tb = sys.exc_info()
     try:
@@ -4733,8 +4736,14 @@ except Exception as e:
 if "timetable_home" not in app.view_functions:
     @app.route("/timetable")
     def timetable_home():
-        # Temporarily surface the underlying error instead of silently hiding it.
-        err = RuntimeError("Timetable module is unavailable right now. Raising to capture full traceback for debugging.")
+        # Surface the original import error in the fallback so logs contain root cause.
+        msg = "Timetable module is unavailable right now."
+        if timetable_import_error is not None:
+            try:
+                msg = f"Timetable import failed: {timetable_import_error!r}"
+            except Exception:
+                msg = "Timetable import failed (see logs for details)."
+        err = RuntimeError(msg)
         print("TIMETABLE FALLBACK RAISED:", repr(err))
         traceback.print_exc()
         raise err
