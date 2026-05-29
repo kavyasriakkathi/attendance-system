@@ -384,7 +384,7 @@ def get_subject_display_name(name):
     return name.title()
 
 
-def _get_timetable_subjects_for_branch(db, branch_id):
+def _get_timetable_subjects_for_branch(db, branch_id, section=None):
     placeholder = get_placeholder()
 
     # Resolve numeric id or branch name token
@@ -404,7 +404,9 @@ def _get_timetable_subjects_for_branch(db, branch_id):
         else:
             selected_branch_name = str(branch_id)
 
-    base_branch_name, section_val = split_branch_section(selected_branch_name)
+    base_branch_name, derived_section = split_branch_section(selected_branch_name)
+    # Prefer explicitly provided section parameter over derived section
+    section_val = (section or derived_section or "").strip()
 
     # Collect branch ids matching the base token (prefix match), so selecting
     # 'CSE' includes 'CSE-A','CSE-B', etc.
@@ -670,33 +672,386 @@ def _table_columns(db, table_name):
         return set()
 
 
-def _validate_dashboard_schema(db):
-    """Log missing dashboard-critical tables/columns without stopping startup."""
+def _safe_fetchone_value(row, default=0):
+    if row is None:
+        return default
+    try:
+        if isinstance(row, tuple):
+            return row[0] if row else default
+        try:
+            keys = list(row.keys())
+            if keys:
+                return row_get(row, keys[0], default)
+        except Exception:
+            pass
+        return row[0] if row else default
+    except Exception:
+        return default
+
+
+def _log_db_error(scope, sql, params=(), db=None):
+    try:
+        app.logger.exception("[%s] database query failed", scope)
+    except Exception:
+        pass
+    print(f"[{scope}] failing SQL: {sql}")
+    print(f"[{scope}] parameters: {params}")
+    print(f"[{scope}] traceback:\n{traceback.format_exc()}")
+    if db is not None:
+        try:
+            schema_state = verify_database_schema(db)
+            print(f"[{scope}] missing tables: {schema_state.get('missing_tables', [])}")
+            print(f"[{scope}] missing columns: {schema_state.get('missing_columns', {})}")
+        except Exception:
+            print(f"[{scope}] schema verification failed:\n{traceback.format_exc()}")
+
+
+def verify_database_schema(db=None):
+    created_here = False
+    if db is None:
+        db = get_db()
+        created_here = True
     required = {
         "branches": {"id", "name"},
         "students": {"id", "name", "enrollment", "branch_id"},
         "subjects": {"id", "name", "branch_id"},
         "attendance": {"id", "student_id", "branch_id", "subject_id", "date", "status"},
+        "teachers": {"id", "name", "username", "password", "subject_id", "branch_id"},
+        "teacher_branches": {"id", "teacher_id", "branch_id"},
+        "teacher_subjects": {"id", "teacher_id", "subject_id"},
         "settings": {"id", "key", "value"},
-        "timetable_entries": {"id", "branch_id", "section", "day", "start_time", "end_time", "subject_id", "teacher_id"},
-        "teachers": {"id", "name"},
+        "timetable_entries": {"id", "branch_id", "section", "subject_name", "faculty_name", "start_time", "end_time"},
     }
     missing_tables = []
     missing_columns = {}
+    try:
+        for table_name, required_columns in required.items():
+            cols = _table_columns(db, table_name)
+            if not cols:
+                missing_tables.append(table_name)
+                continue
+            missing = sorted(required_columns - cols)
+            if missing:
+                missing_columns[table_name] = missing
+        if missing_tables or missing_columns:
+            print(f"[schema] missing tables={missing_tables} missing_columns={missing_columns}")
+        return {"missing_tables": missing_tables, "missing_columns": missing_columns}
+    finally:
+        if created_here:
+            try:
+                db.close()
+            except Exception:
+                pass
 
-    for table_name, required_columns in required.items():
+
+def _validate_dashboard_schema(db):
+    """Log missing dashboard-critical tables/columns without stopping startup."""
+    return verify_database_schema(db)
+
+
+def _ensure_column(db, table_name, column_name, column_definition):
+    try:
         cols = _table_columns(db, table_name)
-        if not cols:
-            missing_tables.append(table_name)
-            continue
-        missing = sorted(required_columns - cols)
-        if missing:
-            missing_columns[table_name] = missing
+        if cols and column_name not in cols:
+            db.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}")
+    except Exception:
+        print(f"[schema] failed to ensure {table_name}.{column_name}:\n{traceback.format_exc()}")
 
-    if missing_tables or missing_columns:
-        print(f"[schema] dashboard missing tables={missing_tables} missing_columns={missing_columns}")
 
-    return {"missing_tables": missing_tables, "missing_columns": missing_columns}
+def _ensure_teacher_schema(db):
+    placeholder = get_placeholder()
+    if str(app.config.get("DATABASE", "")).startswith("postgres"):
+        db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS teachers (
+                id SERIAL PRIMARY KEY,
+                name TEXT NOT NULL,
+                username TEXT UNIQUE NOT NULL,
+                password TEXT NOT NULL,
+                subject_id INTEGER,
+                branch_id INTEGER,
+                subject_name TEXT,
+                email TEXT
+            )
+            """
+        )
+        db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS teacher_branches (
+                id SERIAL PRIMARY KEY,
+                teacher_id INTEGER NOT NULL,
+                branch_id INTEGER NOT NULL,
+                UNIQUE(teacher_id, branch_id)
+            )
+            """
+        )
+        db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS teacher_subjects (
+                id SERIAL PRIMARY KEY,
+                teacher_id INTEGER NOT NULL,
+                subject_id INTEGER NOT NULL,
+                UNIQUE(teacher_id, subject_id)
+            )
+            """
+        )
+    else:
+        db.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS teachers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                username TEXT UNIQUE NOT NULL,
+                password TEXT NOT NULL,
+                subject_id INTEGER,
+                branch_id INTEGER,
+                subject_name TEXT,
+                email TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS teacher_branches (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                teacher_id INTEGER NOT NULL,
+                branch_id INTEGER NOT NULL,
+                UNIQUE(teacher_id, branch_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS teacher_subjects (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                teacher_id INTEGER NOT NULL,
+                subject_id INTEGER NOT NULL,
+                UNIQUE(teacher_id, subject_id)
+            );
+            """
+        )
+
+    _ensure_column(db, "teachers", "name", "TEXT")
+    _ensure_column(db, "teachers", "username", "TEXT")
+    _ensure_column(db, "teachers", "password", "TEXT")
+    _ensure_column(db, "teachers", "subject_id", "INTEGER")
+    _ensure_column(db, "teachers", "branch_id", "INTEGER")
+    _ensure_column(db, "teachers", "subject_name", "TEXT")
+    _ensure_column(db, "teachers", "email", "TEXT")
+    try:
+        db.commit()
+    except Exception:
+        pass
+
+    teacher = db.execute(
+        f"SELECT id FROM teachers WHERE username = {placeholder}",
+        ("teacher1",),
+    ).fetchone()
+    if not teacher:
+        db.execute(
+            f"INSERT INTO teachers (name, username, password, subject_id, branch_id, subject_name) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})",
+            ("Teacher One", "teacher1", generate_password_hash("1234"), None, None, ""),
+        )
+        try:
+            db.commit()
+        except Exception:
+            pass
+
+
+def teacher_login_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if session.get("role") != "teacher" or not session.get("teacher_id"):
+            flash("Please log in as a teacher to continue.", "warning")
+            return redirect(url_for("teacher_login"))
+        return f(*args, **kwargs)
+    return decorated_function
+
+
+def _resolve_teacher_assignments(db, teacher_id):
+    placeholder = get_placeholder()
+    branches = []
+    subjects = []
+    try:
+        branches = db.execute(
+            f"""
+            SELECT b.id, b.name, b.location, tb.branch_id
+            FROM teacher_branches tb
+            JOIN branches b ON b.id = tb.branch_id
+            WHERE tb.teacher_id = {placeholder}
+            ORDER BY b.name
+            """,
+            (teacher_id,),
+        ).fetchall()
+    except Exception:
+        branches = []
+    try:
+        subjects = db.execute(
+            f"""
+            SELECT s.id, s.name, s.branch_id
+            FROM teacher_subjects ts
+            JOIN subjects s ON s.id = ts.subject_id
+            WHERE ts.teacher_id = {placeholder}
+            ORDER BY s.name
+            """,
+            (teacher_id,),
+        ).fetchall()
+    except Exception:
+        subjects = []
+    return branches, subjects
+
+
+def get_teacher_context(db=None):
+    if session.get("role") != "teacher":
+        return None
+    created_here = False
+    if db is None:
+        db = get_db()
+        created_here = True
+    try:
+        teacher_id = session.get("teacher_id") or session.get("user_id")
+        if not teacher_id:
+            return None
+        placeholder = get_placeholder()
+        teacher = None
+        try:
+            teacher = db.execute(
+                f"SELECT * FROM teachers WHERE id = {placeholder}",
+                (teacher_id,),
+            ).fetchone()
+        except Exception:
+            teacher = None
+        if not teacher:
+            try:
+                teacher = db.execute(
+                    f"SELECT id, username, username AS name, password, subject_id, branch_id, subject_name FROM users WHERE id = {placeholder} AND role = {placeholder}",
+                    (teacher_id, "teacher"),
+                ).fetchone()
+            except Exception:
+                teacher = None
+        if not teacher:
+            return None
+
+        assigned_branches, assigned_subjects = _resolve_teacher_assignments(db, teacher_id)
+        if not assigned_branches and row_get(teacher, "branch_id") is not None:
+            branch_row = db.execute(
+                f"SELECT id, name, location FROM branches WHERE id = {placeholder}",
+                (row_get(teacher, "branch_id"),),
+            ).fetchone()
+            if branch_row:
+                assigned_branches = [branch_row]
+        if not assigned_subjects and row_get(teacher, "subject_id") is not None:
+            subject_row = db.execute(
+                f"SELECT id, name, branch_id FROM subjects WHERE id = {placeholder}",
+                (row_get(teacher, "subject_id"),),
+            ).fetchone()
+            if subject_row:
+                assigned_subjects = [subject_row]
+
+        def _dedupe(rows, key_name):
+            seen = set()
+            unique_rows = []
+            for item in rows:
+                key = row_get(item, key_name)
+                if key in seen:
+                    continue
+                seen.add(key)
+                unique_rows.append(item)
+            return unique_rows
+
+        assigned_branches = _dedupe(assigned_branches, "id")
+        assigned_subjects = _dedupe(assigned_subjects, "id")
+
+        current_branch_id = session.get("teacher_branch_id") or row_get(teacher, "branch_id")
+        current_subject_id = session.get("teacher_subject_id") or row_get(teacher, "subject_id")
+        current_section = (session.get("teacher_section") or "").strip()
+        current_branch_name = session.get("teacher_branch_name") or ""
+
+        if current_branch_id and not current_branch_name:
+            branch_row = db.execute(
+                f"SELECT id, name, location FROM branches WHERE id = {placeholder}",
+                (current_branch_id,),
+            ).fetchone()
+            if branch_row:
+                current_branch_name = row_get(branch_row, "name") or ""
+
+        if not current_branch_id and assigned_branches:
+            current_branch_id = row_get(assigned_branches[0], "id")
+            current_branch_name = row_get(assigned_branches[0], "name") or ""
+        if not current_subject_id and assigned_subjects:
+            current_subject_id = row_get(assigned_subjects[0], "id")
+
+        subject_name = row_get(teacher, "subject_name") or ""
+        if current_subject_id:
+            subject_row = db.execute(
+                f"SELECT id, name, branch_id FROM subjects WHERE id = {placeholder}",
+                (current_subject_id,),
+            ).fetchone()
+            if subject_row:
+                subject_name = row_get(subject_row, "name") or subject_name
+
+        teacher_name = row_get(teacher, "name") or row_get(teacher, "username") or session.get("username") or "Teacher"
+
+        return {
+            "teacher": {
+                "id": row_get(teacher, "id"),
+                "name": teacher_name,
+                "username": row_get(teacher, "username") or session.get("username") or "",
+                "subject_name": subject_name,
+                "current_subject_id": current_subject_id,
+                "current_branch_id": current_branch_id,
+                "current_branch_name": current_branch_name,
+                "current_section": current_section,
+                "assigned_subjects": [
+                    {
+                        "id": row_get(subject, "id"),
+                        "name": row_get(subject, "name"),
+                        "branch_id": row_get(subject, "branch_id"),
+                    }
+                    for subject in assigned_subjects
+                ],
+                "assigned_branches": [
+                    {
+                        "id": row_get(branch, "id"),
+                        "name": row_get(branch, "name"),
+                        "location": row_get(branch, "location"),
+                        "section": row_get(branch, "section") or "",
+                    }
+                    for branch in assigned_branches
+                ],
+                "assigned_subjects_count": len(assigned_subjects),
+                "assigned_branches_count": len(assigned_branches),
+            },
+            "teacher_id": row_get(teacher, "id"),
+            "name": teacher_name,
+            "username": row_get(teacher, "username") or session.get("username") or "",
+            "subject_name": subject_name,
+            "subject_id": current_subject_id,
+            "current_subject_id": current_subject_id,
+            "subject_row": None,
+            "current_branch_id": current_branch_id,
+            "current_branch_name": current_branch_name,
+            "current_section": current_section,
+            "assigned_branches": [
+                {
+                    "id": row_get(branch, "id"),
+                    "name": row_get(branch, "name"),
+                    "location": row_get(branch, "location"),
+                    "section": row_get(branch, "section") or "",
+                }
+                for branch in assigned_branches
+            ],
+            "assigned_branches_count": len(assigned_branches),
+            "assigned_subjects": [
+                {
+                    "id": row_get(subject, "id"),
+                    "name": row_get(subject, "name"),
+                    "branch_id": row_get(subject, "branch_id"),
+                }
+                for subject in assigned_subjects
+            ],
+            "assigned_subjects_count": len(assigned_subjects),
+        }
+    finally:
+        if created_here:
+            try:
+                db.close()
+            except Exception:
+                pass
 
 
 def send_email(subject, recipient, body, attachments=None):
@@ -2156,7 +2511,7 @@ def upload_students_csv():
                             f"INSERT INTO students (name, enrollment, email, branch_id) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}) RETURNING id",
                             (name, enrollment, email or None, branch_id)
                         )
-                        student_id = cur.fetchone()[0]
+                        student_id = _safe_fetchone_value(cur.fetchone(), default=0)
                     else:
                         cur = db.execute(
                             f"INSERT INTO students (name, enrollment, email, branch_id) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder})", (name, enrollment, email or None, branch_id)
@@ -2215,7 +2570,7 @@ def students():
                     try:
                         if str(app.config.get("DATABASE", "")).startswith("postgres"):
                             cur = db.execute(f"INSERT INTO students (name, enrollment, email, branch_id) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}) RETURNING id", (name, enrollment, email or None, branch_id))
-                            student_id = cur.fetchone()[0]
+                            student_id = _safe_fetchone_value(cur.fetchone(), default=0)
                         else:
                             cur = db.execute(f"INSERT INTO students (name, enrollment, email, branch_id) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder})", (name, enrollment, email or None, branch_id))
                             student_id = cur.lastrowid
@@ -2322,10 +2677,21 @@ def teacher_login():
             ).fetchone()
 
             if user and row_get(user, "role") == "teacher" and check_password_hash(row_get(user, "password"), password):
+                # Initialize teacher session fields for downstream routes/templates
                 session.clear()
-                session["user_id"] = row_get(user, "id")
+                teacher_id = row_get(user, "id")
+                session["user_id"] = teacher_id
                 session["username"] = row_get(user, "username")
                 session["role"] = row_get(user, "role")
+                # Try to populate teacher-specific session values
+                try:
+                    assigned = db.execute(f"SELECT id, name FROM teachers WHERE id = {placeholder}", (teacher_id,)).fetchone()
+                    session["teacher_id"] = teacher_id
+                    session["teacher_name"] = row_get(assigned, "name") if assigned else session.get("username")
+                except Exception:
+                    session["teacher_id"] = teacher_id
+                    session["teacher_name"] = session.get("username")
+                session.permanent = True
                 return redirect(url_for("dashboard"))
 
             flash("Invalid teacher login credentials.", "error")
@@ -2999,6 +3365,7 @@ def mark_attendance():
     if branch_id and subject_id:
         try:
             timetable_context = _resolve_timetable_slots(db, branch_id, subject_id, selected_date, section=section, period=period)
+            print(f"[mark_attendance] Resolved timetable_context slots={len(timetable_context.get('slots', []))} selected_slot={bool(timetable_context.get('selected_slot'))} active_slot={bool(timetable_context.get('active_slot'))} unique={timetable_context.get('unique_slot')}")
         except Exception as exc:
             print(f"[attendance] timetable resolve failed: {repr(exc)}")
             timetable_context = {"slots": [], "selected_slot": None, "active_slot": None, "has_schedule": False, "is_today": False, "current_time": "", "weekday": "", "unique_slot": False}
@@ -3008,8 +3375,11 @@ def mark_attendance():
             valid_periods = {str(item.get("period")) for item in timetable_context["slots"]}
             if period not in valid_periods:
                 period = str(timetable_context["selected_slot"].get("period") or period)
-        if timetable_context["selected_slot"] and (not timetable_context["is_today"] or timetable_context["active_slot"] or timetable_context["unique_slot"]):
+        if timetable_context["selected_slot"]:
+            print(f"[mark_attendance] Selected slot present for branch={branch_id} section={section} subject={subject_id}")
             students = _attendance_students_for_branch(db, branch_id, section)
+            student_count = len(students) if isinstance(students, (list, tuple)) else 0
+            print(f"[mark_attendance] Loaded students count={student_count}")
             existing_dates = db.execute(
                 f"SELECT date, COUNT(*) as count FROM attendance WHERE branch_id = {placeholder} AND subject_id = {placeholder} GROUP BY date ORDER BY date DESC",
                 (branch_id, resolved_subject_id),
@@ -3053,6 +3423,7 @@ def mark_attendance():
 
         try:
             timetable_context = _resolve_timetable_slots(db, branch_id, subject_id, selected_date, section=section, period=period)
+            print(f"[mark_attendance:POST] Resolved timetable_context slots={len(timetable_context.get('slots', []))} selected_slot={bool(timetable_context.get('selected_slot'))} active_slot={bool(timetable_context.get('active_slot'))} unique={timetable_context.get('unique_slot')}")
         except Exception as exc:
             print(f"[attendance] timetable resolve failed on POST: {repr(exc)}")
             timetable_context = {"slots": [], "selected_slot": None, "active_slot": None, "has_schedule": False, "is_today": False, "current_time": "", "weekday": "", "unique_slot": False}
@@ -3307,14 +3678,16 @@ def api_current_period():
 @login_required
 def api_timetable_subjects():
     branch_id = request.args.get("branch_id") or ""
+    section = (request.args.get("section") or "").strip()
     db = None
     try:
         db = get_db()
-        subjects = _get_timetable_subjects_for_branch(db, branch_id) if branch_id else []
+        subjects = _get_timetable_subjects_for_branch(db, branch_id, section=section) if branch_id else []
+        print(f"[api_timetable_subjects] branch={branch_id} section={section} subjects_found={len(subjects)}")
         return jsonify({"subjects": subjects, "count": len(subjects)})
     except Exception as e:
         print(f"[api_timetable_subjects] ERROR: {repr(e)}")
-        return jsonify({"subjects": [], "count": 0, "error": str(e)}), 500
+        return jsonify({"subjects": [], "count": 0, "error": str(e)})
     finally:
         if db:
             try:
@@ -3344,10 +3717,11 @@ def api_timetable_slots():
             period=period,
             time_override=time_override,
         )
+        print(f"[api_timetable_slots] branch={branch_id} section={section} subject={subject_id} slots={len(context.get('slots', []))}")
         return jsonify(context)
     except Exception as e:
         print(f"[api_timetable_slots] ERROR: {repr(e)}")
-        return jsonify({"slots": [], "selected_slot": None, "active_slot": None, "has_schedule": False, "is_today": False, "current_time": "", "weekday": "", "unique_slot": False, "error": str(e)}), 500
+        return jsonify({"slots": [], "selected_slot": None, "active_slot": None, "has_schedule": False, "is_today": False, "current_time": "", "weekday": "", "unique_slot": False, "error": str(e)})
     finally:
         if db:
             try:
@@ -3377,6 +3751,43 @@ def api_attendance_periods():
             db.close()
         except Exception:
             pass
+
+
+@app.route("/api/timetable-periods")
+@login_required
+def api_timetable_periods():
+    branch_id = request.args.get("branch_id") or ""
+    subject_id = request.args.get("subject_id") or ""
+    selected_date = request.args.get("date") or date.today().isoformat()
+    section = (request.args.get("section") or "").strip()
+    time_override = (request.args.get("time") or "").strip()
+
+    db = None
+    try:
+        db = get_db()
+        ctx = _resolve_timetable_slots(db, branch_id, subject_id, selected_date, section=section, time_override=time_override)
+        periods = [
+            {
+                "period": s.get("period"),
+                "start_time": s.get("start_time"),
+                "end_time": s.get("end_time"),
+                "timetable_entry_id": s.get("timetable_entry_id"),
+                "subject_name": s.get("subject_name"),
+                "is_active": s.get("is_active"),
+            }
+            for s in ctx.get("slots", [])
+        ]
+        print(f"[api_timetable_periods] branch={branch_id} section={section} subject={subject_id} periods={len(periods)}")
+        return jsonify({"periods": periods, "selected": ctx.get("selected_slot"), "active": ctx.get("active_slot"), "unique": ctx.get("unique_slot"), "has_schedule": ctx.get("has_schedule")})
+    except Exception as e:
+        print(f"[api_timetable_periods] ERROR: {repr(e)}")
+        return jsonify({"periods": [], "selected": None, "active": None, "unique": False, "has_schedule": False, "error": str(e)})
+    finally:
+        if db:
+            try:
+                db.close()
+            except Exception:
+                pass
 
 
 @app.route("/attendance/qr")
@@ -4164,7 +4575,7 @@ def admin_check_db():
         counts = {}
         for t in tables:
             try:
-                counts[t] = int(db.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0])
+                counts[t] = int(_safe_fetchone_value(db.execute(f"SELECT COUNT(*) FROM {t}").fetchone(), default=0))
             except Exception as e:
                 counts[t] = f"error: {repr(e)}"
         info['counts'] = counts
@@ -4200,6 +4611,10 @@ with app.app_context():
         try:
             db = get_db()
             _validate_dashboard_schema(db)
+            try:
+                _ensure_teacher_schema(db)
+            except Exception:
+                print("[init] ensure teacher schema failed:\n" + traceback.format_exc())
         finally:
             if db:
                 try:
@@ -4611,7 +5026,7 @@ def api_create_attendance_session():
         try:
             cur = db.execute(insert_query, (timetable_entry_id, faculty, section, subject, date_val, start_time, end_time))
             if app.config.get("DATABASE", "").startswith("postgres"):
-                session_id = cur.fetchone()[0]
+                session_id = _safe_fetchone_value(cur.fetchone(), default=0)
             else:
                 session_id = cur.lastrowid
             db.commit()
