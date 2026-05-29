@@ -4708,8 +4708,11 @@ except Exception as e:
 if "timetable_home" not in app.view_functions:
     @app.route("/timetable")
     def timetable_home():
-        flash("Timetable module is unavailable right now. Please try again shortly.", "warning")
-        return redirect(url_for("dashboard"))
+        # Temporarily surface the underlying error instead of silently hiding it.
+        err = RuntimeError("Timetable module is unavailable right now. Raising to capture full traceback for debugging.")
+        print("TIMETABLE FALLBACK RAISED:", repr(err))
+        traceback.print_exc()
+        raise err
 
 
 # Compatibility endpoints for templates that expect teacher/admin management
