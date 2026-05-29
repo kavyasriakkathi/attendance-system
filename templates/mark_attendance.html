@@ -163,8 +163,22 @@ document.addEventListener('DOMContentLoaded', function() {
     if (subjectSelect) subjectSelect.addEventListener('change', queueFetch);
     if (dateInput) dateInput.addEventListener('change', queueFetch);
 
-    if (branchSelect && subjectSelect && dateInput && branchSelect.value && subjectSelect.value && dateInput.value) {
-        fetchPeriods();
+    const urlParams = new URLSearchParams(window.location.search);
+    const initialSubject = urlParams.get('subject_id') || '';
+
+    if (branchSelect && branchSelect.value) {
+        // Ensure subjects are populated for the selected branch on initial load
+        fetchSubjects().then(() => {
+            // If URL carried a subject token (id or name), try to pre-select it
+            if (initialSubject) {
+                const newSubject = document.querySelector('select[name="subject_id"]');
+                if (newSubject) {
+                    const found = Array.from(newSubject.options).find(o => o.value == initialSubject || o.text == initialSubject);
+                    if (found) newSubject.value = found.value;
+                }
+            }
+            queueFetch();
+        });
     } else {
         renderPeriods({ slots: [] });
     }
