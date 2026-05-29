@@ -2635,13 +2635,17 @@ def _resolve_timetable_slots(db, branch_id="", subject_id="", selected_date=None
 
     # Try to add subject filter in SQL for efficiency where possible
     normalized_subject = _normalize_for_match(subject_name or (subject_id or ""))
+    # Precompute complex SQL normalization expression into a variable to avoid
+    # putting escaped quotes or backslashes inside f-strings (which is invalid).
+    subject_expr = _sql_norm_expr("COALESCE(s.name, te.subject_name, '')")
+
     if subject_id_val is not None:
         # match by subject id primarily
-        sql += f" AND (te.subject_id = {placeholder} OR { _sql_norm_expr('COALESCE(s.name, te.subject_name, \'\')') } LIKE ? )"
+        sql += f" AND (te.subject_id = {placeholder} OR {subject_expr} LIKE ? )"
         params.append(subject_id_val)
         params.append(f"%{normalized_subject}%")
     elif subject_name:
-        sql += f" AND ({ _sql_norm_expr('COALESCE(s.name, te.subject_name, \'\')') } LIKE ? )"
+        sql += f" AND ({subject_expr} LIKE ? )"
         params.append(f"%{normalized_subject}%")
 
     # Section provided: try to match normalized
