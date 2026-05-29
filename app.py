@@ -95,6 +95,26 @@ except Exception as imp_err:
     except Exception:
         pass
     traceback.print_exc()
+# Flag for other code
+TIMETABLE_AVAILABLE = bool(_timetable)
+print(f"TIMETABLE_AVAILABLE={TIMETABLE_AVAILABLE}")
+
+
+def safe_api(f):
+    """Decorator for API endpoints to ensure errors return JSON and are logged."""
+    @wraps(f)
+    def wrapper(*args, **kwargs):
+        try:
+            return f(*args, **kwargs)
+        except Exception as e:
+            print("[API ERROR]", repr(e))
+            traceback.print_exc()
+            try:
+                return jsonify({"error": str(e)}), 500
+            except Exception:
+                # Fallback plain text
+                return ("{\"error\": \"Internal Server Error\"}", 500, {"Content-Type": "application/json"})
+    return wrapper
 
 # Use a stable SQLite file path relative to the application folder unless a PostgreSQL URL is provided.
 db_env = os.environ.get("DATABASE_URL")
@@ -3615,6 +3635,7 @@ def mark_attendance():
 
 
 @app.route("/api/current-period")
+@safe_api
 @login_required
 def api_current_period():
     """Return the current/next period matching date/section/subject and auto-return students.
@@ -3744,6 +3765,7 @@ def api_current_period():
 
 
 @app.route("/api/timetable-subjects")
+@safe_api
 @login_required
 def api_timetable_subjects():
     branch_id = request.args.get("branch_id") or ""
@@ -3766,6 +3788,7 @@ def api_timetable_subjects():
 
 
 @app.route("/api/timetable-slots")
+@safe_api
 @login_required
 def api_timetable_slots():
     branch_id = request.args.get("branch_id") or ""
@@ -3800,6 +3823,7 @@ def api_timetable_slots():
 
 
 @app.route("/api/attendance-periods")
+@safe_api
 @login_required
 def api_attendance_periods():
     branch_id = request.args.get("branch_id") or ""
@@ -3823,6 +3847,7 @@ def api_attendance_periods():
 
 
 @app.route("/api/timetable-periods")
+@safe_api
 @login_required
 def api_timetable_periods():
     branch_id = request.args.get("branch_id") or ""
