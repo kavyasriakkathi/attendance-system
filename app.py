@@ -34,13 +34,11 @@ def _safe_url_build_error_handler(error, endpoint, values):
     """
     try:
         print(f"[WARN] Missing endpoint during url_for: endpoint={endpoint} values={values}")
-    # Subjects should be populated strictly from timetable_entries via the API.
-    # The frontend will fetch subjects dynamically; server-side leave subjects empty to avoid showing global lists.
-    subjects = []
+    except Exception:
         # Never crash while trying to log
         pass
 
-    return "Internal Server Error", 500
+    return "#"
 
 # Use a stable SQLite file path relative to the application folder unless a PostgreSQL URL is provided.
 db_env = os.environ.get("DATABASE_URL")
@@ -3322,73 +3320,6 @@ def api_attendance_periods():
             print(f"[attendance] api_attendance_periods resolve failed: {repr(exc)}")
             context = {"slots": [], "selected_slot": None, "active_slot": None, "has_schedule": False, "is_today": False, "current_time": "", "weekday": "", "unique_slot": False}
         return jsonify(context)
-    finally:
-        try:
-            db.close()
-        except Exception:
-            pass
-        # Build list of branch ids to match: include base branch id when applicable
-        branch_ids_to_match = [branch_id_val]
-        try:
-            row = db.execute(f"SELECT name FROM branches WHERE id = {placeholder}", (branch_id_val,)).fetchone()
-            br_name = row_get(row, 'name') if row else None
-            if br_name:
-                base_branch, sec = split_branch_section(br_name)
-                if base_branch:
-                    base_row = db.execute(f"SELECT id FROM branches WHERE UPPER(name) = {placeholder}", (base_branch,)).fetchone()
-                    base_id = row_get(base_row, 'id') if base_row else None
-                    if base_id and base_id not in branch_ids_to_match:
-                        branch_ids_to_match.append(base_id)
-        except Exception:
-            pass
-
-        placeholders = ", ".join([placeholder] * len(branch_ids_to_match))
-        sql = (
-            f"SELECT DISTINCT COALESCE(s.name, te.subject_name, '') AS subject_name, s.id AS subject_id "
-            f"FROM timetable_entries te LEFT JOIN subjects s ON te.subject_id = s.id "
-            f"WHERE te.branch_id IN ({placeholders}) AND COALESCE(s.name, te.subject_name, '') <> '' "
-            f"ORDER BY subject_name"
-        )
-        rows = db.execute(sql, tuple(branch_ids_to_match)).fetchall()
-
-        # Build canonical->alias reverse map so we can show short codes where available (prefer short alias)
-        alias_rows = db.execute("SELECT alias, canonical_name FROM subject_aliases").fetchall()
-        canonical_to_alias = {}
-        for ar in alias_rows:
-            a = (row_get(ar, 'alias') or '').strip()
-            c = (row_get(ar, 'canonical_name') or '').strip()
-            if not a or not c:
-                continue
-            key = c.lower()
-            # prefer shortest alias for display
-            existing = canonical_to_alias.get(key)
-            if not existing or len(a) < len(existing):
-                canonical_to_alias[key] = a
-
-        subjects = []
-        seen = set()
-        for r in rows:
-            name = (row_get(r, 'subject_name') or '').strip()
-            sid = row_get(r, 'subject_id')
-            if not name:
-                continue
-            key = name.lower()
-            if key in seen:
-                continue
-            seen.add(key)
-            display = name
-            # If canonical alias exists, show alias (e.g., Basic Electrical Engineering -> BEE)
-            alias = canonical_to_alias.get(key)
-            if alias:
-                display = alias
-            subjects.append({"id": sid, "name": display, "canonical": name})
-        return jsonify({"subjects": subjects})
-def api_timetable_subjects():
-    branch = request.args.get("branch_id") or ""
-    db = get_db()
-    try:
-        subjects = _get_timetable_subjects_for_branch(db, branch)
-        return jsonify({"subjects": subjects})
     finally:
         try:
             db.close()
