@@ -4270,20 +4270,36 @@ def register_routes(app, db_getter=None):
         q = (request.args.get('q') or request.form.get('q') or '').strip()
 
         # Build WHERE clause for simple text search across normalized and legacy timetable fields.
+        # Use LOWER(TRIM(COALESCE(...))) for normalization and COALESCE to avoid NULLs.
         where_clauses = []
         params = []
         if q:
-            like = f"%{q}%"
+            raw_q = q
+            norm_q = raw_q.strip()
+            like = f"%{norm_q}%"
+            # normalized SQL comparisons (case-insensitive, trimmed)
             where_clauses.append(
-                "(COALESCE(s.name,'') LIKE %s OR COALESCE(t.name,'') LIKE %s OR COALESCE(ts.subject_name,'') LIKE %s OR COALESCE(ts.faculty_name,'') LIKE %s OR COALESCE(te.section,'') LIKE %s OR COALESCE(b.name,'') LIKE %s OR COALESCE(ts.branch,'') LIKE %s OR COALESCE(te.room,'') LIKE %s OR COALESCE(CAST(COALESCE(te.semester, ts.semester) AS TEXT), '') LIKE %s)"
+                "(LOWER(TRIM(COALESCE(s.name,''))) LIKE LOWER(TRIM(%s))"
+                " OR LOWER(TRIM(COALESCE(t.name,''))) LIKE LOWER(TRIM(%s))"
+                " OR LOWER(TRIM(COALESCE(ts.subject_name,''))) LIKE LOWER(TRIM(%s))"
+                " OR LOWER(TRIM(COALESCE(ts.faculty_name,''))) LIKE LOWER(TRIM(%s))"
+                " OR LOWER(TRIM(COALESCE(te.section,''))) LIKE LOWER(TRIM(%s))"
+                " OR LOWER(TRIM(COALESCE(b.name,''))) LIKE LOWER(TRIM(%s))"
+                " OR LOWER(TRIM(COALESCE(ts.branch,''))) LIKE LOWER(TRIM(%s))"
+                " OR LOWER(TRIM(COALESCE(te.room,''))) LIKE LOWER(TRIM(%s))"
+                " OR LOWER(TRIM(COALESCE(te.day,''))) LIKE LOWER(TRIM(%s))"
+                " OR LOWER(TRIM(COALESCE(CAST(COALESCE(te.semester, ts.semester) AS TEXT), ''))) LIKE LOWER(TRIM(%s)) )"
             )
-            params.extend([like, like, like, like, like, like, like, like, like])
+            # Pass the same like param for each placeholder; TRIM happens in SQL
+            params.extend([like] * 10)
+            logger.info("Timetable manage search q=%s normalized=%s", raw_q, norm_q)
 
         where_sql = "WHERE " + " AND ".join(where_clauses) if where_clauses else ""
 
         try:
             # total count of normalized entries
             count_sql = f"SELECT COUNT(1) AS c FROM timetable_entries te LEFT JOIN subjects s ON te.subject_id = s.id LEFT JOIN teachers t ON te.teacher_id = t.id LEFT JOIN branches b ON te.branch_id = b.id LEFT JOIN timetable_slots ts ON LOWER(TRIM(ts.branch)) = LOWER(TRIM(b.name)) AND COALESCE(ts.section, '') = COALESCE(te.section, '') AND COALESCE(CAST(ts.semester AS TEXT), '') = COALESCE(CAST(te.semester AS TEXT), '') AND COALESCE(ts.day, '') = COALESCE(te.day, '') AND COALESCE(ts.start_time, '') = COALESCE(te.start_time, '') AND COALESCE(ts.end_time, '') = COALESCE(te.end_time, '') AND COALESCE(ts.room, '') = COALESCE(te.room, '') {where_sql}"
+            logger.debug("Timetable manage count_sql=%s params=%s", count_sql, params)
             total_row = _db_execute(db, count_sql, tuple(params)).fetchone()
             total_count = int(total_row[0] if total_row is not None else 0)
         except Exception:
@@ -4329,7 +4345,9 @@ def register_routes(app, db_getter=None):
                 """
                 qparams = list(params) + [PAGE_SIZE, offset]
                 entries = _db_execute(db, sql, tuple(qparams)).fetchall()
+                logger.debug("Timetable manage entries_sql=%s params=%s", sql, qparams)
                 entries = [dict(r) for r in entries]
+                logger.info("Timetable manage raw entries loaded=%s", len(entries))
                 rows_source = 'normalized'
             else:
                 # Fallback to legacy slots with paging
@@ -4341,6 +4359,7 @@ def register_routes(app, db_getter=None):
                 entries = _db_execute(db, sql, (PAGE_SIZE, offset)).fetchall()
                 entries = [dict(r) for r in entries]
                 rows_source = 'raw'
+                    logger.info("Timetable manage raw fallback slots loaded=%s", len(entries))
         except Exception:
             logger.exception("Failed to load paginated timetable rows")
             entries = []
