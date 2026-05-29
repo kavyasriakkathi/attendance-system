@@ -34,50 +34,9 @@ def _safe_url_build_error_handler(error, endpoint, values):
     """
     try:
         print(f"[WARN] Missing endpoint during url_for: endpoint={endpoint} values={values}")
-    except Exception:
-        pass
-    return "#"
-
-
-app.url_build_error_handlers.append(_safe_url_build_error_handler)
-
-
-@app.context_processor
-def inject_endpoint_helpers():
-    """Expose a safe endpoint checker for templates.
-
-    This prevents BuildError crashes in templates when optional routes are not
-    registered (for example, timetable routes during startup issues).
-    """
-    return {
-        "has_endpoint": lambda endpoint_name: endpoint_name in app.view_functions,
-    }
-
-
-# One-time schema init guard (per process). This prevents a missing-table crash
-# after switching from SQLite to PostgreSQL, while keeping overhead low.
-_DB_INIT_DONE = False
-_DB_INIT_LAST_ERROR = None
-
-
-@app.errorhandler(Exception)
-def log_unhandled_exception(e):
-    """Log a full traceback to Render logs for any unexpected 500.
-
-    Note: HTTPException (404/403/etc) should be handled by Flask normally.
-    """
-    if isinstance(e, HTTPException):
-        return e
-
-    try:
-        print(f"[ERROR] Unhandled exception type={type(e).__name__} on {request.method} {request.path}")
-        print(f"[ERROR] message={repr(e)}")
-        # Avoid logging sensitive fields
-        if request.method in ("POST", "PUT", "PATCH"):
-            safe_form = {k: ("<hidden>" if k.lower() in ("password", "confirm_password") else v) for k, v in request.form.items()}
-            print(f"[ERROR] form={safe_form}")
-        print(traceback.format_exc())
-    except Exception:
+    # Subjects should be populated strictly from timetable_entries via the API.
+    # The frontend will fetch subjects dynamically; server-side leave subjects empty to avoid showing global lists.
+    subjects = []
         # Never crash while trying to log
         pass
 
@@ -3368,22 +3327,62 @@ def api_attendance_periods():
             db.close()
         except Exception:
             pass
+        # Build list of branch ids to match: include base branch id when applicable
+        branch_ids_to_match = [branch_id_val]
+        try:
+            row = db.execute(f"SELECT name FROM branches WHERE id = {placeholder}", (branch_id_val,)).fetchone()
+            br_name = row_get(row, 'name') if row else None
+            if br_name:
+                base_branch, sec = split_branch_section(br_name)
+                if base_branch:
+                    base_row = db.execute(f"SELECT id FROM branches WHERE UPPER(name) = {placeholder}", (base_branch,)).fetchone()
+                    base_id = row_get(base_row, 'id') if base_row else None
+                    if base_id and base_id not in branch_ids_to_match:
+                        branch_ids_to_match.append(base_id)
+        except Exception:
+            pass
 
+        placeholders = ", ".join([placeholder] * len(branch_ids_to_match))
+        sql = (
+            f"SELECT DISTINCT COALESCE(s.name, te.subject_name, '') AS subject_name, s.id AS subject_id "
+            f"FROM timetable_entries te LEFT JOIN subjects s ON te.subject_id = s.id "
+            f"WHERE te.branch_id IN ({placeholders}) AND COALESCE(s.name, te.subject_name, '') <> '' "
+            f"ORDER BY subject_name"
+        )
+        rows = db.execute(sql, tuple(branch_ids_to_match)).fetchall()
 
-@app.route("/api/timetable-slots")
-@login_required
-def api_timetable_slots():
-    return api_attendance_periods()
+        # Build canonical->alias reverse map so we can show short codes where available (prefer short alias)
+        alias_rows = db.execute("SELECT alias, canonical_name FROM subject_aliases").fetchall()
+        canonical_to_alias = {}
+        for ar in alias_rows:
+            a = (row_get(ar, 'alias') or '').strip()
+            c = (row_get(ar, 'canonical_name') or '').strip()
+            if not a or not c:
+                continue
+            key = c.lower()
+            # prefer shortest alias for display
+            existing = canonical_to_alias.get(key)
+            if not existing or len(a) < len(existing):
+                canonical_to_alias[key] = a
 
-
-@app.route("/api/timetable-periods")
-@login_required
-def api_timetable_periods():
-    return api_attendance_periods()
-
-
-@app.route("/api/timetable-subjects")
-@login_required
+        subjects = []
+        seen = set()
+        for r in rows:
+            name = (row_get(r, 'subject_name') or '').strip()
+            sid = row_get(r, 'subject_id')
+            if not name:
+                continue
+            key = name.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            display = name
+            # If canonical alias exists, show alias (e.g., Basic Electrical Engineering -> BEE)
+            alias = canonical_to_alias.get(key)
+            if alias:
+                display = alias
+            subjects.append({"id": sid, "name": display, "canonical": name})
+        return jsonify({"subjects": subjects})
 def api_timetable_subjects():
     branch = request.args.get("branch_id") or ""
     db = get_db()
