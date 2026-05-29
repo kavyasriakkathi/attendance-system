@@ -78,8 +78,8 @@ document.addEventListener('DOMContentLoaded', function() {
         updateBadges(sel);
         if (loadBtn) loadBtn.disabled = false;
 
-        // Auto-submit GET form to load students immediately when a single active/unique slot is detected.
-        if ((data.unique_slot || data.active_slot) && !document.querySelector('.table-responsive')) {
+        // Auto-submit GET form to load students immediately when a slot is selected (active/unique/nearest).
+        if ((data.selected_slot || data.unique_slot || data.active_slot) && !document.querySelector('.table-responsive')) {
             const filterForm = document.querySelector('form.form-row');
             if (filterForm) {
                 setTimeout(() => filterForm.submit(), 150);

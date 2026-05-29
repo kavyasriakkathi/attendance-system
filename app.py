@@ -2439,6 +2439,38 @@ def _resolve_timetable_slots(db, branch_id="", subject_id="", selected_date=None
         f"period={period_val or '<empty>'}",
     )
 
+    # Helper: normalize text for SQL comparisons (remove spaces/hyphens, lower)
+    def _sql_norm_expr(col):
+        # replace spaces and hyphens, trim and lower
+        return "replace(replace(lower(trim(coalesce(%s,''))), ' ', ''), '-', '')" % col
+
+    def _normalize_for_match(v):
+        if v is None:
+            return ""
+        return str(v).strip().lower().replace(' ', '').replace('-', '')
+
+    def split_branch_section(value):
+        if not value:
+            return None, None
+        parts = re.split(r"[^A-Za-z0-9]+", value)
+        if len(parts) >= 2:
+            return parts[0], parts[-1]
+        # try dash split
+        if '-' in value:
+            a, b = value.split('-', 1)
+            return a.strip(), b.strip()
+        return value, None
+
+    # Subject alias map: common short forms -> possible long names
+    SUBJECT_ALIAS_MAP = {
+        'bee': ['basic electrical engineering', 'basic electricals', 'basic electrical'],
+        'odevc': ['ordinary differential equations and vector calculus', 'ordinary differential equations', 'vector calculus'],
+        'ds': ['data structures', 'data structure'],
+    }
+
+    # Build base SQL with normalized day filter and branch
+    weekday_norm = _normalize_for_match(weekday)
+    weekday_short_norm = _normalize_for_match(weekday_short)
     sql = (
         "SELECT te.id AS timetable_entry_id, te.branch_id, te.section, te.subject_id, te.teacher_id, te.day, "
         "te.start_time, te.end_time, te.room, COALESCE(s.name, '') AS subject_name, "
@@ -2447,12 +2479,30 @@ def _resolve_timetable_slots(db, branch_id="", subject_id="", selected_date=None
         "LEFT JOIN subjects s ON te.subject_id = s.id "
         "LEFT JOIN teachers t ON te.teacher_id = t.id "
         "LEFT JOIN branches b ON te.branch_id = b.id "
-        "WHERE 1=1"
+        "WHERE ( %s = ? OR %s = ? )" % (_sql_norm_expr('te.day'), _sql_norm_expr('te.day'))
     )
-    params = []
+    params = [weekday_norm, weekday_short_norm]
     if branch_id_val is not None:
         sql += f" AND te.branch_id = {placeholder}"
         params.append(branch_id_val)
+
+    # Try to add subject filter in SQL for efficiency where possible
+    normalized_subject = _normalize_for_match(subject_name or (subject_id or ""))
+    if subject_id_val is not None:
+        # match by subject id primarily
+        sql += f" AND (te.subject_id = {placeholder} OR { _sql_norm_expr('s.name') } LIKE ? )"
+        params.append(subject_id_val)
+        params.append(f"%{normalized_subject}%")
+    elif subject_name:
+        sql += f" AND ({ _sql_norm_expr('s.name') } LIKE ? )"
+        params.append(f"%{normalized_subject}%")
+
+    # Section provided: try to match normalized
+    normalized_section = _normalize_for_match(section_val)
+    if normalized_section:
+        sql += f" AND ({ _sql_norm_expr('te.section') } = ? OR { _sql_norm_expr('te.section') } LIKE ? )"
+        params.extend([normalized_section, f"%{normalized_section}%"])
+
     sql += " ORDER BY te.start_time, te.end_time, te.id"
 
     rows = []
@@ -2462,6 +2512,37 @@ def _resolve_timetable_slots(db, branch_id="", subject_id="", selected_date=None
         print(f"[attendance] timetable_entries slots lookup failed: {repr(exc)}")
 
     print(f"[attendance] timetable_entries raw row count={len(rows)}")
+
+    # Fallbacks: if no rows and subject alias exists, try alias names
+    if not rows and subject_name:
+        key = _normalize_for_match(subject_name)
+        for alias, fulls in SUBJECT_ALIAS_MAP.items():
+            if key == alias or key == alias.lower():
+                for fullname in fulls:
+                    try_sql = sql.replace(f"%{normalized_subject}%", f"%{_normalize_for_match(fullname)}%")
+                    try:
+                        rows = db.execute(try_sql, tuple(params)).fetchall()
+                        if rows:
+                            print(f"[attendance] fallback matched alias {alias} -> {fullname}, rows={len(rows)}")
+                            break
+                    except Exception:
+                        continue
+            if rows:
+                break
+
+    # Additional fallback: if still no rows, try partial token matching on subject
+    if not rows and subject_name:
+        tokens = [t for t in re.split(r"[^A-Za-z0-9]+", subject_name) if t]
+        for tok in tokens:
+            try:
+                like = f"%{_normalize_for_match(tok)}%"
+                partial_sql = sql.replace(f"%{normalized_subject}%", like)
+                rows = db.execute(partial_sql, tuple(params)).fetchall()
+                if rows:
+                    print(f"[attendance] fallback partial token match {tok}, rows={len(rows)}")
+                    break
+            except Exception:
+                continue
 
     selected_subject_key = subject_name or (subject_id or "")
     selected_subject_variants = _subject_variants(selected_subject_key) if selected_subject_key else set()
@@ -2560,15 +2641,37 @@ def _resolve_timetable_slots(db, branch_id="", subject_id="", selected_date=None
             active_index = len(slots)
         slots.append(slot)
 
+    # If a period was provided explicitly, honor it
     if period_val:
         for idx, slot in enumerate(slots):
             if str(slot.get("period")) == period_val:
                 selected_index = idx
                 break
+
+    # Prefer active slot
     if selected_index is None and active_index is not None:
         selected_index = active_index
-    if selected_index is None and len(slots) == 1:
-        selected_index = 0
+
+    # If still not selected, try nearest slot for today: upcoming first, otherwise most recent past
+    if selected_index is None and slots:
+        if is_today:
+            now = current_time
+            upcoming = None
+            past = None
+            for idx, slot in enumerate(slots):
+                st = slot.get('start_time')
+                et = slot.get('end_time')
+                if st and st >= now:
+                    upcoming = idx
+                    break
+                past = idx
+            if upcoming is not None:
+                selected_index = upcoming
+            elif past is not None:
+                selected_index = past
+        else:
+            # For non-today dates, pick first slot
+            selected_index = 0
 
     selected_slot = slots[selected_index] if selected_index is not None and selected_index < len(slots) else None
     active_slot = slots[active_index] if active_index is not None and active_index < len(slots) else None

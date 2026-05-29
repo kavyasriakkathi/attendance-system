@@ -247,8 +247,8 @@
                                 `;
                             }
 
-                            // Auto-submit form to load students immediately for active/unique slots
-                            if ((data.unique_slot || data.active_slot) && !document.querySelector('.table-responsive')) {
+                            // Auto-submit form to load students immediately when a selected slot exists
+                            if ((data.selected_slot || data.unique_slot || data.active_slot) && !document.querySelector('.table-responsive')) {
                                 const filterForm = document.querySelector('form.form-row');
                                 if (filterForm) setTimeout(() => filterForm.submit(), 150);
                             }
