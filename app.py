@@ -24,6 +24,7 @@ from werkzeug.utils import secure_filename
 # socketio = SocketIO(app, cors_allowed_origins="*")
 
 app = Flask(__name__)
+logger = app.logger
 # Email sending is handled by the `send_email` helper defined later in the file.
 
 @app.context_processor
@@ -3423,7 +3424,7 @@ def mark_attendance():
     # Load subjects for the selected branch/section based on timetable entries
     if branch_id:
         try:
-            subjects = _get_timetable_subjects_for_branch(db, branch_id)
+            subjects = _get_timetable_subjects_for_branch(db, branch_id, section=section)
         except Exception as e:
             print(f"[ERROR] Subject loading failed: {repr(e)}")
             subjects = []
@@ -3483,7 +3484,7 @@ def mark_attendance():
         # Load subjects again for the selected branch/section based on timetable entries
         if branch_id:
             try:
-                subjects = _get_timetable_subjects_for_branch(db, branch_id)
+                subjects = _get_timetable_subjects_for_branch(db, branch_id, section=section)
             except Exception as e:
                 print(f"[ERROR] Subject loading failed (POST): {repr(e)}")
                 subjects = []
@@ -3759,12 +3760,17 @@ def api_current_period():
 @login_required
 def api_timetable_subjects():
     branch_id = request.args.get("branch_id") or ""
+    branch_name = (request.args.get("branch_name") or request.args.get("branch") or "").strip()
+    branch_section = (request.args.get("branch_section") or request.args.get("section") or "").strip()
     section = (request.args.get("section") or "").strip()
     db = None
     try:
         db = get_db()
-        subjects = _get_timetable_subjects_for_branch(db, branch_id, section=section) if branch_id else []
-        print(f"[api_timetable_subjects] branch={branch_id} section={section} subjects_found={len(subjects)}")
+        branch_lookup = branch_name or branch_id
+        section_lookup = branch_section or section
+        subjects = _get_timetable_subjects_for_branch(db, branch_lookup, section=section_lookup) if branch_lookup else []
+        logger.info("Subjects loaded for %s: %s", branch_lookup, subjects)
+        print(f"[api_timetable_subjects] branch={branch_lookup} section={section_lookup} subjects_found={len(subjects)}")
         return jsonify({"subjects": subjects, "count": len(subjects)})
     except Exception as e:
         print(f"[api_timetable_subjects] ERROR: {repr(e)}")

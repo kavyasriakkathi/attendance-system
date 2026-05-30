@@ -89,6 +89,9 @@ document.addEventListener('DOMContentLoaded', function() {
 
     function fetchPeriods() {
         const branch = branchSelect ? branchSelect.value.trim() : '';
+        const branchOption = branchSelect && branchSelect.selectedIndex >= 0 ? branchSelect.options[branchSelect.selectedIndex] : null;
+        const branchName = branchOption ? branchOption.text.trim() : '';
+        const branchSection = branchName.includes('-') ? branchName : '';
         const currentSubjectSelect = document.querySelector('select[name="subject_id"]');
         const subject = currentSubjectSelect ? currentSubjectSelect.value.trim() : '';
         const date = dateInput ? dateInput.value.trim() : '';
@@ -101,7 +104,7 @@ document.addEventListener('DOMContentLoaded', function() {
         if (noteEl) noteEl.textContent = 'Loading timetable...';
         if (periodWrap) periodWrap.innerHTML = '<div class="slot-empty">Loading timetable...</div>';
 
-        const query = new URLSearchParams({ branch_id: branch, subject_id: subject, date });
+        const query = new URLSearchParams({ branch_id: branch, branch_name: branchName, branch_section: branchSection, subject_id: subject, date });
 
         fetch('/api/timetable-slots?' + query.toString())
             .then(response => response.json())
@@ -122,11 +125,15 @@ document.addEventListener('DOMContentLoaded', function() {
     function fetchSubjects() {
         return new Promise((resolve) => {
             const branch = branchSelect ? branchSelect.value.trim() : '';
+            const branchOption = branchSelect && branchSelect.selectedIndex >= 0 ? branchSelect.options[branchSelect.selectedIndex] : null;
+            const branchName = branchOption ? branchOption.text.trim() : '';
+            const branchSection = branchName.includes('-') ? branchName : '';
             const container = document.getElementById('subject_container');
             if (!branch || !container) return resolve();
             // Show loading state
             container.innerHTML = '<div><label>Subject</label><div class="slot-empty">Loading subjects…</div></div>';
-            fetch('/api/timetable-subjects?branch_id=' + encodeURIComponent(branch))
+            const query = new URLSearchParams({ branch_id: branch, branch_name: branchName, branch_section: branchSection });
+            fetch('/api/timetable-subjects?' + query.toString())
                 .then(r => r.json())
                 .then(data => {
                     const subjects = Array.isArray(data && data.subjects) ? data.subjects : [];
