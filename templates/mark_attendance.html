@@ -177,7 +177,16 @@ document.addEventListener('DOMContentLoaded', function() {
         timer = setTimeout(fetchPeriods, 120);
     }
 
-    if (branchSelect) branchSelect.addEventListener('change', function() { fetchSubjects().then(() => { queueFetch(); }); });
+    if (branchSelect) branchSelect.addEventListener('change', function() {
+        const context = getBranchContext();
+        if (sectionInput) sectionInput.value = context.branchSection;
+        const filterForm = document.querySelector('form.form-row');
+        if (filterForm) {
+            filterForm.submit();
+            return;
+        }
+        fetchSubjects().then(() => { queueFetch(); });
+    });
     if (subjectSelect) subjectSelect.addEventListener('change', queueFetch);
     if (dateInput) dateInput.addEventListener('change', queueFetch);
 
