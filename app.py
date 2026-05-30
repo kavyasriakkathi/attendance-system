@@ -89,6 +89,7 @@ except Exception as imp_err:
 # Flag for other code
 TIMETABLE_AVAILABLE = bool(_timetable)
 print(f"TIMETABLE_AVAILABLE={TIMETABLE_AVAILABLE}")
+_ACADEMIC_DEPARTMENT_CODES = set(getattr(_timetable, "_ACADEMIC_DEPARTMENT_CODES", set()))
 
 
 def safe_api(f):
@@ -366,13 +367,20 @@ def split_branch_section(value):
     if not value:
         return "", ""
     v = str(value).strip().upper()
+    if v in _ACADEMIC_DEPARTMENT_CODES:
+        return v, ""
     # Split by hyphen, slash, or space
     parts = re.split(r"[-/ ]+", v)
     if len(parts) >= 2:
         return parts[0], parts[-1]
     # Check if name is like CSEA or CSMB
-    m = re.match(r"^([A-Z]+)([A-Z0-9])$", v)
-    if m:
+    for code in sorted(_ACADEMIC_DEPARTMENT_CODES, key=len, reverse=True):
+        if v.startswith(code) and len(v) > len(code):
+            suffix = v[len(code):].strip("- _/")
+            if suffix and re.fullmatch(r"[A-Z0-9]{1,4}", suffix):
+                return code, suffix
+    m = re.match(r"^([A-Z]{2,5})([A-Z0-9]{1,4})$", v)
+    if m and m.group(1) not in _ACADEMIC_DEPARTMENT_CODES:
         return m.group(1), m.group(2)
     return v, ""
 
@@ -467,12 +475,12 @@ def _get_timetable_subjects_for_branch(db, branch_id, section=None):
     # Prefer explicitly provided section parameter over derived section
     section_val = (section or derived_section or "").strip()
 
-    # Collect branch ids matching the base token (prefix match), so selecting
-    # 'CSE' includes 'CSE-A','CSE-B', etc.
+    # Collect branch ids matching the exact base token so timetable rows come
+    # from the intended branch only.
     branch_ids_to_match = []
     try:
         if base_branch_name:
-            rows = db.execute("SELECT id FROM branches WHERE UPPER(name) LIKE ?", (base_branch_name.upper() + '%',)).fetchall()
+            rows = db.execute("SELECT id FROM branches WHERE UPPER(name) = ?", (base_branch_name.upper(),)).fetchall()
             branch_ids_to_match = [row_get(r, 'id') for r in rows if row_get(r, 'id')]
     except Exception:
         branch_ids_to_match = []
@@ -493,7 +501,8 @@ def _get_timetable_subjects_for_branch(db, branch_id, section=None):
                 "LEFT JOIN branches b ON te.branch_id = b.id "
                 f"WHERE te.branch_id IN ({ph})"
             )
-            rows = db.execute(sql, tuple(branch_ids_to_match)).fetchall()
+            params = tuple(branch_ids_to_match)
+            rows = db.execute(sql, params).fetchall()
         else:
             sql = (
                 "SELECT te.*, s.name AS subject_name_db, b.name AS branch_name_db "
@@ -3770,11 +3779,8 @@ def api_timetable_subjects():
         branch_lookup = branch_name or branch_id
         section_lookup = branch_section or section
         subjects = _get_timetable_subjects_for_branch(db, branch_lookup, section=section_lookup) if branch_lookup else []
-        logger.info("Subjects loaded for %s: %s", branch_lookup, subjects)
-        print(f"[api_timetable_subjects] branch={branch_lookup} section={section_lookup} subjects_found={len(subjects)}")
         return jsonify({"subjects": subjects, "count": len(subjects)})
     except Exception as e:
-        print(f"[api_timetable_subjects] ERROR: {repr(e)}")
         return jsonify({"subjects": [], "count": 0, "error": str(e)})
     finally:
         if db:
