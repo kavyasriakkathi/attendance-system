@@ -3,13 +3,13 @@
 <script>
 document.addEventListener('DOMContentLoaded', function() {
     const branchSelect = document.querySelector('select[name="branch_id"]');
-    const sectionSelect = document.querySelector('select[name="section"]');
     const subjectSelect = document.querySelector('select[name="subject_id"]');
     const dateInput = document.querySelector('input[name="date"]');
     const loadBtn = document.getElementById('load_students_btn');
     const periodWrap = document.getElementById('timetable_period_wrap');
     const badgesWrap = document.getElementById('timetable_badges');
     const noteEl = document.getElementById('schedule_note');
+    const sectionInput = document.getElementById('section_hidden');
     let timer = null;
     let slotsCache = [];
 
@@ -37,55 +37,9 @@ document.addEventListener('DOMContentLoaded', function() {
         const branch = branchSelect ? branchSelect.value.trim() : '';
         const branchOption = branchSelect && branchSelect.selectedIndex >= 0 ? branchSelect.options[branchSelect.selectedIndex] : null;
         const branchName = branchOption ? branchOption.text.trim() : '';
-        const branchSection = sectionSelect ? sectionSelect.value.trim() : '';
+        const branchSection = branchName.includes('-') ? branchName : '';
+        if (sectionInput) sectionInput.value = branchSection;
         return { branch, branchName, branchSection };
-    }
-
-    function populateSections(sections, preferredSection) {
-        if (!sectionSelect) return;
-        const available = Array.isArray(sections) ? sections : [];
-        sectionSelect.innerHTML = '<option value="">Choose section</option>';
-        available.forEach(value => {
-            const option = document.createElement('option');
-            option.value = value;
-            option.textContent = value;
-            sectionSelect.appendChild(option);
-        });
-
-        if (preferredSection) {
-            const match = Array.from(sectionSelect.options).find(option => option.value === preferredSection || option.textContent === preferredSection);
-            if (match) {
-                sectionSelect.value = match.value;
-                return;
-            }
-        }
-
-        if (!sectionSelect.value && sectionSelect.options.length > 1) {
-            sectionSelect.value = sectionSelect.options[1].value;
-        }
-    }
-
-    function fetchSections() {
-        return new Promise((resolve) => {
-            if (!branchSelect || !sectionSelect) return resolve();
-            const branch = branchSelect.value.trim();
-            if (!branch) {
-                populateSections([], '');
-                return resolve();
-            }
-            fetch('/api/timetable-sections?' + new URLSearchParams({ branch_id: branch }).toString())
-                .then(response => response.json())
-                .then(data => {
-                    const sections = Array.isArray(data && data.sections) ? data.sections : [];
-                    const initialSection = new URLSearchParams(window.location.search).get('section') || '';
-                    populateSections(sections, initialSection);
-                    resolve();
-                })
-                .catch(() => {
-                    populateSections([], '');
-                    resolve();
-                });
-        });
     }
 
     function updateBadges(slot) {
@@ -223,10 +177,7 @@ document.addEventListener('DOMContentLoaded', function() {
         timer = setTimeout(fetchPeriods, 120);
     }
 
-    if (branchSelect) branchSelect.addEventListener('change', function() {
-        fetchSections().then(() => { fetchSubjects().then(() => { queueFetch(); }); });
-    });
-    if (sectionSelect) sectionSelect.addEventListener('change', function() { fetchSubjects().then(() => { queueFetch(); }); });
+    if (branchSelect) branchSelect.addEventListener('change', function() { fetchSubjects().then(() => { queueFetch(); }); });
     if (subjectSelect) subjectSelect.addEventListener('change', queueFetch);
     if (dateInput) dateInput.addEventListener('change', queueFetch);
 
@@ -235,7 +186,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
     if (branchSelect && branchSelect.value) {
         // Ensure subjects are populated for the selected branch on initial load
-        fetchSections().then(() => fetchSubjects().then(() => {
+        fetchSubjects().then(() => {
             // If URL carried a subject token (id or name), try to pre-select it
             if (initialSubject) {
                 const newSubject = document.querySelector('select[name="subject_id"]');
@@ -245,7 +196,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 }
             }
             queueFetch();
-        }));
+        });
     } else {
         renderPeriods({ slots: [] });
     }
@@ -268,21 +219,13 @@ document.head.appendChild(style);
     <h1><i class="fa-solid fa-calendar-check"></i> Mark Attendance</h1>
     <p class="notice">Select a branch, subject, and date to manage attendance.</p>
     <form method="get" class="form-row">
+        <input type="hidden" name="section" id="section_hidden" value="{{ section or '' }}" />
         <div>
             <label>Branch</label>
             <select name="branch_id" required>
                 <option value="">Choose branch</option>
                 {% for branch in branches %}
                 <option value="{{ branch.id }}" {% if branch_id and branch.id|string == branch_id|string %}selected{% endif %}>{{ branch.name }}</option>
-                {% endfor %}
-            </select>
-        </div>
-        <div>
-            <label>Section</label>
-            <select name="section" required>
-                <option value="">Choose section</option>
-                {% for sec in sections or [] %}
-                <option value="{{ sec }}" {% if section and sec|string == section|string %}selected{% endif %}>{{ sec }}</option>
                 {% endfor %}
             </select>
         </div>
