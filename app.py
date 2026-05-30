@@ -1839,18 +1839,19 @@ def dashboard():
         upcoming_timetable = []
         try:
             # Use module imported at startup if available, else attempt import safely
-            if '_timetable' not in globals() or _timetable is None:
+            timetable_module = globals().get('_timetable')
+            if timetable_module is None:
                 try:
-                    import timetable as _timetable
+                    import timetable as timetable_module
                     print("[dashboard] timetable module imported at lookup time")
                 except Exception as imp_err:
-                    _timetable = None
+                    timetable_module = None
                     print("[dashboard] timetable import failed:", repr(imp_err))
                     traceback.print_exc()
-            if _timetable:
+            if timetable_module:
                 try:
-                    current_active_period = _timetable.get_global_active_class(db)
-                    upcoming_timetable = _timetable.get_upcoming_classes(db, "", "", limit=4)
+                    current_active_period = timetable_module.get_global_active_class(db)
+                    upcoming_timetable = timetable_module.get_upcoming_classes(db, "", "", limit=4)
                 except Exception as timetable_err:
                     print(f"[dashboard] timetable function call failed: {repr(timetable_err)}")
                     traceback.print_exc()
