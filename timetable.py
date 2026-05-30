@@ -347,6 +347,28 @@ def _normalize_timetable_section_name(value: str, branch_value: str = "", row_te
     return text.upper()
 
 
+def _normalize_timetable_branch_section(branch_value: str, section_value: str = "", row_text: str = "") -> tuple[str, str]:
+    """Normalize branch/section pairs from either separate or combined labels."""
+    branch_text = _clean_text(branch_value)
+    section_text = _clean_text(section_value)
+
+    branch_part, section_part = split_branch_section(branch_text or section_text or row_text)
+    if branch_part in _ACADEMIC_DEPARTMENT_CODES and section_part:
+        branch_text = branch_part
+        section_text = f"{branch_part}-{section_part}"
+
+    branch = _normalize_timetable_branch_name(branch_text, row_text=row_text)
+    if not branch and branch_part in _ACADEMIC_DEPARTMENT_CODES:
+        branch = branch_part
+
+    section = _normalize_timetable_section_name(section_text, branch_value=branch, row_text=row_text)
+    if not section and branch and section_part:
+        section = f"{branch}-{section_part}"
+    if not section and branch and branch_text and branch_text != branch:
+        section = _normalize_timetable_section_name(branch_text, branch_value=branch, row_text=row_text)
+    return branch, section
+
+
 def _normalize_timetable_faculty_name(value: str) -> str:
     text = _clean_text(value)
     if not text or _contains_blocked_timetable_text(text):
@@ -807,10 +829,7 @@ def _normalize_timetable_subject_name(value: str) -> str:
 
 def _normalize_timetable_row(row: Dict[str, str], row_text: str = "", previous: Optional[Dict[str, str]] = None) -> Dict[str, str]:
     normalized = {key: _clean_text(value) for key, value in row.items()}
-    normalized["branch"] = _normalize_timetable_branch_name(normalized.get("branch"), row_text=row_text)
-    normalized["section"] = _normalize_timetable_section_name(normalized.get("section"), branch_value=normalized.get("branch"), row_text=row_text)
-    if not normalized["branch"] and normalized["section"] and "-" in normalized["section"]:
-        normalized["branch"] = _normalize_timetable_branch_name(normalized["section"].split("-", 1)[0], row_text=row_text)
+    normalized["branch"], normalized["section"] = _normalize_timetable_branch_section(normalized.get("branch"), normalized.get("section"), row_text=row_text)
     normalized["semester"] = _safe_int(normalized.get("semester") or _semester_from_text(f"{normalized.get('semester', '')} {row_text}"))
     normalized["day"] = _normalize_display_text(normalized.get("day"))
     start_time, end_time = _split_time_value(normalized.get("start_time"), normalized.get("end_time"))
@@ -2733,8 +2752,7 @@ def _normalize_academic_section_code(value: str) -> str:
 
 
 def _is_valid_academic_timetable_row(row: Dict[str, str]) -> bool:
-    branch_value = _clean_text(row.get("branch"))
-    section_value = _clean_text(row.get("section"))
+    branch_value, section_value = _normalize_timetable_branch_section(row.get("branch"), row.get("section"), row_text=_clean_text(row.get("day")) + " " + _clean_text(row.get("subject_name")))
     subject_value = _normalize_timetable_subject_name(row.get("subject_name"))
     faculty_value = _clean_text(row.get("faculty_name"))
     day_value = _clean_text(row.get("day"))
@@ -2748,15 +2766,14 @@ def _is_valid_academic_timetable_row(row: Dict[str, str]) -> bool:
     if _contains_blocked_timetable_text(branch_value) or _contains_blocked_timetable_text(section_value):
         return False
 
-    if not re.fullmatch(r"[A-Z]{2,5}", branch_value):
-        return False
-
     department_code = _normalize_academic_department_code(branch_value)
+    if not department_code and section_value:
+        department_code = _normalize_academic_department_code(section_value.split("-", 1)[0])
     section_code = _normalize_academic_section_code(section_value)
+    if not section_code and branch_value and section_value and "-" in section_value:
+        section_code = _normalize_academic_section_code(section_value)
     if not section_code:
         return False
-    if not department_code:
-        department_code = _normalize_academic_department_code(section_code.split("-", 1)[0])
     if department_code not in _ACADEMIC_DEPARTMENT_CODES:
         return False
     if not section_code.startswith(f"{department_code}-"):
@@ -2875,8 +2892,16 @@ def _resolve_or_create_branch_id(db, branch_name: str, branch_cache: Optional[Di
         return branch_cache[cache_key]
 
     candidates = [branch_name]
+    branch_part, _ = split_branch_section(branch_name)
+    if branch_part and branch_part != branch_name:
+        candidates.append(branch_part)
+    normalized_branch = _normalize_timetable_branch_name(branch_name)
+    if normalized_branch and normalized_branch not in candidates:
+        candidates.append(normalized_branch)
     if "-" in branch_name:
         candidates.append(_clean_text(branch_name.split("-", 1)[0]))
+    if " " in branch_name:
+        candidates.append(_clean_text(branch_name.split(" ", 1)[0]))
     if branch_name.endswith("SECTION"):
         candidates.append(branch_name[:-7].strip())
 
@@ -3235,6 +3260,7 @@ def import_slots_streaming(db, slots_iter: Iterable[Dict]):
     seen_norm_keys = set()
     subject_index = _build_subject_lookup_index(db)
     teacher_index = _build_teacher_lookup_index(db)
+    branch_subject_counts: Dict[str, set] = {}
     for row_index, slot_in in enumerate(slots_iter, start=1):
         mem_estimate = (
             (len(branch_cache) + len(subject_cache) + len(teacher_cache)) * 80
@@ -3272,6 +3298,9 @@ def import_slots_streaming(db, slots_iter: Iterable[Dict]):
             raw_counters["skipped_invalid"] += 1
             _write_preview_line(preview_path, preview_state, {"index": row_index, "reason": "invalid_row", "row": row})
             continue
+
+        branch_subject_key = f"{row['branch']}|{row['section']}"
+        branch_subject_counts.setdefault(branch_subject_key, set()).add(row["subject_name"])
 
         try:
             cur = _db_execute(
@@ -3382,6 +3411,7 @@ def import_slots_streaming(db, slots_iter: Iterable[Dict]):
                 else:
                     normalized_counters["inserted"] += 1
                     inserted_since_commit += 1
+                    branch_subject_counts.setdefault(branch_subject_key, set()).add(row["subject_name"])
                     logger.info(
                         "inserted_row row_index=%s branch_id=%s section=%s semester=%s day=%s start_time=%s end_time=%s subject_id=%s teacher_id=%s room=%s",
                         row_index,
@@ -3462,9 +3492,13 @@ def import_slots_streaming(db, slots_iter: Iterable[Dict]):
         peak_mem_estimate_bytes = final_mem_estimate
 
     elapsed_seconds = time.time() - start_ts
+    try:
+        logger.info("import_slots_streaming branch subjects: %s", {key: sorted(values) for key, values in branch_subject_counts.items()})
+    except Exception:
+        logger.exception("Failed to log streaming branch subject summary")
     return {
         "raw_insert": {"counters": raw_counters},
-        "normalized_insert": {"counters": normalized_counters, "diagnostics": normalized_diagnostics},
+        "normalized_insert": {"counters": normalized_counters, "diagnostics": normalized_diagnostics, "branch_subject_counts": {key: sorted(values) for key, values in branch_subject_counts.items()}},
         "preview_path": preview_path if preview_state["written"] else None,
         "preview_written": preview_state["written"],
         "batch_commits": batch_commits,
@@ -3506,6 +3540,7 @@ def import_slots(db, slots: List[Dict]):
 
     try:
         logger.info("import_slots: parsed_rows_count=%d", len(slots))
+        branch_subject_counts: Dict[str, set] = {}
         inserted_since_commit = 0
         for row_index, s in enumerate(slots, start=1):
             counters["parsed"] += 1
@@ -3543,6 +3578,9 @@ def import_slots(db, slots: List[Dict]):
                 # keep a small in-memory sample for immediate return
                 skipped_rows_omitted = _append_skipped_sample(skipped_rows, skipped_rows_omitted, {"index": row_index, "raw": s, "normalized": row, "reason": reason})
                 continue
+
+            branch_subject_key = f"{row['branch']}|{row['section']}"
+            branch_subject_counts.setdefault(branch_subject_key, set()).add(row["subject_name"])
 
             duplicate_where = "COALESCE(branch, '') = COALESCE(%s, '') AND COALESCE(section, '') = COALESCE(%s, '') AND COALESCE(day, '') = COALESCE(%s, '') AND COALESCE(start_time, '') = COALESCE(%s, '') AND COALESCE(end_time, '') = COALESCE(%s, '') AND COALESCE(subject_name, '') = COALESCE(%s, '') AND COALESCE(faculty_name, '') = COALESCE(%s, '')"
             try:
@@ -3627,6 +3665,10 @@ def import_slots(db, slots: List[Dict]):
         "import_slots summary: %s",
         {k: counters.get(k) for k in ("total", "parsed", "inserted", "skipped_total", "skipped_invalid", "skipped_duplicate", "failures", "invalid_section", "normalization_failures")},
     )
+    try:
+        logger.info("import_slots branch subjects: %s", {key: sorted(values) for key, values in branch_subject_counts.items()})
+    except Exception:
+        logger.exception("Failed to log raw branch subject summary")
     # capture peak memory if tracemalloc was used
     peak = None
     try:
@@ -3682,6 +3724,7 @@ def import_slots_normalized(db, slots: List[Dict]):
     subject_index = _build_subject_lookup_index(db)
     teacher_index = _build_teacher_lookup_index(db)
     seen_norm_keys = set()
+    branch_subject_counts: Dict[str, set] = {}
     try:
         inserted_since_commit = 0
         for row_index, s in enumerate(slots, start=1):
@@ -3726,6 +3769,9 @@ def import_slots_normalized(db, slots: List[Dict]):
                         logger.exception("Failed to write normalized skipped preview line")
                 skipped_rows_omitted = _append_skipped_sample(skipped_rows, skipped_rows_omitted, {"index": row_index, "raw": s, "normalized": normalized_row, "reason": reason})
                 continue
+
+            branch_subject_key = f"{bname}|{sec}"
+            branch_subject_counts.setdefault(branch_subject_key, set()).add(subj_name)
 
             branch_key = bname.strip().lower()
             branch_id = branch_cache.get(branch_key)
@@ -3842,6 +3888,7 @@ def import_slots_normalized(db, slots: List[Dict]):
                     (entry_row['branch_id'], entry_row['section'], entry_row['semester'], entry_row['day'], entry_row['start_time'], entry_row['end_time'], entry_row['subject_id'], entry_row['teacher_id'], entry_row['is_lab'], entry_row['room']),
                 )
                 counters["inserted"] += 1
+                branch_subject_counts.setdefault(branch_subject_key, set()).add(subj_name)
             except Exception:
                 counters["failures"] += 1
                 counters["normalization_failures"] += 1
@@ -3925,6 +3972,10 @@ def import_slots_normalized(db, slots: List[Dict]):
         "import_slots_normalized summary: %s",
         {k: counters.get(k) for k in ("total", "parsed", "inserted", "skipped_total", "skipped_branch", "skipped_unresolved_subject", "skipped_unresolved_teacher", "skipped_invalid", "skipped_duplicate", "failures", "missing_subjects", "missing_teachers", "invalid_section", "normalization_failures")},
     )
+    try:
+        logger.info("import_slots_normalized branch subjects: %s", {key: sorted(values) for key, values in branch_subject_counts.items()})
+    except Exception:
+        logger.exception("Failed to log normalized branch subject summary")
     peak = None
     try:
         if use_tracemalloc:
@@ -4165,21 +4216,15 @@ def register_routes(app, db_getter=None):
                     if ext == ".pdf":
                         if pdf_stats and pdf_stats.get("validation_errors"):
                             detail = "; ".join(pdf_stats.get("validation_errors")[:3])
-                            flash(f"PDF validation failed: {detail}", "error")
-                            session["timetable_manage_banner"] = f"Import failed: {detail}"
+                            raise TimetablePDFValidationError(detail)
                         else:
-                            flash(
-                                "No timetable rows were parsed from the PDF. Ensure the PDF contains a timetable grid with a Day column, time slots, and a faculty mapping table below it.",
-                                "error",
+                            raise TimetablePDFValidationError(
+                                "No timetable rows were parsed from the PDF. Ensure the PDF contains a timetable grid with a Day column, time slots, and a faculty mapping table below it."
                             )
-                            session["timetable_manage_banner"] = "Import failed: no timetable rows parsed from PDF"
                     else:
-                        flash(
-                            "No timetable rows were parsed from the uploaded file. Check that the DOCX contains a readable table with branch, section, day, time, and subject columns.",
-                            "error",
+                        raise TimetablePDFValidationError(
+                            "No timetable rows were parsed from the uploaded file. Check that the DOCX contains a readable table with branch, section, day, time, and subject columns."
                         )
-                        session["timetable_manage_banner"] = "Import failed: no timetable rows parsed from DOCX"
-                    return redirect(url_for("timetable_manage"))
 
                 # Persist a temporary preview of skipped rows for admin review
                 preview = {
@@ -4224,6 +4269,10 @@ def register_routes(app, db_getter=None):
                     skipped_rows,
                     inserted_rows,
                 )
+                if inserted_rows <= 0:
+                    raise TimetablePDFValidationError(
+                        "The timetable parser produced rows, but none were inserted into timetable_entries. Check branch/section normalization, subject mapping, and timetable row validation."
+                    )
             except TimetablePDFValidationError as e:
                 logger.warning("PDF validation failed: %s", str(e))
                 flash(str(e), "error")
