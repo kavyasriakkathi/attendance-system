@@ -73,20 +73,7 @@ try:
     for ep in expected:
         registered = ep in registered_paths
         print(f"TIMETABLE ROUTE CHECK: {ep} registered={registered}")
-    try:
-        # Quick DB check: open and close a connection
-        db_test = get_db()
-        try:
-            db_test.execute("SELECT 1")
-        finally:
-            try:
-                db_test.close()
-            except Exception:
-                pass
-        print("TIMETABLE DB CONNECTION OK")
-    except Exception as db_check_err:
-        print("TIMETABLE DB CHECK FAILED:", repr(db_check_err))
-        traceback.print_exc()
+    print("TIMETABLE DB CHECK SKIPPED: database configuration initializes later")
 except Exception as imp_err:
     _timetable = None
     timetable_import_error = imp_err
