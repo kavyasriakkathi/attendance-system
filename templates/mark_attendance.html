@@ -9,6 +9,7 @@ document.addEventListener('DOMContentLoaded', function() {
     const periodWrap = document.getElementById('timetable_period_wrap');
     const badgesWrap = document.getElementById('timetable_badges');
     const noteEl = document.getElementById('schedule_note');
+    const sectionInput = document.getElementById('section_hidden');
     let timer = null;
     let slotsCache = [];
 
@@ -30,6 +31,15 @@ document.addEventListener('DOMContentLoaded', function() {
         const faculty = slot.faculty_name || slot.faculty || '';
         const room = slot.room || '';
         return `${slot.start_time} - ${slot.end_time}${subject ? ` (${subject})` : ''}${faculty ? ` • ${faculty}` : ''}${room ? ` • Room ${room}` : ''}`;
+    }
+
+    function getBranchContext() {
+        const branch = branchSelect ? branchSelect.value.trim() : '';
+        const branchOption = branchSelect && branchSelect.selectedIndex >= 0 ? branchSelect.options[branchSelect.selectedIndex] : null;
+        const branchName = branchOption ? branchOption.text.trim() : '';
+        const branchSection = branchName.includes('-') ? branchName : '';
+        if (sectionInput) sectionInput.value = branchSection;
+        return { branch, branchName, branchSection };
     }
 
     function updateBadges(slot) {
@@ -88,10 +98,10 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 
     function fetchPeriods() {
-        const branch = branchSelect ? branchSelect.value.trim() : '';
-        const branchOption = branchSelect && branchSelect.selectedIndex >= 0 ? branchSelect.options[branchSelect.selectedIndex] : null;
-        const branchName = branchOption ? branchOption.text.trim() : '';
-        const branchSection = branchName.includes('-') ? branchName : '';
+        const branchContext = getBranchContext();
+        const branch = branchContext.branch;
+        const branchName = branchContext.branchName;
+        const branchSection = branchContext.branchSection;
         const currentSubjectSelect = document.querySelector('select[name="subject_id"]');
         const subject = currentSubjectSelect ? currentSubjectSelect.value.trim() : '';
         const date = dateInput ? dateInput.value.trim() : '';
@@ -124,10 +134,10 @@ document.addEventListener('DOMContentLoaded', function() {
     // Fetch distinct subjects for the selected branch from timetable_entries and populate the subject select.
     function fetchSubjects() {
         return new Promise((resolve) => {
-            const branch = branchSelect ? branchSelect.value.trim() : '';
-            const branchOption = branchSelect && branchSelect.selectedIndex >= 0 ? branchSelect.options[branchSelect.selectedIndex] : null;
-            const branchName = branchOption ? branchOption.text.trim() : '';
-            const branchSection = branchName.includes('-') ? branchName : '';
+            const branchContext = getBranchContext();
+            const branch = branchContext.branch;
+            const branchName = branchContext.branchName;
+            const branchSection = branchContext.branchSection;
             const container = document.getElementById('subject_container');
             if (!branch || !container) return resolve();
             // Show loading state
@@ -209,9 +219,7 @@ document.head.appendChild(style);
     <h1><i class="fa-solid fa-calendar-check"></i> Mark Attendance</h1>
     <p class="notice">Select a branch, subject, and date to manage attendance.</p>
     <form method="get" class="form-row">
-        {% if section %}
-        <input type="hidden" name="section" value="{{ section }}" />
-        {% endif %}
+        <input type="hidden" name="section" id="section_hidden" value="{{ section or '' }}" />
         <div>
             <label>Branch</label>
             <select name="branch_id" required>

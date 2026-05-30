@@ -3776,7 +3776,7 @@ def api_timetable_subjects():
     db = None
     try:
         db = get_db()
-        branch_lookup = branch_name or branch_id
+        branch_lookup = branch_id or branch_name
         section_lookup = branch_section or section
         subjects = _get_timetable_subjects_for_branch(db, branch_lookup, section=section_lookup) if branch_lookup else []
         return jsonify({"subjects": subjects, "count": len(subjects)})
