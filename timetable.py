@@ -4359,7 +4359,7 @@ def register_routes(app, db_getter=None):
                 entries = _db_execute(db, sql, (PAGE_SIZE, offset)).fetchall()
                 entries = [dict(r) for r in entries]
                 rows_source = 'raw'
-                    logger.info("Timetable manage raw fallback slots loaded=%s", len(entries))
+                logger.info("Timetable manage raw fallback slots loaded=%s", len(entries))
         except Exception:
             logger.exception("Failed to load paginated timetable rows")
             entries = []
