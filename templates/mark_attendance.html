@@ -3,13 +3,13 @@
 <script>
 document.addEventListener('DOMContentLoaded', function() {
     const branchSelect = document.querySelector('select[name="branch_id"]');
+    const sectionSelect = document.querySelector('select[name="section"]');
     const subjectSelect = document.querySelector('select[name="subject_id"]');
     const dateInput = document.querySelector('input[name="date"]');
     const loadBtn = document.getElementById('load_students_btn');
     const periodWrap = document.getElementById('timetable_period_wrap');
     const badgesWrap = document.getElementById('timetable_badges');
     const noteEl = document.getElementById('schedule_note');
-    const sectionInput = document.getElementById('section_hidden');
     let timer = null;
     let slotsCache = [];
 
@@ -37,9 +37,55 @@ document.addEventListener('DOMContentLoaded', function() {
         const branch = branchSelect ? branchSelect.value.trim() : '';
         const branchOption = branchSelect && branchSelect.selectedIndex >= 0 ? branchSelect.options[branchSelect.selectedIndex] : null;
         const branchName = branchOption ? branchOption.text.trim() : '';
-        const branchSection = branchName.includes('-') ? branchName : '';
-        if (sectionInput) sectionInput.value = branchSection;
+        const branchSection = sectionSelect ? sectionSelect.value.trim() : '';
         return { branch, branchName, branchSection };
+    }
+
+    function populateSections(sections, preferredSection) {
+        if (!sectionSelect) return;
+        const available = Array.isArray(sections) ? sections : [];
+        sectionSelect.innerHTML = '<option value="">Choose section</option>';
+        available.forEach(value => {
+            const option = document.createElement('option');
+            option.value = value;
+            option.textContent = value;
+            sectionSelect.appendChild(option);
+        });
+
+        if (preferredSection) {
+            const match = Array.from(sectionSelect.options).find(option => option.value === preferredSection || option.textContent === preferredSection);
+            if (match) {
+                sectionSelect.value = match.value;
+                return;
+            }
+        }
+
+        if (!sectionSelect.value && sectionSelect.options.length > 1) {
+            sectionSelect.value = sectionSelect.options[1].value;
+        }
+    }
+
+    function fetchSections() {
+        return new Promise((resolve) => {
+            if (!branchSelect || !sectionSelect) return resolve();
+            const branch = branchSelect.value.trim();
+            if (!branch) {
+                populateSections([], '');
+                return resolve();
+            }
+            fetch('/api/timetable-sections?' + new URLSearchParams({ branch_id: branch }).toString())
+                .then(response => response.json())
+                .then(data => {
+                    const sections = Array.isArray(data && data.sections) ? data.sections : [];
+                    const initialSection = new URLSearchParams(window.location.search).get('section') || '';
+                    populateSections(sections, initialSection);
+                    resolve();
+                })
+                .catch(() => {
+                    populateSections([], '');
+                    resolve();
+                });
+        });
     }
 
     function updateBadges(slot) {
@@ -177,7 +223,10 @@ document.addEventListener('DOMContentLoaded', function() {
         timer = setTimeout(fetchPeriods, 120);
     }
 
-    if (branchSelect) branchSelect.addEventListener('change', function() { fetchSubjects().then(() => { queueFetch(); }); });
+    if (branchSelect) branchSelect.addEventListener('change', function() {
+        fetchSections().then(() => { fetchSubjects().then(() => { queueFetch(); }); });
+    });
+    if (sectionSelect) sectionSelect.addEventListener('change', function() { fetchSubjects().then(() => { queueFetch(); }); });
     if (subjectSelect) subjectSelect.addEventListener('change', queueFetch);
     if (dateInput) dateInput.addEventListener('change', queueFetch);
 
@@ -186,7 +235,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
     if (branchSelect && branchSelect.value) {
         // Ensure subjects are populated for the selected branch on initial load
-        fetchSubjects().then(() => {
+        fetchSections().then(() => fetchSubjects().then(() => {
             // If URL carried a subject token (id or name), try to pre-select it
             if (initialSubject) {
                 const newSubject = document.querySelector('select[name="subject_id"]');
@@ -196,7 +245,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 }
             }
             queueFetch();
-        });
+        }));
     } else {
         renderPeriods({ slots: [] });
     }
@@ -219,13 +268,21 @@ document.head.appendChild(style);
     <h1><i class="fa-solid fa-calendar-check"></i> Mark Attendance</h1>
     <p class="notice">Select a branch, subject, and date to manage attendance.</p>
     <form method="get" class="form-row">
-        <input type="hidden" name="section" id="section_hidden" value="{{ section or '' }}" />
         <div>
             <label>Branch</label>
             <select name="branch_id" required>
                 <option value="">Choose branch</option>
                 {% for branch in branches %}
                 <option value="{{ branch.id }}" {% if branch_id and branch.id|string == branch_id|string %}selected{% endif %}>{{ branch.name }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div>
+            <label>Section</label>
+            <select name="section" required>
+                <option value="">Choose section</option>
+                {% for sec in sections or [] %}
+                <option value="{{ sec }}" {% if section and sec|string == section|string %}selected{% endif %}>{{ sec }}</option>
                 {% endfor %}
             </select>
         </div>
@@ -287,7 +344,7 @@ document.head.appendChild(style);
             <button id="load_students_btn" type="submit" disabled>Load Students</button>
             <div id="timetable_spinner" style="display:none; align-self:center;">Loading…</div>
             {% if subject_id %}
-            <a href="{{ url_for('mark_attendance', branch_id=branch_id, subject_id=subject_id, date=prev_date, period=period) }}" class="button small" style="text-align: center; background: var(--text-secondary);">← Previous Day</a>
+            <a href="{{ url_for('mark_attendance', branch_id=branch_id, section=section, subject_id=subject_id, date=prev_date, period=period) }}" class="button small" style="text-align: center; background: var(--text-secondary);">← Previous Day</a>
             {% endif %}
         </div>
         {% endif %}
@@ -299,7 +356,7 @@ document.head.appendChild(style);
         <p>Quick select from dates that already have attendance records:</p>
         <div class="date-buttons">
             {% for date_info in existing_dates %}
-            <a href="{{ url_for('mark_attendance', branch_id=branch_id, subject_id=subject_id, date=date_info.date) }}" class="date-button">
+            <a href="{{ url_for('mark_attendance', branch_id=branch_id, section=section, subject_id=subject_id, date=date_info.date) }}" class="date-button">
                 {{ date_info.date }} ({{ date_info.count }} students)
             </a>
             {% endfor %}
@@ -310,6 +367,7 @@ document.head.appendChild(style);
 <div class="card">
     <form method="post">
         <input type="hidden" name="branch_id" value="{{ branch_id }}" />
+        <input type="hidden" name="section" value="{{ section }}" />
         <input type="hidden" name="subject_id" value="{{ subject_id }}" />
         <input type="hidden" name="date" value="{{ selected_date }}" />
         <input type="hidden" name="period" value="{{ period }}" />
@@ -373,7 +431,7 @@ document.head.appendChild(style);
         </div>
         <div style="display: flex; gap: 10px; flex-wrap: wrap; align-items: center;">
             <button type="submit" {% if not can_mark_attendance %}disabled title="Cannot mark attendance: schedule mismatch or outside active slot"{% endif %}>Save Attendance</button>
-            <a href="{{ url_for('generate_qr', branch_id=branch_id, subject_id=subject_id, date=selected_date, period=period) }}" class="button" style="background-color: #2196F3; text-decoration: none; display: inline-flex; align-items: center; justify-content: center;">Generate QR Code</a>
+            <a href="{{ url_for('generate_qr', branch_id=branch_id, section=section, subject_id=subject_id, date=selected_date, period=period) }}" class="button" style="background-color: #2196F3; text-decoration: none; display: inline-flex; align-items: center; justify-content: center;">Generate QR Code</a>
             <button id="copyAttendanceLinkBtn" type="button" class="button" style="background-color: #4CAF50;">Copy Attendance Scan URL</button>
             <span id="copyStatus" style="color: #4CAF50; display: none; font-weight: bold;">Link copied!</span>
         </div>
