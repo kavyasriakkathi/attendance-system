@@ -16,9 +16,13 @@
             <label>Subject</label>
             <select name="subject_id" onchange="this.form.submit()" required>
                 <option value="">Select subject</option>
-                {% for subject in teacher.assigned_subjects %}
-                <option value="{{ subject.id }}" {% if subject.id == teacher.current_subject_id %}selected{% endif %}>{{ subject.name }}</option>
-                {% endfor %}
+                {% if subjects %}
+                    {% for subject in subjects %}
+                    <option value="{{ subject.id }}" {% if subject.id == teacher.current_subject_id %}selected{% endif %}>{{ subject.name }}</option>
+                    {% endfor %}
+                {% else %}
+                    <option value="" disabled>No subjects found in timetable for this branch</option>
+                {% endif %}
             </select>
         </div>
         <div>

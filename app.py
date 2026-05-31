@@ -119,7 +119,9 @@ if db_env and db_env.startswith("postgres"):
 else:
     # Always use absolute path relative to app.py location
     app_dir = os.path.dirname(os.path.abspath(__file__))
-    database_path = os.path.abspath(os.path.join(app_dir, "attendance.db"))
+    shared_db_path = os.path.abspath(os.path.join(app_dir, "..", "attendance.db"))
+    local_db_path = os.path.abspath(os.path.join(app_dir, "attendance.db"))
+    database_path = shared_db_path if os.path.exists(shared_db_path) else local_db_path
     print(f"App directory: {app_dir}")
     print(f"Using database path: {database_path}")
     print(f"Current working directory: {os.getcwd()}")
@@ -2832,7 +2834,494 @@ def teacher_login():
             except Exception:
                 pass
 
-    return render_template("teacher_login.html")
+    return render_template("teacher_login.html", hide_nav=True)
+
+
+@app.route("/teacher/select-branch", methods=["GET", "POST"])
+@teacher_login_required
+@teacher_required
+def teacher_select_branch():
+    """Allow teacher to select which branch to mark attendance for."""
+    db = None
+    try:
+        db = get_db()
+        teacher_id = session.get("teacher_id")
+        placeholder = get_placeholder()
+        
+        if request.method == "POST":
+            selected_branch_id = request.form.get("branch_id")
+            selected_section = _normalize_branch_name(request.form.get("section"))
+            if selected_branch_id:
+                # Verify this branch/section pair is assigned to this teacher.
+                assigned = db.execute(
+                    f"""
+                    SELECT id, section FROM teacher_assignments
+                    WHERE teacher_id = {placeholder} AND branch_id = {placeholder}
+                    """,
+                    (teacher_id, selected_branch_id),
+                ).fetchall()
+                if not assigned:
+                    assigned = db.execute(f"""
+                        SELECT tb.branch_id AS branch_id, b.name AS branch_name
+                        FROM teacher_branches tb
+                        JOIN branches b ON b.id = tb.branch_id
+                        WHERE tb.teacher_id = {placeholder} AND tb.branch_id = {placeholder}
+                    """, (teacher_id, selected_branch_id)).fetchall()
+
+                if assigned:
+                    session["teacher_branch_id"] = selected_branch_id
+                    branch_name, branch_section = _get_branch_name_and_section(db, selected_branch_id)
+                    session["teacher_section"] = selected_section or branch_section or _branch_section_from_name(branch_name)
+                    return redirect(url_for("teacher_dashboard"))
+                else:
+                    flash("Invalid branch selection.", "error")
+        
+        branches = _resolve_teacher_assignments(db, teacher_id)
+        
+        teacher = db.execute(
+            f"SELECT name FROM teachers WHERE id = {placeholder}",
+            (teacher_id,)
+        ).fetchone()
+        
+        return render_template("teacher_select_branch.html", 
+                             branches=branches,
+                             teacher_name=row_get(teacher, "name") if teacher else "Teacher")
+    except Exception as e:
+        print(f"[teacher_select_branch] ERROR: {repr(e)}")
+        flash("Error loading branch selection.", "error")
+        return redirect(url_for("teacher_login"))
+    finally:
+        if db:
+            try:
+                db.close()
+            except Exception:
+                pass
+
+
+@app.route("/teacher/select-subject", methods=["GET", "POST"])
+@teacher_login_required
+@teacher_required
+def teacher_select_subject():
+    """Allow teacher to select which assigned subject is active."""
+    db = None
+    try:
+        db = get_db()
+        teacher = get_teacher_context(db)
+        if not teacher:
+            return "Unauthorized Access", 403
+
+        if request.method == "POST":
+            selected_subject_id = (request.form.get("subject_id") or "").strip()
+            allowed_ids = {
+                str(row_get(subject, "id"))
+                for subject in (teacher.get("assigned_subjects") or [])
+                if row_get(subject, "id") is not None
+            }
+
+            if selected_subject_id and selected_subject_id in allowed_ids:
+                session["teacher_subject_id"] = selected_subject_id
+                return redirect(url_for("teacher_dashboard"))
+
+            flash("Invalid subject selection.", "error")
+            return redirect(url_for("teacher_select_subject"))
+
+        return render_template(
+            "teacher_select_subject.html",
+            subjects=teacher.get("assigned_subjects") or [],
+            teacher_name=teacher.get("name") or "Teacher",
+            current_subject_id=teacher.get("current_subject_id"),
+        )
+    except Exception as e:
+        print(f"[teacher_select_subject] ERROR: {repr(e)}")
+        flash("Error loading subject selection.", "error")
+        return redirect(url_for("teacher_dashboard"))
+    finally:
+        if db:
+            try:
+                db.close()
+            except Exception:
+                pass
+
+
+@app.route("/teacher/dashboard")
+@app.route("/teacher-dashboard")
+@teacher_login_required
+@teacher_required
+def teacher_dashboard():
+    db = None
+    try:
+        db = get_db()
+        teacher = get_teacher_context(db)
+        if not teacher:
+            return "Unauthorized Access", 403
+
+        placeholder = get_placeholder()
+        subject_name = teacher["subject_name"]
+        current_branch_id = teacher["current_branch_id"]
+        current_branch_name = teacher["current_branch_name"] or ""
+        current_section = teacher.get("current_section") or ""
+        subject_row = teacher["subject_row"]
+        subject_id = row_get(subject_row, "id") if subject_row else None
+        teacher_id = session.get("teacher_id") or row_get(teacher, "id")
+
+        if not current_branch_id:
+            flash("No branch selected. Please select a branch.", "error")
+            return redirect(url_for("teacher_select_branch"))
+
+        student_count = db.execute(
+            f"SELECT COUNT(*) AS count FROM students WHERE branch_id = {placeholder}",
+            (current_branch_id,),
+        ).fetchone()
+
+        attendance_count = db.execute(
+            f"SELECT COUNT(*) AS count FROM attendance WHERE subject_id = {placeholder} AND branch_id = {placeholder}",
+            (subject_id, current_branch_id),
+        ).fetchone()
+
+        records = db.execute(
+            f"""
+            SELECT attendance.date, attendance.status, attendance.note,
+                   students.name AS student_name, students.enrollment
+            FROM attendance
+            JOIN students ON attendance.student_id = students.id
+            WHERE attendance.branch_id = {placeholder}
+              AND attendance.subject_id = {placeholder}
+                        ORDER BY COALESCE(students.import_order, students.id), students.id, attendance.id DESC
+            LIMIT 20
+            """,
+            (current_branch_id, subject_id),
+        ).fetchall()
+
+        # Determine active slot for this teacher (prefer normalized timetable)
+        active_slot = None
+        try:
+            import timetable as _timetable
+            app.logger.info(
+                "teacher_dashboard active-slot lookup branch=%s section=%s subject_id=%s teacher_id=%s",
+                current_branch_name or "",
+                current_section or "",
+                subject_id,
+                teacher_id,
+            )
+            try:
+                active_slot = _timetable.get_current_slot(db, current_branch_name or "", current_section or "")
+            except Exception:
+                active_slot = None
+            try:
+                global_active_slot = _timetable.get_global_active_class(db)
+            except Exception:
+                global_active_slot = None
+            try:
+                upcoming_classes = _timetable.get_upcoming_classes(db, "", "", limit=4)
+            except Exception:
+                upcoming_classes = []
+            app.logger.info(
+                "teacher_dashboard active-slot result branch=%s section=%s matched=%s subject=%s teacher=%s",
+                current_branch_name or "",
+                current_section or "",
+                bool(active_slot),
+                (active_slot.get("subject_name") if isinstance(active_slot, dict) else active_slot["subject_name"] if active_slot and hasattr(active_slot, "keys") and "subject_name" in active_slot.keys() else None),
+                (active_slot.get("teacher_name") if isinstance(active_slot, dict) else active_slot["teacher_name"] if active_slot and hasattr(active_slot, "keys") and "teacher_name" in active_slot.keys() else None),
+            )
+        except Exception:
+            active_slot = None
+            global_active_slot = None
+            upcoming_classes = []
+
+        return render_template(
+            "teacher_dashboard.html",
+            teacher=teacher,
+            student_count=row_get(student_count, "count", 0) or 0,
+            attendance_count=row_get(attendance_count, "count", 0) or 0,
+            recent_records=records,
+            subject_id=subject_id,
+            active_slot=active_slot,
+            global_active_slot=global_active_slot,
+            upcoming_classes=upcoming_classes,
+        )
+    except Exception as e:
+        print(f"[teacher_dashboard] ERROR: {repr(e)}")
+        try:
+            import traceback as _tb
+            print(_tb.format_exc())
+        except Exception:
+            pass
+        # Log minimal session/teacher context to help debug transient failures
+        try:
+            print(f"[teacher_dashboard] session_keys={list(session.keys())}")
+            print(f"[teacher_dashboard] teacher_context={repr(teacher)[:1000]}")
+        except Exception:
+            pass
+        flash("Teacher dashboard is temporarily unavailable.", "error")
+        return redirect(url_for("teacher_login"))
+    finally:
+        if db:
+            try:
+                db.close()
+            except Exception:
+                pass
+
+
+@app.route("/teacher/attendance", methods=["GET", "POST"])
+@app.route("/teacher-mark-attendance", methods=["GET", "POST"])
+@teacher_login_required
+@teacher_required
+def teacher_mark_attendance():
+    db = None
+    try:
+        db = get_db()
+        teacher = get_teacher_context(db)
+        if not teacher:
+            return "Unauthorized Access", 403
+
+        placeholder = get_placeholder()
+        branch_request_id = (request.args.get("branch_id") or "").strip()
+        subject_request_id = (request.args.get("subject_id") or "").strip()
+
+        allowed_branch_ids = {
+            str(row_get(branch, "id"))
+            for branch in (teacher.get("assigned_branches") or [])
+            if row_get(branch, "id") is not None
+        }
+        allowed_subject_ids = {
+            str(row_get(subject, "id"))
+            for subject in (teacher.get("assigned_subjects") or [])
+            if row_get(subject, "id") is not None
+        }
+
+        if branch_request_id:
+            if branch_request_id in allowed_branch_ids:
+                session["teacher_branch_id"] = branch_request_id
+            else:
+                flash("Invalid branch selection.", "error")
+                return "Unauthorized Access", 403
+
+        if subject_request_id:
+            if subject_request_id in allowed_subject_ids:
+                session["teacher_subject_id"] = subject_request_id
+            else:
+                flash("Invalid subject selection.", "error")
+                return "Unauthorized Access", 403
+
+        if branch_request_id or subject_request_id:
+            teacher = get_teacher_context(db)
+
+        current_branch_id = teacher["current_branch_id"]
+        current_branch_name = teacher["current_branch_name"]
+        current_section = teacher.get("current_section") or _branch_section_from_name(current_branch_name or "") or current_branch_name or ""
+        branch_subjects = []
+        if current_branch_id:
+            try:
+                branch_subjects = _get_timetable_subjects_for_branch(db, current_branch_id, section=current_section)
+            except Exception as subject_error:
+                print(f"[teacher_mark_attendance] Subject lookup failed: {repr(subject_error)}")
+                branch_subjects = []
+
+        current_subject_id = teacher["current_subject_id"]
+        current_subject_id_str = str(current_subject_id) if current_subject_id is not None else ""
+        selected_subject = None
+
+        for subject in branch_subjects:
+            subject_id_value = subject.get("id")
+            if subject_id_value is not None and str(subject_id_value) == current_subject_id_str:
+                selected_subject = subject
+                break
+
+        if selected_subject is None and subject_request_id:
+            subject_request_norm = subject_request_id.strip().lower()
+            for subject in branch_subjects:
+                subject_id_value = subject.get("id")
+                subject_name_value = str(subject.get("name") or "").strip().lower()
+                if subject_request_id == str(subject_id_value) or subject_request_norm == subject_name_value:
+                    selected_subject = subject
+                    break
+
+        if selected_subject is None and branch_subjects:
+            selected_subject = branch_subjects[0]
+            session["teacher_subject_id"] = selected_subject.get("id")
+            teacher = get_teacher_context(db)
+
+        if selected_subject is not None and str(selected_subject.get("id")) != current_subject_id_str:
+            session["teacher_subject_id"] = selected_subject.get("id")
+            teacher = get_teacher_context(db)
+
+        subject_name = teacher["subject_name"]
+        subject_row = teacher["subject_row"]
+        subject_id = row_get(subject_row, "id") if subject_row else None
+
+        if not subject_row or subject_id is None or not current_branch_id:
+            flash("No subject or branch selected.", "error")
+            return redirect(url_for("teacher_select_branch"))
+
+        today_str = date.today().isoformat()
+        selected_date = request.args.get("date") or today_str
+        period = request.args.get("period", "1")
+
+        if request.method == "POST":
+            selected_date = request.form.get("date") or today_str
+            period = request.form.get("period", "1")
+            student_ids = request.form.getlist("student_id")
+            if not student_ids:
+                flash("Please select at least one student.", "error")
+            else:
+                saved_ids = []
+                blocked_overwrites = 0
+                invalid_students = 0
+                try:
+                    for student_id in student_ids:
+                        status = request.form.get(f"status_{student_id}", "Absent")
+                        note = request.form.get(f"note_{student_id}", "")
+
+                        # Validate student belongs to this branch
+                        ok_student = db.execute(
+                            f"SELECT 1 FROM students WHERE id = {placeholder} AND branch_id = {placeholder} AND (COALESCE(section, '') = COALESCE({placeholder}, '') OR COALESCE(section, '') = '')",
+                            (student_id, current_branch_id, current_section),
+                        ).fetchone()
+                        if not ok_student:
+                            invalid_students += 1
+                            continue
+
+                        # Do not allow overwriting attendance created by another teacher
+                        existing = db.execute(
+                            f"""
+                            SELECT teacher_id
+                            FROM attendance
+                            WHERE student_id = {placeholder}
+                              AND subject_id = {placeholder}
+                              AND date = {placeholder}
+                              AND period = {placeholder}
+                            """,
+                            (student_id, subject_id, selected_date, period),
+                        ).fetchone()
+                        existing_teacher_id = row_get(existing, "teacher_id") if existing else None
+                        if existing_teacher_id and str(existing_teacher_id) != str(teacher["teacher_id"]):
+                            blocked_overwrites += 1
+                            continue
+
+                        db.execute(
+                            f"""
+                            INSERT INTO attendance (
+                                student_id, branch_id, branch_section, subject_id, teacher_id, subject_name,
+                                date, period, status, note
+                            ) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})
+                            ON CONFLICT (student_id, subject_id, date, period) DO UPDATE
+                            SET status = EXCLUDED.status,
+                                note = EXCLUDED.note,
+                                teacher_id = EXCLUDED.teacher_id,
+                                subject_name = EXCLUDED.subject_name,
+                                branch_section = EXCLUDED.branch_section
+                            """,
+                            (student_id, current_branch_id, current_section, subject_id, teacher["teacher_id"], subject_name, selected_date, period, status, note),
+                        )
+                        if str(student_id).isdigit():
+                            saved_ids.append(int(student_id))
+                    db.commit()
+                    if invalid_students:
+                        flash(f"Skipped {invalid_students} invalid student(s).", "warning")
+                    if blocked_overwrites:
+                        flash(f"Skipped {blocked_overwrites} record(s) already owned by another teacher.", "warning")
+                    flash(f"Attendance for Period {period} saved successfully.", "success")
+                    return redirect(url_for("teacher_mark_attendance", date=selected_date, period=period))
+                except Exception as save_error:
+                    db.rollback()
+                    print(f"[teacher_mark_attendance] ERROR: {repr(save_error)}")
+                    flash("Failed to save attendance.", "error")
+
+        students = db.execute(
+            f"SELECT id, name, enrollment, roll_no, section FROM students WHERE branch_id = {placeholder} AND (COALESCE(section, '') = COALESCE({placeholder}, '') OR COALESCE(section, '') = '') ORDER BY COALESCE(import_order, id), id",
+            (current_branch_id, current_section),
+        ).fetchall()
+
+        attendance_map = {}
+        for row in db.execute(
+            f"""
+            SELECT student_id, status, note
+            FROM attendance
+            WHERE branch_id = {placeholder}
+              AND subject_id = {placeholder}
+              AND date = {placeholder}
+              AND period = {placeholder}
+            """,
+            (current_branch_id, subject_id, selected_date, period),
+        ).fetchall():
+            attendance_map[str(row_get(row, "student_id"))] = row
+
+        return render_template(
+            "teacher_mark_attendance.html",
+            teacher=teacher,
+            subjects=branch_subjects,
+            students=students,
+            attendance_map=attendance_map,
+            selected_date=selected_date,
+            period=period,
+            today_date=today_str,
+            current_section=current_section,
+        )
+    except Exception as e:
+        print(f"[teacher_mark_attendance] ERROR: {repr(e)}")
+        flash("Teacher attendance page is temporarily unavailable.", "error")
+        return redirect(url_for("teacher_dashboard"))
+    finally:
+        if db:
+            try:
+                db.close()
+            except Exception:
+                pass
+
+
+@app.route("/teacher/records")
+@app.route("/teacher-records")
+@teacher_login_required
+@teacher_required
+def teacher_attendance_records():
+    db = None
+    try:
+        db = get_db()
+        teacher = get_teacher_context(db)
+        if not teacher:
+            return "Unauthorized Access", 403
+
+        placeholder = get_placeholder()
+        subject_id = row_get(teacher["subject_row"], "id") if teacher["subject_row"] else None
+        current_branch_id = teacher["current_branch_id"]
+        search = (request.args.get("search") or "").strip()
+
+        if not subject_id or not current_branch_id:
+            flash("No subject or branch assigned.", "error")
+            return redirect(url_for("teacher_dashboard"))
+
+        query = (
+            "SELECT attendance.date, attendance.status, attendance.note, attendance.subject_name, "
+            "students.name AS student_name, students.enrollment, branches.name AS branch_name "
+            "FROM attendance "
+            "JOIN students ON attendance.student_id = students.id "
+            "JOIN branches ON attendance.branch_id = branches.id "
+            f"WHERE attendance.branch_id = {placeholder} AND attendance.subject_id = {placeholder}"
+        )
+        params = [current_branch_id, subject_id]
+        if search:
+            like_op = "ILIKE" if str(app.config.get("DATABASE", "")).startswith("postgres") else "LIKE"
+            query += f" AND (students.name {like_op} {placeholder} OR students.enrollment {like_op} {placeholder})"
+            params.extend([f"%{search}%", f"%{search}%"])
+        query += " ORDER BY COALESCE(students.import_order, students.id), students.id, attendance.id DESC"
+
+        records = db.execute(query, params).fetchall()
+        return render_template(
+            "teacher_records.html",
+            teacher=teacher,
+            records=records,
+            search=search,
+        )
+    except Exception as e:
+        print(f"[teacher_attendance_records] ERROR: {repr(e)}")
+        flash("Teacher records are temporarily unavailable.", "error")
+        return redirect(url_for("teacher_dashboard"))
+    finally:
+        if db:
+            try:
+                db.close()
+            except Exception:
+                pass
 
 
 @app.route("/student_dashboard")
