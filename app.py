@@ -516,20 +516,24 @@ def _get_timetable_subjects_for_branch(db, branch_id, section=None):
     except Exception:
         rows = []
 
-    for r in rows:
-        if section_val:
-            if not section_matches(row_get(r, 'section'), section_val):
+    def _append_subject_rows(source_rows, require_section=True):
+        for r in source_rows:
+            if require_section and section_val and not section_matches(row_get(r, 'section'), section_val):
                 continue
-        s_name = (row_get(r, 'subject_name_db') or row_get(r, 'subject_name') or '').strip()
-        if not s_name:
-            continue
-        display = get_subject_display_name(s_name)
-        key = normalize_text(display)
-        if key in seen:
-            continue
-        seen.add(key)
-        s_id = row_get(r, 'subject_id')
-        subjects.append({'id': s_id, 'name': display, 'canonical': s_name})
+            s_name = (row_get(r, 'subject_name_db') or row_get(r, 'subject_name') or '').strip()
+            if not s_name:
+                continue
+            display = get_subject_display_name(s_name)
+            key = normalize_text(display)
+            if key in seen:
+                continue
+            seen.add(key)
+            s_id = row_get(r, 'subject_id')
+            subjects.append({'id': s_id, 'name': display, 'canonical': s_name})
+
+    _append_subject_rows(rows, require_section=True)
+    if not subjects and section_val:
+        _append_subject_rows(rows, require_section=False)
 
     subjects.sort(key=lambda x: x['name'])
     return subjects
@@ -3785,6 +3789,37 @@ def _resolve_timetable_slots(db, branch_id="", subject_id="", selected_date=None
                 continue
 
         matched_rows.append(r)
+
+    if not matched_rows and section_val:
+        for r in candidate_rows:
+            if not (day_matches(r["day"], weekday) or day_matches(r["day"], weekday_short)):
+                continue
+
+            br_match = False
+            r_br_id = r["branch_id"]
+            r_br_name = r["branch_name"]
+
+            if r_br_id in branch_ids_to_match:
+                br_match = True
+            elif selected_branch_name or base_branch_name:
+                r_br_norm = normalize_text(r_br_name)
+                if r_br_norm == normalize_text(selected_branch_name):
+                    br_match = True
+                elif r_br_norm == normalize_text(base_branch_name):
+                    br_match = True
+                else:
+                    r_br_base, _ = split_branch_section(r_br_name)
+                    if r_br_base and normalize_text(r_br_base) == normalize_text(base_branch_name):
+                        br_match = True
+
+            if not br_match:
+                continue
+
+            if req_subject_name:
+                if not subject_matches(r["subject_id"], r["subject_name"], req_subject_id, req_subject_name):
+                    continue
+
+            matched_rows.append(r)
 
     if not matched_rows:
         print("REAL REASONS FOR NO MATCHES:")
