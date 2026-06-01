@@ -967,6 +967,17 @@ def teacher_login_required(f):
     return decorated_function
 
 
+def teacher_required(f):
+    """Decorator to ensure the logged-in user is a teacher and teacher-specific session keys exist."""
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if session.get("role") != "teacher" or not session.get("teacher_id"):
+            flash("Teacher access required.", "warning")
+            return redirect(url_for("teacher_login"))
+        return f(*args, **kwargs)
+    return decorated_function
+
+
 def _resolve_teacher_assignments(db, teacher_id):
     placeholder = get_placeholder()
     branches = []
