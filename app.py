@@ -404,6 +404,27 @@ def section_matches(entry_sec, req_sec):
         return True
     return False
 
+
+def _normalize_attendance_section_input(value):
+    """Normalize a teacher-provided section string for attendance lookups.
+
+    Returns an empty string when no clear section can be derived.
+    """
+    if not value:
+        return ""
+    v = str(value).strip()
+    if not v:
+        return ""
+    # If value is just a department code, treat as no explicit section
+    if v.upper() in _ACADEMIC_DEPARTMENT_CODES:
+        return ""
+    # Use split_branch_section to extract suffix if present
+    base, sec = split_branch_section(v)
+    if sec:
+        return sec.strip()
+    # Otherwise return the trimmed token
+    return v.strip()
+
 def day_matches(d1, d2):
     if not d1 or not d2:
         return False
@@ -3792,18 +3813,56 @@ def _resolve_timetable_slots(db, branch_id="", subject_id="", selected_date=None
             "unique_slot": False,
         }
 
-    section_val = (section or "").strip()
+    # Normalize section input (accept CSM-A, CSM A, A etc.)
+    section_val = _normalize_attendance_section_input(section)
     if not section_val and selected_branch_name:
         _, derived_section = split_branch_section(selected_branch_name)
-        if derived_section:
-            section_val = derived_section
+        section_val = _normalize_attendance_section_input(derived_section)
+
+    # If still no explicit section, try to pick a default if only one exists
     if not section_val:
         try:
             branch_sections = _get_timetable_sections_for_branch(db, selected_branch_id)
         except Exception:
             branch_sections = []
-        if branch_sections:
-            section_val = branch_sections[0]
+        if len(branch_sections) == 1:
+            section_val = _normalize_attendance_section_input(branch_sections[0])
+
+    # Require an explicit section for deterministic timetable resolution
+    if not section_val:
+        return {
+            "schedule_rows": [],
+            "periods": [],
+            "slots": [],
+            "selected_slot": None,
+            "selected_period": None,
+            "active_slot": None,
+            "active_period": None,
+            "next_slot": None,
+            "remaining_slots": [],
+            "manual_slots": [],
+            "has_schedule": False,
+            "is_today": is_today,
+            "current_time": current_time,
+            "current_time_label": current_dt.strftime("%I:%M %p"),
+            "weekday": weekday,
+            "weekday_short": weekday_short,
+            "grace_minutes": grace_minutes,
+            "can_mark_attendance": False,
+            "schedule_message": "Select a section to load today's timetable.",
+            "current_class_message": "No active class at the current time.",
+            "next_class_message": "",
+            "selected_branch_id": selected_branch_id,
+            "selected_branch_name": selected_branch_name,
+            "selected_section": "",
+            "selected_timetable_entry_id": "",
+            "selected_subject_id": None,
+            "selected_subject_name": "",
+            "selected_period_number": "",
+            "selected_teacher_id": None,
+            "selected_teacher_name": "",
+            "unique_slot": False,
+        }
 
     req_subject_id = _coerce_int(subject_id)
     req_subject_name = ""
