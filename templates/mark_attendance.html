@@ -1,0 +1,212 @@
+{% extends "layout.html" %}
+{% block head %}
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const branchSelect = document.querySelector('select[name="branch_id"]');
+    const subjectSelect = document.querySelector('select[name="subject_id"]');
+    const dateInput = document.querySelector('input[name="date"]');
+    const loadBtn = document.getElementById('load_students_btn');
+    const periodWrap = document.getElementById('timetable_period_wrap');
+    const badgesWrap = document.getElementById('timetable_badges');
+    const noteEl = document.getElementById('schedule_note');
+    const sectionInput = document.getElementById('section_hidden');
+    let timer = null;
+    let slotsCache = [];
+
+    function showToast(message, type) {
+        const existing = document.querySelector('.attendance-toast');
+        if (existing) existing.remove();
+
+        const toast = document.createElement('div');
+        toast.className = `attendance-toast ${type}`;
+        toast.textContent = message;
+        toast.style.cssText = 'position:fixed;top:20px;right:20px;z-index:2000;padding:12px 16px;border-radius:12px;color:#fff;font-weight:700;box-shadow:0 10px 25px rgba(15,23,42,.18);max-width:320px;';
+        toast.style.background = type === 'success' ? '#16a34a' : type === 'warning' ? '#d97706' : '#dc2626';
+        document.body.appendChild(toast);
+        setTimeout(() => toast.remove(), 3200);
+    }
+
+    function slotLabel(slot) {
+        const subject = slot.subject_name || '';
+        const faculty = slot.faculty_name || slot.faculty || '';
+        const room = slot.room || '';
+        return `${slot.start_time} - ${slot.end_time}${subject ? ` (${subject})` : ''}${faculty ? ` • ${faculty}` : ''}${room ? ` • Room ${room}` : ''}`;
+    }
+
+    function getBranchContext() {
+        const branch = branchSelect ? branchSelect.value.trim() : '';
+        const branchOption = branchSelect && branchSelect.selectedIndex >= 0 ? branchSelect.options[branchSelect.selectedIndex] : null;
+        const branchName = branchOption ? branchOption.text.trim() : '';
+        const branchSection = branchName.includes('-') ? branchName : '';
+        if (sectionInput) sectionInput.value = branchSection;
+        return { branch, branchName, branchSection };
+    }
+
+    function updateBadges(slot) {
+        if (!badgesWrap) return;
+        if (!slot) {
+            badgesWrap.innerHTML = '<span class="badge muted">No active timetable</span>';
+            return;
+        }
+        badgesWrap.innerHTML = `
+            <span class="badge">Period: ${slot.period}</span>
+            <span class="badge">Subject: ${slot.subject_name || ''}</span>
+            <span class="badge">Faculty: ${slot.faculty_name || slot.faculty || ''}</span>
+            <span class="badge">Room: ${slot.room || ''}</span>
+            <span class="badge">${slot.start_time || ''} - ${slot.end_time || ''}</span>
+        `;
+    }
+
+    function renderPeriods(data) {
+        slotsCache = Array.isArray(data && data.slots) ? data.slots : [];
+        window.__attendanceSlots = slotsCache;
+
+        if (noteEl) {
+            if (!slotsCache.length) {
+                noteEl.textContent = 'No matching timetable found';
+            } else if (data.unique_slot && data.selected_slot) {
+                noteEl.textContent = 'Single timetable slot found. Period auto-selected.';
+            } else if (data.active_slot) {
+                noteEl.textContent = 'Current Active Class';
+            } else {
+                noteEl.textContent = 'Matching timetable periods loaded';
+            }
+        }
+
+        if (!periodWrap) return;
+    }
+});
+</script>
+{% endblock %}
+
+{% block content %}
+<div class="attendance-page">
+    <div class="attendance-hero">
+        <div>
+            <h1><i class="fa-solid fa-calendar-check"></i> Mark Attendance</h1>
+            <p>{{ weekday or '' }} schedule from timetable entries. Current time: {{ current_time_label or '' }}</p>
+        </div>
+        <div class="hero-pill">
+            <i class="fa-solid fa-clock"></i>
+            <span>{{ current_time_label or '' }}</span>
+        </div>
+    </div>
+
+    <div class="section-panel">
+        <form method="get" id="attendance_filter_form" class="form-row">
+            <div>
+                <label>Branch</label>
+                <select id="branch_id" name="branch_id" required>
+                    <option value="">Choose branch</option>
+                    {% for branch in branches %}
+                    <option value="{{ branch.id }}" {% if branch_id and branch.id|string == branch_id|string %}selected{% endif %}>{{ branch.name }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div>
+                <label>Section</label>
+                <select id="section" name="section" {% if not branch_id %}disabled{% endif %} required>
+                    <option value="">Choose section</option>
+                    {% for sec in sections %}
+                    <option value="{{ sec }}" {% if selected_section and sec|string == selected_section|string %}selected{% endif %}>{{ sec }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div>
+                <label>Date</label>
+                <input type="date" id="date" name="date" value="{{ selected_date }}" max="{{ today_date }}" required />
+            </div>
+            <div>
+                <label>Schedule</label>
+                <div id="schedule_note">{{ schedule_message or '' }}</div>
+            </div>
+            <div>
+                <label>Active Timetable</label>
+                <div id="timetable_badges" style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+                    {% if selected_period %}
+                    <span class="badge">Period: {{ selected_period.period }}</span>
+                    <span class="badge">Subject: {{ selected_period.subject_name }}</span>
+                    <span class="badge">Faculty: {{ selected_period.faculty }}</span>
+                    <span class="badge">Room: {{ selected_period.room }}</span>
+                    <span class="badge">{{ selected_period.start_time }} - {{ selected_period.end_time }}</span>
+                    {% elif current_active_period %}
+                    <span class="badge">Period: {{ current_active_period.period }}</span>
+                    <span class="badge">Subject: {{ current_active_period.subject_name }}</span>
+                    <span class="badge">Faculty: {{ current_active_period.faculty }}</span>
+                    <span class="badge">Room: {{ current_active_period.room }}</span>
+                    <span class="badge">{{ current_active_period.start_time }} - {{ current_active_period.end_time }}</span>
+                    {% else %}
+                    <span class="badge muted">No active timetable</span>
+                    {% endif %}
+                </div>
+            </div>
+            <div>
+                <label>Period</label>
+                <div id="timetable_period_wrap">
+                    {% if selected_period %}
+                    <input type="hidden" name="period" id="period_hidden" value="{{ period or selected_period.period }}" />
+                    <div class="badge muted" style="border-radius:12px;">{{ selected_period.start_time }} - {{ selected_period.end_time }} ({{ selected_period.subject_name }})</div>
+                    {% else %}
+                    <div class="badge muted" style="border-radius:12px;">Choose branch, subject, and date to load timetable periods.</div>
+                    {% endif %}
+                </div>
+            </div>
+            <div style="display:flex; align-items:end;">
+                <button id="load_students_btn" type="submit" style="width:100%" disabled>Load Students</button>
+                <div id="timetable_spinner" style="display:none; margin-left:8px;">Loading…</div>
+            </div>
+        </form>
+
+        {% if students %}
+        <form method="post">
+            <input type="hidden" name="date" value="{{ selected_date }}" />
+            <input type="hidden" name="period" value="{{ period }}" />
+            <input type="hidden" name="subject_id" value="{{ subject_id }}" />
+            <input type="hidden" name="branch_id" value="{{ branch_id }}" />
+
+            <div class="table-responsive">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Student</th>
+                            <th>Roll No</th>
+                            <th>Status</th>
+                            <th>Note</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for student in students %}
+                        <tr>
+                            <td>{{ student.name }}</td>
+                            <td>{{ student.roll_no or student.enrollment }}</td>
+                            <td>
+                                <input type="hidden" name="student_id" value="{{ student.id }}" />
+                                <select name="status_{{ student.id }}">
+                                    <option value="Present" {% if attendance_map[student.id|string] and attendance_map[student.id|string].status == 'Present' %}selected{% endif %}>Present</option>
+                                    <option value="Absent" {% if attendance_map[student.id|string] and attendance_map[student.id|string].status == 'Absent' %}selected{% endif %}>Absent</option>
+                                    <option value="Late" {% if attendance_map[student.id|string] and attendance_map[student.id|string].status == 'Late' %}selected{% endif %}>Late</option>
+                                </select>
+                            </td>
+                            <td>
+                                <input type="text" name="note_{{ student.id }}" value="{{ attendance_map[student.id|string].note if attendance_map[student.id|string] else '' }}" />
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+
+            <div style="margin-top: 18px; display: flex; gap: 10px; flex-wrap: wrap; align-items: center;">
+                <button type="submit" {% if not can_mark_attendance %}disabled title="Cannot mark attendance: schedule mismatch or outside active slot"{% endif %}>Save Attendance</button>
+                <a href="{{ url_for('generate_qr', branch_id=branch_id, subject_id=subject_id, date=selected_date, period=period) }}" class="button">Generate QR Code</a>
+            </div>
+            {% if not can_mark_attendance %}
+            <div class="flash warning" style="margin-top:12px;">Attendance cannot be marked: {{ schedule_message }}</div>
+            {% endif %}
+        </form>
+        {% else %}
+        <div class="empty-state">No students loaded. Choose branch / section and period to load students.</div>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}
