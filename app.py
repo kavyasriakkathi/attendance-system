@@ -476,87 +476,52 @@ def get_subject_display_name(name):
 
 def _get_timetable_subjects_for_branch(db, branch_id, section=None):
     placeholder = get_placeholder()
-
-    # Resolve numeric id or branch name token
     selected_branch_id = None
-    selected_branch_name = ""
     branch_id_val = _coerce_int(branch_id)
     if branch_id_val is not None:
-        r = db.execute(f"SELECT id, name FROM branches WHERE id = {placeholder}", (branch_id_val,)).fetchone()
-        if r:
-            selected_branch_id = row_get(r, "id")
-            selected_branch_name = row_get(r, "name") or ""
-    if not selected_branch_name and branch_id:
-        r = db.execute(f"SELECT id, name FROM branches WHERE UPPER(name) = {placeholder}", (str(branch_id).strip().upper(),)).fetchone()
-        if r:
-            selected_branch_id = row_get(r, "id")
-            selected_branch_name = row_get(r, "name") or str(branch_id)
-        else:
-            selected_branch_name = str(branch_id)
+        branch_row = db.execute(f"SELECT id FROM branches WHERE id = {placeholder}", (branch_id_val,)).fetchone()
+        if branch_row:
+            selected_branch_id = row_get(branch_row, "id")
+    if selected_branch_id is None and branch_id:
+        branch_row = db.execute(f"SELECT id FROM branches WHERE UPPER(name) = {placeholder}", (str(branch_id).strip().upper(),)).fetchone()
+        if branch_row:
+            selected_branch_id = row_get(branch_row, "id")
 
-    base_branch_name, derived_section = split_branch_section(selected_branch_name)
-    # Prefer explicitly provided section parameter over derived section
-    section_val = (section or derived_section or "").strip()
+    section_val = (section or "").strip()
+    if selected_branch_id is None:
+        print(f"[attendance] selected branch_id={branch_id} section={section_val or ''} rows=0 subjects=0")
+        return []
 
-    # Collect branch ids matching the exact base token so timetable rows come
-    # from the intended branch only.
-    branch_ids_to_match = []
+    params = [selected_branch_id]
+    sql = (
+        "SELECT DISTINCT TRIM(COALESCE(subject_name, '')) AS subject_name, MIN(subject_id) AS subject_id "
+        "FROM timetable_entries WHERE branch_id = ?"
+    )
+    if section_val:
+        sql += " AND LOWER(TRIM(COALESCE(section, ''))) = LOWER(TRIM(?))"
+        params.append(section_val)
+    sql += " AND COALESCE(TRIM(subject_name), '') <> '' GROUP BY LOWER(TRIM(subject_name)), TRIM(COALESCE(subject_name, '')) ORDER BY subject_name"
+
     try:
-        if base_branch_name:
-            rows = db.execute("SELECT id FROM branches WHERE UPPER(name) = ?", (base_branch_name.upper(),)).fetchall()
-            branch_ids_to_match = [row_get(r, 'id') for r in rows if row_get(r, 'id')]
-    except Exception:
-        branch_ids_to_match = []
-
-    if not branch_ids_to_match and selected_branch_id:
-        branch_ids_to_match = [selected_branch_id]
-
-    # Query timetable entries for the collected branch ids
-    subjects = []
-    seen = set()
-    try:
-        if branch_ids_to_match:
-            ph = ",".join([placeholder] * len(branch_ids_to_match))
-            sql = (
-                "SELECT te.*, s.name AS subject_name_db, b.name AS branch_name_db "
-                "FROM timetable_entries te "
-                "LEFT JOIN subjects s ON te.subject_id = s.id "
-                "LEFT JOIN branches b ON te.branch_id = b.id "
-                f"WHERE te.branch_id IN ({ph})"
-            )
-            params = tuple(branch_ids_to_match)
-            rows = db.execute(sql, params).fetchall()
-        else:
-            sql = (
-                "SELECT te.*, s.name AS subject_name_db, b.name AS branch_name_db "
-                "FROM timetable_entries te "
-                "LEFT JOIN subjects s ON te.subject_id = s.id "
-                "LEFT JOIN branches b ON te.branch_id = b.id "
-            )
-            rows = db.execute(sql).fetchall()
-    except Exception:
+        rows = db.execute(sql, tuple(params)).fetchall()
+    except Exception as e:
+        print(f"[attendance] timetable subject lookup failed: {repr(e)}")
         rows = []
 
-    def _append_subject_rows(source_rows, require_section=True):
-        for r in source_rows:
-            if require_section and section_val and not section_matches(row_get(r, 'section'), section_val):
-                continue
-            s_name = (row_get(r, 'subject_name_db') or row_get(r, 'subject_name') or '').strip()
-            if not s_name:
-                continue
-            display = get_subject_display_name(s_name)
-            key = normalize_text(display)
-            if key in seen:
-                continue
-            seen.add(key)
-            s_id = row_get(r, 'subject_id')
-            subjects.append({'id': s_id, 'name': display, 'canonical': s_name})
+    subjects = []
+    seen = set()
+    for row in rows:
+        subject_name = (row_get(row, "subject_name") or "").strip()
+        if not subject_name:
+            continue
+        key = normalize_text(subject_name)
+        if key in seen:
+            continue
+        seen.add(key)
+        subject_id_value = row_get(row, "subject_id")
+        subjects.append({"id": subject_id_value if subject_id_value is not None else subject_name, "name": subject_name, "canonical": subject_name})
 
-    _append_subject_rows(rows, require_section=True)
-    if not subjects and section_val:
-        _append_subject_rows(rows, require_section=False)
-
-    subjects.sort(key=lambda x: x['name'])
+    print(f"[attendance] selected branch_id={selected_branch_id} section={section_val or ''} rows={len(rows)} subjects={len(subjects)}")
     return subjects
 
 
@@ -578,8 +543,8 @@ def _get_timetable_sections_for_branch(db, branch_id):
         return []
 
     rows = db.execute(
-        f"SELECT DISTINCT section FROM timetable_entries WHERE branch_id = {placeholder} AND COALESCE(TRIM(section), '') <> '' ORDER BY section",
-        (selected_branch_id,),
+        "SELECT DISTINCT section FROM timetable_entries WHERE branch_id = ? AND COALESCE(TRIM(section), '') <> '' ORDER BY section",
+        (selected_branch_id,)
     ).fetchall()
     sections = []
     seen = set()
@@ -3132,12 +3097,6 @@ def teacher_mark_attendance():
             for branch in (teacher.get("assigned_branches") or [])
             if row_get(branch, "id") is not None
         }
-        allowed_subject_ids = {
-            str(row_get(subject, "id"))
-            for subject in (teacher.get("assigned_subjects") or [])
-            if row_get(subject, "id") is not None
-        }
-
         if branch_request_id:
             if branch_request_id in allowed_branch_ids:
                 session["teacher_branch_id"] = branch_request_id
@@ -3146,69 +3105,152 @@ def teacher_mark_attendance():
                 return "Unauthorized Access", 403
 
         if subject_request_id:
-            if subject_request_id in allowed_subject_ids:
-                session["teacher_subject_id"] = subject_request_id
-            else:
-                flash("Invalid subject selection.", "error")
-                return "Unauthorized Access", 403
+            session["teacher_subject_id"] = subject_request_id
 
         if branch_request_id or subject_request_id:
             teacher = get_teacher_context(db)
 
         current_branch_id = teacher["current_branch_id"]
         current_branch_name = teacher["current_branch_name"]
-        current_section = teacher.get("current_section") or _branch_section_from_name(current_branch_name or "") or current_branch_name or ""
+        current_section = (
+            request.args.get("section")
+            or session.get("teacher_section")
+            or teacher.get("current_section")
+            or _branch_section_from_name(current_branch_name or "")
+            or ""
+        ).strip()
+        if current_section:
+            session["teacher_section"] = current_section
+
+        branch_sections = []
         branch_subjects = []
         if current_branch_id:
+            try:
+                branch_sections = _get_timetable_sections_for_branch(db, current_branch_id)
+            except Exception as section_error:
+                print(f"[teacher_mark_attendance] Section lookup failed: {repr(section_error)}")
+                branch_sections = []
             try:
                 branch_subjects = _get_timetable_subjects_for_branch(db, current_branch_id, section=current_section)
             except Exception as subject_error:
                 print(f"[teacher_mark_attendance] Subject lookup failed: {repr(subject_error)}")
                 branch_subjects = []
 
-        current_subject_id = teacher["current_subject_id"]
-        current_subject_id_str = str(current_subject_id) if current_subject_id is not None else ""
+        current_subject_token = (
+            request.args.get("subject_id")
+            or session.get("teacher_subject_id")
+            or ""
+        ).strip()
         selected_subject = None
-
-        for subject in branch_subjects:
-            subject_id_value = subject.get("id")
-            if subject_id_value is not None and str(subject_id_value) == current_subject_id_str:
-                selected_subject = subject
-                break
-
-        if selected_subject is None and subject_request_id:
-            subject_request_norm = subject_request_id.strip().lower()
+        if current_subject_token:
+            token_norm = current_subject_token.lower()
             for subject in branch_subjects:
-                subject_id_value = subject.get("id")
-                subject_name_value = str(subject.get("name") or "").strip().lower()
-                if subject_request_id == str(subject_id_value) or subject_request_norm == subject_name_value:
+                subject_value = str(subject.get("id") or "").strip()
+                subject_name_value = str(subject.get("name") or "").strip()
+                if current_subject_token == subject_value or token_norm == subject_name_value.lower():
                     selected_subject = subject
                     break
 
-        if selected_subject is None and branch_subjects:
+        if selected_subject is None and len(branch_subjects) == 1:
             selected_subject = branch_subjects[0]
+
+        if selected_subject is not None:
             session["teacher_subject_id"] = selected_subject.get("id")
-            teacher = get_teacher_context(db)
 
-        if selected_subject is not None and str(selected_subject.get("id")) != current_subject_id_str:
-            session["teacher_subject_id"] = selected_subject.get("id")
-            teacher = get_teacher_context(db)
+        selected_subject_value = selected_subject.get("id") if selected_subject else ""
+        selected_subject_name = selected_subject.get("name") if selected_subject else ""
 
-        subject_name = teacher["subject_name"]
-        subject_row = teacher["subject_row"]
-        subject_id = row_get(subject_row, "id") if subject_row else None
-
-        if not subject_row or subject_id is None or not current_branch_id:
-            flash("No subject or branch selected.", "error")
+        if not current_branch_id:
+            flash("No branch selected.", "error")
             return redirect(url_for("teacher_select_branch"))
 
         today_str = date.today().isoformat()
         selected_date = request.args.get("date") or today_str
-        period = request.args.get("period", "1")
+        period = (request.args.get("period") or "").strip()
+
+        timetable_context = {
+            "selected_slot": None,
+            "active_slot": None,
+            "selected_period": None,
+            "active_period": None,
+            "can_mark_attendance": False,
+            "schedule_message": "Select a section, subject, and period to load students.",
+            "current_class_message": "Select a section, subject, and period to load students.",
+            "next_class_message": "",
+            "has_schedule": False,
+        }
+        if current_branch_id and current_section and selected_subject_value and period:
+            timetable_context = _resolve_timetable_slots(
+                db,
+                current_branch_id,
+                selected_subject_value,
+                selected_date,
+                section=current_section,
+                period=period,
+            )
+
+        selected_period = timetable_context.get("selected_period")
+        current_active_period = timetable_context.get("active_period")
+        schedule_message = timetable_context.get("schedule_message") or "Select a section, subject, and period to load students."
+        can_mark_attendance = bool(timetable_context.get("can_mark_attendance") and selected_period)
+
+        subject_id = selected_period.get("subject_id") if selected_period else selected_subject_value or None
+        subject_name = selected_period.get("subject_name") if selected_period else selected_subject_name
+
+        students = []
+        attendance_map = {}
+        if current_branch_id and current_section and selected_subject_value and period and selected_period:
+            students = db.execute(
+                f"SELECT id, name, enrollment, roll_no, section FROM students WHERE branch_id = {placeholder} AND (COALESCE(section, '') = COALESCE({placeholder}, '') OR COALESCE(section, '') = '') ORDER BY COALESCE(import_order, id), id",
+                (current_branch_id, current_section),
+            ).fetchall()
+
+            for row in db.execute(
+                f"""
+                SELECT student_id, status, note
+                FROM attendance
+                WHERE branch_id = {placeholder}
+                  AND subject_id = {placeholder}
+                  AND date = {placeholder}
+                  AND period = {placeholder}
+                """,
+                (current_branch_id, subject_id, selected_date, period),
+            ).fetchall():
+                attendance_map[str(row_get(row, "student_id"))] = row
 
         if request.method == "POST":
             selected_date = request.form.get("date") or today_str
-            period = request.form.get("period", "1")
+            period = (request.form.get("period") or "").strip()
+            form_branch_id = request.form.get("branch_id") or current_branch_id
+            form_section = (request.form.get("section") or current_section).strip()
+            form_subject_id = (request.form.get("subject_id") or str(selected_subject_value or "")).strip()
+            if form_branch_id:
+                current_branch_id = form_branch_id
+            if form_section:
+                current_section = form_section
+                session["teacher_section"] = current_section
+            if form_subject_id:
+                selected_subject_value = form_subject_id
+            if not (current_branch_id and current_section and selected_subject_value and period):
+                flash("Select branch, section, subject, and period before saving attendance.", "error")
+                return redirect(url_for("teacher_mark_attendance", branch_id=current_branch_id, section=current_section, subject_id=selected_subject_value, period=period, date=selected_date))
+
+            timetable_context = _resolve_timetable_slots(
+                db,
+                current_branch_id,
+                selected_subject_value,
+                selected_date,
+                section=current_section,
+                period=period,
+            )
+            selected_period = timetable_context.get("selected_period")
+            if not selected_period:
+                flash("No timetable period matches the selected branch, section, subject, and period.", "error")
+                return redirect(url_for("teacher_mark_attendance", branch_id=current_branch_id, section=current_section, subject_id=selected_subject_value, period=period, date=selected_date))
+
+            subject_id = selected_period.get("subject_id") or subject_id
+            subject_name = selected_period.get("subject_name") or subject_name
+
             student_ids = request.form.getlist("student_id")
             if not student_ids:
                 flash("Please select at least one student.", "error")
@@ -3221,7 +3263,6 @@ def teacher_mark_attendance():
                         status = request.form.get(f"status_{student_id}", "Absent")
                         note = request.form.get(f"note_{student_id}", "")
 
-                        # Validate student belongs to this branch
                         ok_student = db.execute(
                             f"SELECT 1 FROM students WHERE id = {placeholder} AND branch_id = {placeholder} AND (COALESCE(section, '') = COALESCE({placeholder}, '') OR COALESCE(section, '') = '')",
                             (student_id, current_branch_id, current_section),
@@ -3230,7 +3271,6 @@ def teacher_mark_attendance():
                             invalid_students += 1
                             continue
 
-                        # Do not allow overwriting attendance created by another teacher
                         existing = db.execute(
                             f"""
                             SELECT teacher_id
@@ -3270,41 +3310,51 @@ def teacher_mark_attendance():
                     if blocked_overwrites:
                         flash(f"Skipped {blocked_overwrites} record(s) already owned by another teacher.", "warning")
                     flash(f"Attendance for Period {period} saved successfully.", "success")
-                    return redirect(url_for("teacher_mark_attendance", date=selected_date, period=period))
+                    return redirect(url_for("teacher_mark_attendance", branch_id=current_branch_id, section=current_section, subject_id=selected_subject_value, period=period, date=selected_date))
                 except Exception as save_error:
                     db.rollback()
                     print(f"[teacher_mark_attendance] ERROR: {repr(save_error)}")
                     flash("Failed to save attendance.", "error")
 
-        students = db.execute(
-            f"SELECT id, name, enrollment, roll_no, section FROM students WHERE branch_id = {placeholder} AND (COALESCE(section, '') = COALESCE({placeholder}, '') OR COALESCE(section, '') = '') ORDER BY COALESCE(import_order, id), id",
-            (current_branch_id, current_section),
-        ).fetchall()
+        if not students and current_branch_id and current_section and selected_subject_value and period:
+            students = db.execute(
+                f"SELECT id, name, enrollment, roll_no, section FROM students WHERE branch_id = {placeholder} AND (COALESCE(section, '') = COALESCE({placeholder}, '') OR COALESCE(section, '') = '') ORDER BY COALESCE(import_order, id), id",
+                (current_branch_id, current_section),
+            ).fetchall()
 
-        attendance_map = {}
-        for row in db.execute(
-            f"""
-            SELECT student_id, status, note
-            FROM attendance
-            WHERE branch_id = {placeholder}
-              AND subject_id = {placeholder}
-              AND date = {placeholder}
-              AND period = {placeholder}
-            """,
-            (current_branch_id, subject_id, selected_date, period),
-        ).fetchall():
-            attendance_map[str(row_get(row, "student_id"))] = row
+        if not attendance_map and current_branch_id and subject_id and period:
+            for row in db.execute(
+                f"""
+                SELECT student_id, status, note
+                FROM attendance
+                WHERE branch_id = {placeholder}
+                  AND subject_id = {placeholder}
+                  AND date = {placeholder}
+                  AND period = {placeholder}
+                """,
+                (current_branch_id, subject_id, selected_date, period),
+            ).fetchall():
+                attendance_map[str(row_get(row, "student_id"))] = row
 
         return render_template(
             "teacher_mark_attendance.html",
             teacher=teacher,
             subjects=branch_subjects,
+            sections=branch_sections,
             students=students,
             attendance_map=attendance_map,
             selected_date=selected_date,
             period=period,
             today_date=today_str,
             current_section=current_section,
+            selected_subject_id=selected_subject_value,
+            selected_subject_name=selected_subject_name,
+            selected_period=selected_period,
+            current_active_period=current_active_period,
+            selected_branch_id=current_branch_id,
+            selected_branch_name=current_branch_name,
+            can_mark_attendance=can_mark_attendance,
+            schedule_message=schedule_message,
         )
     except Exception as e:
         print(f"[teacher_mark_attendance] ERROR: {repr(e)}")
@@ -3866,29 +3916,34 @@ def _resolve_timetable_slots(db, branch_id="", subject_id="", selected_date=None
 
     req_subject_id = _coerce_int(subject_id)
     req_subject_name = ""
-    if req_subject_id is not None:
-        subject_row = db.execute(f"SELECT id, name FROM subjects WHERE id = {placeholder}", (req_subject_id,)).fetchone()
-        if subject_row:
-            req_subject_name = row_get(subject_row, "name") or ""
-    if not req_subject_name and subject_id and not str(subject_id).strip().isdigit():
+    if subject_id and not str(subject_id).strip().isdigit():
         req_subject_name = str(subject_id).strip()
 
     rows = []
     try:
-        rows = db.execute(
-            "SELECT te.*, COALESCE(s.name, te.subject_name, '') AS subject_name_db, COALESCE(t.name, te.faculty_name, '') AS teacher_name_db, COALESCE(b.name, '') AS branch_name_db "
+        sql = (
+            "SELECT te.*, COALESCE(te.subject_name, '') AS subject_name_db, COALESCE(te.faculty_name, '') AS teacher_name_db, COALESCE(b.name, '') AS branch_name_db "
             "FROM timetable_entries te "
-            "LEFT JOIN subjects s ON te.subject_id = s.id "
-            "LEFT JOIN teachers t ON te.teacher_id = t.id "
             "LEFT JOIN branches b ON te.branch_id = b.id "
             f"WHERE te.branch_id = {placeholder}"
-            + (f" AND LOWER(TRIM(COALESCE(te.section, ''))) = LOWER(TRIM({placeholder}))" if section_val else "")
-            + " ORDER BY te.start_time, te.end_time, te.id",
-            tuple([selected_branch_id] + ([section_val] if section_val else [])),
-        ).fetchall()
+        )
+        params = [selected_branch_id]
+        if section_val:
+            sql += f" AND LOWER(TRIM(COALESCE(te.section, ''))) = LOWER(TRIM({placeholder}))"
+            params.append(section_val)
+        if req_subject_id is not None:
+            sql += f" AND (te.subject_id = {placeholder} OR LOWER(TRIM(COALESCE(te.subject_name, ''))) = LOWER(TRIM({placeholder})))"
+            params.extend([req_subject_id, req_subject_name or str(req_subject_id)])
+        elif req_subject_name:
+            sql += f" AND LOWER(TRIM(COALESCE(te.subject_name, ''))) = LOWER(TRIM({placeholder}))"
+            params.append(req_subject_name)
+        sql += " ORDER BY te.start_time, te.end_time, te.id"
+        rows = db.execute(sql, tuple(params)).fetchall()
     except Exception as e:
         print(f"[attendance] timetable_entries lookup failed: {repr(e)}")
         rows = []
+
+    print(f"[attendance] timetable_entries lookup branch_id={selected_branch_id} section={section_val!r} subject={subject_id!r} rows={len(rows)}")
 
     if not rows:
         return {
@@ -3999,6 +4054,10 @@ def _resolve_timetable_slots(db, branch_id="", subject_id="", selected_date=None
     selected_slot = schedule_rows[selected_index] if selected_index is not None and selected_index < len(schedule_rows) else None
     active_slot = schedule_rows[active_index] if active_index is not None and active_index < len(schedule_rows) else None
     next_slot = schedule_rows[next_index] if next_index is not None and next_index < len(schedule_rows) else None
+
+    print(
+        f"[attendance] timetable periods branch_id={selected_branch_id} section={section_val!r} subjects={sorted({slot['subject_name'] for slot in schedule_rows if slot.get('subject_name')})} periods={len(schedule_rows)}"
+    )
 
     remaining_slots = []
     if schedule_rows:
@@ -4658,10 +4717,14 @@ def api_timetable_periods():
         periods = [
             {
                 "period": s.get("period"),
+                "day": s.get("day"),
                 "start_time": s.get("start_time"),
                 "end_time": s.get("end_time"),
                 "timetable_entry_id": s.get("timetable_entry_id"),
                 "subject_name": s.get("subject_name"),
+                "subject_id": s.get("subject_id"),
+                "room": s.get("room"),
+                "faculty": s.get("faculty"),
                 "is_active": s.get("is_active"),
             }
             for s in ctx.get("slots", [])
