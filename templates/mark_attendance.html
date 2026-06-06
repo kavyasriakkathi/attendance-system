@@ -96,7 +96,7 @@ document.addEventListener('DOMContentLoaded', function() {
         <form method="get" id="attendance_filter_form" class="form-row">
             <div>
                 <label>Branch</label>
-                <select id="branch_id" name="branch_id" required>
+                <select id="branch_id" name="branch_id" onchange="this.form.submit()" required>
                     <option value="">Choose branch</option>
                     {% for branch in branches %}
                     <option value="{{ branch.id }}" {% if branch_id and branch.id|string == branch_id|string %}selected{% endif %}>{{ branch.name }}</option>
@@ -105,7 +105,7 @@ document.addEventListener('DOMContentLoaded', function() {
             </div>
             <div>
                 <label>Section</label>
-                <select id="section" name="section" {% if not branch_id %}disabled{% endif %} required>
+                <select id="section" name="section" onchange="this.form.submit()" {% if not branch_id %}disabled{% endif %} required>
                     <option value="">Choose section</option>
                     {% for sec in sections %}
                     <option value="{{ sec }}" {% if selected_section and sec|string == selected_section|string %}selected{% endif %}>{{ sec }}</option>
@@ -114,7 +114,7 @@ document.addEventListener('DOMContentLoaded', function() {
             </div>
             <div>
                 <label>Date</label>
-                <input type="date" id="date" name="date" value="{{ selected_date }}" max="{{ today_date }}" required />
+                <input type="date" id="date" name="date" value="{{ selected_date }}" max="{{ today_date }}" onchange="this.form.submit()" required />
             </div>
             <div>
                 <label>Schedule</label>
@@ -152,7 +152,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 </div>
             </div>
             <div style="display:flex; align-items:end;">
-                <button id="load_students_btn" type="submit" style="width:100%" disabled>Load Students</button>
+                <button id="load_students_btn" type="submit" style="width:100%" {% if not branch_id or not selected_section %}disabled{% endif %}>Load Students</button>
                 <div id="timetable_spinner" style="display:none; margin-left:8px;">Loading…</div>
             </div>
         </form>
@@ -163,6 +163,8 @@ document.addEventListener('DOMContentLoaded', function() {
             <input type="hidden" name="period" value="{{ period }}" />
             <input type="hidden" name="subject_id" value="{{ subject_id }}" />
             <input type="hidden" name="branch_id" value="{{ branch_id }}" />
+            <input type="hidden" name="section" value="{{ section }}" />
+            <input type="hidden" name="timetable_entry_id" value="{{ selected_timetable_entry_id }}" />
 
             <div class="table-responsive">
                 <table>

@@ -4687,19 +4687,7 @@ def register_routes(app, db_getter=None):
         except Exception:
             subject_id = None
 
-        # Resolve subject_id if not present but subject_name is available
-        if not subject_id:
-            try:
-                subject_name = slot.get("subject_name") if isinstance(slot, dict) else (slot["subject_name"] if "subject_name" in slot.keys() else None)
-            except Exception:
-                subject_name = None
-            try:
-                if subject_name:
-                    sub_row = _db_execute(db, "SELECT id FROM subjects WHERE LOWER(name)=LOWER(?) LIMIT 1", (subject_name,)).fetchone()
-                    if sub_row:
-                        subject_id = sub_row[0] if isinstance(sub_row, tuple) or isinstance(sub_row, list) else sub_row["id"]
-            except Exception:
-                subject_id = None
+        # Do not resolve subject_id from subjects table; rely on timetable_entries only
 
         # Determine branch_id and students list
         try:
