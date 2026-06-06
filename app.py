@@ -169,19 +169,42 @@ def get_db():
             def __init__(self, conn):
                 self._conn = conn
             def execute(self, query, params=()):
-                cur = self._conn.cursor(cursor_factory=DictCursor)
-                cur.execute(query, params)
-                return cur
+                try:
+                    cur = self._conn.cursor(cursor_factory=DictCursor)
+                    cur.execute(query, params)
+                    return cur
+                except Exception as exc:
+                    # Auto-rollback on InFailedSqlTransaction so subsequent queries don't cascade-fail
+                    if "InFailedSqlTransaction" in type(exc).__name__ or "current transaction is aborted" in str(exc):
+                        try:
+                            self._conn.rollback()
+                        except Exception:
+                            pass
+                        cur = self._conn.cursor(cursor_factory=DictCursor)
+                        cur.execute(query, params)
+                        return cur
+                    raise
             def commit(self): return self._conn.commit()
             def rollback(self): return self._conn.rollback()
             def close(self): return self._conn.close()
 
-        try:
-            conn = psycopg2.connect(_ensure_sslmode(db_url), connect_timeout=10)
-            db = _PostgresDB(conn)
-        except Exception as e:
-            print(f"[DB] PostgreSQL connection error: {repr(e)}")
-            raise
+        import time as _time
+        _max_retries = 3
+        _last_err = None
+        for _attempt in range(1, _max_retries + 1):
+            try:
+                conn = psycopg2.connect(_ensure_sslmode(db_url), connect_timeout=10)
+                conn.set_session(autocommit=False)
+                db = _PostgresDB(conn)
+                _last_err = None
+                break
+            except Exception as e:
+                _last_err = e
+                print(f"[DB] PostgreSQL connection error (attempt {_attempt}/{_max_retries}): {repr(e)}")
+                if _attempt < _max_retries:
+                    _time.sleep(0.5 * _attempt)
+        if _last_err is not None:
+            raise _last_err
     else:
         import sqlite3
         conn = sqlite3.connect(db_url, timeout=20)
