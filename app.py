@@ -158,12 +158,25 @@ def get_db():
             print("[DB] psycopg2 import failed.")
             raise
 
-        def _ensure_sslmode(url: str) -> str:
-            if "sslmode=" in url: return url
-            is_render = bool(os.environ.get("RENDER") or os.environ.get("RENDER_INTERNAL_HOSTNAME"))
-            if not is_render: return url
+        def _ensure_sslmode(url: str, mode: str = "require") -> str:
+            """Add sslmode parameter if not already present."""
+            if "sslmode=" in url:
+                return url
             sep = "&" if "?" in url else "?"
-            return f"{url}{sep}sslmode=require"
+            return f"{url}{sep}sslmode={mode}"
+
+        def _to_internal_url(url: str) -> str:
+            """Convert Render external DB URL to internal (private network, no SSL needed).
+
+            External hostnames end with ``-a.region-postgres.render.com``.
+            Internal hostnames drop the ``-a`` suffix.
+            """
+            import re as _re
+            return _re.sub(
+                r"-a(\.[a-z]+-postgres\.render\.com)",
+                r"\1",
+                url,
+            )
 
         class _PostgresDB:
             def __init__(self, conn):
@@ -189,21 +202,42 @@ def get_db():
             def close(self): return self._conn.close()
 
         import time as _time
-        _max_retries = 3
+        is_render = bool(os.environ.get("RENDER") or os.environ.get("RENDER_INTERNAL_HOSTNAME"))
+
+        # Build ordered list of connection URLs to try
+        _urls_to_try = []
+        if is_render:
+            # 1st: internal URL (private network, no SSL)
+            internal_url = _to_internal_url(db_url)
+            if internal_url != db_url:
+                _urls_to_try.append(("internal", internal_url))
+            # 2nd: external with sslmode=prefer (lenient SSL)
+            _urls_to_try.append(("external-prefer", _ensure_sslmode(db_url, "prefer")))
+            # 3rd: external with sslmode=require
+            _urls_to_try.append(("external-require", _ensure_sslmode(db_url, "require")))
+            # 4th: external with sslmode=disable
+            _urls_to_try.append(("external-disable", _ensure_sslmode(db_url, "disable")))
+        else:
+            _urls_to_try.append(("default", db_url))
+
         _last_err = None
-        for _attempt in range(1, _max_retries + 1):
-            try:
-                conn = psycopg2.connect(_ensure_sslmode(db_url), connect_timeout=10)
-                conn.set_session(autocommit=False)
-                db = _PostgresDB(conn)
-                _last_err = None
+        for _label, _try_url in _urls_to_try:
+            for _attempt in range(1, 3):
+                try:
+                    conn = psycopg2.connect(_try_url, connect_timeout=10)
+                    conn.set_session(autocommit=False)
+                    db = _PostgresDB(conn)
+                    _last_err = None
+                    print(f"[DB] PostgreSQL connected via {_label} (attempt {_attempt})")
+                    break
+                except Exception as e:
+                    _last_err = e
+                    print(f"[DB] PostgreSQL connection error ({_label} attempt {_attempt}): {repr(e)}")
+                    if _attempt < 3:
+                        _time.sleep(1 * _attempt)
+            if db is not None:
                 break
-            except Exception as e:
-                _last_err = e
-                print(f"[DB] PostgreSQL connection error (attempt {_attempt}/{_max_retries}): {repr(e)}")
-                if _attempt < _max_retries:
-                    _time.sleep(0.5 * _attempt)
-        if _last_err is not None:
+        if _last_err is not None and db is None:
             raise _last_err
     else:
         import sqlite3
