@@ -110,11 +110,7 @@ def safe_api(f):
 
 # Use a stable SQLite file path relative to the application folder unless a PostgreSQL URL is provided.
 db_env = os.environ.get("DATABASE_URL")
-# Accept common postgres URL prefixes (postgres:// or postgresql://)
-if db_env and db_env.startswith("postgres"):
-    # Normalize to psycopg2-acceptable form if necessary
-    if db_env.startswith("postgres://"):
-        db_env = db_env.replace("postgres://", "postgresql://", 1)
+if db_env:
     database_path = db_env
 else:
     # Always use absolute path relative to app.py location
@@ -158,33 +154,6 @@ def get_db():
             print("[DB] psycopg2 import failed.")
             raise
 
-        def _ensure_sslmode(url: str) -> str:
-            """Ensure url contains sslmode=require and no other sslmode settings."""
-            if "sslmode=" in url:
-                url = url.replace("sslmode=prefer", "sslmode=require")
-                url = url.replace("sslmode=disable", "sslmode=require")
-            if "sslmode=require" not in url:
-                if "sslmode=" in url:
-                    import re as _re
-                    url = _re.sub(r"sslmode=[a-zA-Z0-9_-]+", "sslmode=require", url)
-                else:
-                    sep = "&" if "?" in url else "?"
-                    url += f"{sep}sslmode=require"
-            return url
-
-        def _to_internal_url(url: str) -> str:
-            """Convert Render external DB URL to internal (private network).
-
-            External hostnames end with ``-a.region-postgres.render.com``.
-            Internal hostnames drop the ``-a`` suffix.
-            """
-            import re as _re
-            return _re.sub(
-                r"-a(\.[a-z]+-postgres\.render\.com)",
-                r"\1",
-                url,
-            )
-
         class _PostgresDB:
             def __init__(self, conn):
                 self._conn = conn
@@ -208,51 +177,32 @@ def get_db():
             def rollback(self): return self._conn.rollback()
             def close(self): return self._conn.close()
 
-        import time as _time
-        is_render = bool(os.environ.get("RENDER") or os.environ.get("RENDER_INTERNAL_HOSTNAME"))
+        try:
+            from urllib.parse import urlparse as _urlparse
+            _parsed = _urlparse(db_url)
+            parsed_host = _parsed.hostname
+            parsed_db   = _parsed.path.lstrip("/")
+            parsed_user = _parsed.username
+            print("[DB HOST]", parsed_host)
+            print("[DB NAME]", parsed_db)
+            print("[DB USER]", parsed_user)
+        except Exception:
+            pass
 
-        # Build ordered list of connection URLs to try
-        _urls_to_try = []
-        if is_render:
-            # 1st: internal URL (private network)
-            internal_url = _to_internal_url(db_url)
-            if internal_url != db_url:
-                _urls_to_try.append(("internal", _ensure_sslmode(internal_url)))
-            # 2nd: external URL
-            _urls_to_try.append(("external", _ensure_sslmode(db_url)))
-        else:
-            _urls_to_try.append(("default", _ensure_sslmode(db_url)))
-
-        _last_err = None
-        for _label, _try_url in _urls_to_try:
-            for _attempt in range(1, 3):
-                try:
-                    print("[DB] Connecting to PostgreSQL...")
-                    print("[DB] SSL Mode: require")
-                    conn = psycopg2.connect(
-                        _try_url,
-                        sslmode="require",
-                        connect_timeout=10
-                    )
-                    conn.set_session(autocommit=False)
-                    db = _PostgresDB(conn)
-                    _last_err = None
-                    print(f"[DB] PostgreSQL connected via {_label} (attempt {_attempt})")
-                    break
-                except psycopg2.OperationalError as e:
-                    _last_err = e
-                    print("[DB ERROR]", str(e))
-                    if _attempt < 2:
-                        _time.sleep(1)
-                except Exception as e:
-                    _last_err = e
-                    print(f"[DB] PostgreSQL connection error ({_label} attempt {_attempt}): {repr(e)}")
-                    if _attempt < 2:
-                        _time.sleep(1)
-            if db is not None:
-                break
-        if _last_err is not None and db is None:
-            raise _last_err
+        try:
+            print("[DB] Connecting to PostgreSQL...")
+            conn = psycopg2.connect(
+                db_url,
+                connect_timeout=10
+            )
+            conn.set_session(autocommit=False)
+            db = _PostgresDB(conn)
+            print("[DB] PostgreSQL connected successfully")
+        except psycopg2.OperationalError as e:
+            print("[DB ERROR]", str(e))
+            import traceback as _tb
+            _tb.print_exc()
+            raise
     else:
         import sqlite3
         conn = sqlite3.connect(db_url, timeout=20)
@@ -5956,6 +5906,71 @@ with app.app_context():
     try:
         print(f"Database path: {app.config['DATABASE']}")
         db_str = str(app.config.get('DATABASE', ''))
+
+        # Diagnostic test for Postgres URL
+        if db_str.startswith("postgres"):
+            # Print database info safely
+            try:
+                from urllib.parse import urlparse, parse_qs
+                parsed = urlparse(db_str)
+                host = parsed.hostname
+                db_name = parsed.path.lstrip('/')
+                username = parsed.username
+                port = parsed.port or 5432
+                query_params = parse_qs(parsed.query)
+                sslmode = query_params.get('sslmode', [None])[0]
+
+                print("[DB DIAGNOSTIC] Safely extracted connection parameters:")
+                print(f"  Host: {host}")
+                print(f"  Database Name: {db_name}")
+                print(f"  Username: {username}")
+                print(f"  SSL Mode: {sslmode}")
+                print(f"  Port: {port}")
+
+                # Verify whether the application is using internal/external URL
+                is_external = False
+                if host and ("-a.render.com" in host or "-postgres.render.com" in host) and "-a" in host.split('.')[0]:
+                    is_external = True
+
+                if is_external:
+                    print("[DB DIAGNOSTIC] Application is using the External Database URL.")
+                else:
+                    print("[DB DIAGNOSTIC] Application is using the Internal Database URL.")
+
+                # Check host resolution
+                import socket
+                try:
+                    ip = socket.gethostbyname(host)
+                    print(f"[DB DIAGNOSTIC] Host {host} resolved to {ip}")
+                except Exception as ex:
+                    print(f"[DB DIAGNOSTIC ERROR] Host {host} resolution failed: {repr(ex)}")
+
+                # Check port reachability
+                try:
+                    with socket.create_connection((host, port), timeout=5) as sock:
+                        print(f"[DB DIAGNOSTIC] Port {port} is reachable on {host}")
+                except Exception as ex:
+                    print(f"[DB DIAGNOSTIC ERROR] Port {port} on {host} is unreachable: {repr(ex)}")
+                    print("[DB DIAGNOSTIC INFO] Check whether the Render PostgreSQL instance is suspended, deleted, rotated, or has changed credentials.")
+            except Exception as ex:
+                print(f"[DB DIAGNOSTIC ERROR] Diagnostic gathering failed: {repr(ex)}")
+
+            # Startup test exactly as requested
+            try:
+                import psycopg2
+                url = os.environ.get("DATABASE_URL")
+                print("[DB TEST] attempting connection")
+                conn = psycopg2.connect(url)
+                cur = conn.cursor()
+                cur.execute("SELECT version();")
+                print(cur.fetchone())
+                conn.close()
+                print("[DB TEST] connection test passed successfully")
+            except Exception as ex:
+                print("[DB TEST ERROR] Connection test failed.")
+                import traceback
+                traceback.print_exc()
+
         if not db_str.startswith('postgres'):
             print(f"Database file exists: {os.path.exists(db_str)}")
             if os.path.exists(db_str):
