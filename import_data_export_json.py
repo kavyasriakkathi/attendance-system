@@ -20,24 +20,18 @@ TABLES = [
 
 
 def _ensure_sslmode(url: str) -> str:
-    """Add sslmode=require for non-local Postgres URLs when missing.
-
-    This fixes a common issue where Render-managed Postgres requires SSL even
-    when you run the import script from your laptop.
-    """
+    """Ensure url contains sslmode=require and no other sslmode settings."""
     if "sslmode=" in url:
-        return url
-    try:
-        parsed = urlparse(url)
-        host = (parsed.hostname or "").lower()
-        if host in ("localhost", "127.0.0.1", ""):
-            return url
-    except Exception:
-        # If parsing fails, don't mutate the URL.
-        return url
-
-    sep = "&" if "?" in url else "?"
-    return f"{url}{sep}sslmode=require"
+        url = url.replace("sslmode=prefer", "sslmode=require")
+        url = url.replace("sslmode=disable", "sslmode=require")
+    if "sslmode=require" not in url:
+        if "sslmode=" in url:
+            import re as _re
+            url = _re.sub(r"sslmode=[a-zA-Z0-9_-]+", "sslmode=require", url)
+        else:
+            sep = "&" if "?" in url else "?"
+            url += f"{sep}sslmode=require"
+    return url
 
 
 def _set_sequence(conn, table: str, id_col: str = "id") -> None:
@@ -81,7 +75,7 @@ def main() -> int:
     print(f"Importing {export_path} -> Postgres host={parsed.hostname} port={parsed.port} db={parsed.path.lstrip('/')}")
     print("Tip: Use the Render Postgres *External Database URL* for DATABASE_URL.")
 
-    conn = psycopg2.connect(pg_url, connect_timeout=10)
+    conn = psycopg2.connect(pg_url, sslmode="require", connect_timeout=10)
     try:
         with conn:
             with conn.cursor() as cur:

@@ -16,19 +16,18 @@ TABLES = [
 
 
 def _ensure_sslmode(url: str) -> str:
-    # If sslmode already present, keep it.
+    """Ensure url contains sslmode=require and no other sslmode settings."""
     if "sslmode=" in url:
-        return url
-    # Managed Postgres commonly requires SSL even when run locally.
-    try:
-        parsed = urlparse(url)
-        host = (parsed.hostname or "").lower()
-        if host in ("localhost", "127.0.0.1", ""):
-            return url
-    except Exception:
-        return url
-    sep = "&" if "?" in url else "?"
-    return f"{url}{sep}sslmode=require"
+        url = url.replace("sslmode=prefer", "sslmode=require")
+        url = url.replace("sslmode=disable", "sslmode=require")
+    if "sslmode=require" not in url:
+        if "sslmode=" in url:
+            import re as _re
+            url = _re.sub(r"sslmode=[a-zA-Z0-9_-]+", "sslmode=require", url)
+        else:
+            sep = "&" if "?" in url else "?"
+            url += f"{sep}sslmode=require"
+    return url
 
 
 def _set_sequence(conn, table: str, id_col: str = "id") -> None:
@@ -64,7 +63,7 @@ def main() -> int:
 
     sqlite_conn = sqlite3.connect(sqlite_path)
     sqlite_conn.row_factory = sqlite3.Row
-    pg_conn = psycopg2.connect(pg_url, connect_timeout=10)
+    pg_conn = psycopg2.connect(pg_url, sslmode="require", connect_timeout=10)
 
     try:
         with pg_conn:
