@@ -45,7 +45,9 @@ def main() -> int:
     pg_url = os.environ.get("DATABASE_URL")
 
     if not pg_url:
-        print("ERROR: DATABASE_URL is not set. Put your Render Postgres External Database URL in DATABASE_URL.")
+        print("ERROR: DATABASE_URL is not set.")
+        print("Set it to your Neon PostgreSQL connection string, e.g.:")
+        print("  $env:DATABASE_URL='postgresql://user:pass@ep-xxx.neon.tech/attendance?sslmode=require'")
         return 2
 
     if pg_url.startswith("postgres://"):
@@ -109,11 +111,12 @@ def main() -> int:
             for table in TABLES:
                 _set_sequence(pg_conn, table)
 
-        print("Done. Rows copied (from SQLite -> Postgres):")
+        print("Done. Rows copied (from SQLite -> Neon PostgreSQL):")
         for t in TABLES:
             print(f"- {t}: {copied.get(t, 0)}")
 
-        print("\nNext: open your Render app and visit /admin/check-db to confirm counts.")
+        print("\nNext: Set DATABASE_URL in your Render dashboard and redeploy.")
+        print("Then visit /admin/check-db on your app to confirm data counts.")
         return 0
 
     finally:

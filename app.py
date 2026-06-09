@@ -143,6 +143,27 @@ app.config.from_mapping(
     LOW_ATTENDANCE_THRESHOLD=int(os.environ.get("LOW_ATTENDANCE_THRESHOLD", 75)),
 )
 
+def _normalize_db_url(url: str) -> str:
+    """Normalize a PostgreSQL connection URL for psycopg2 + Neon compatibility.
+
+    - Converts legacy postgres:// scheme to postgresql://
+    - Ensures sslmode=require is present (required by Neon and most managed PG providers)
+    """
+    if not url:
+        return url
+    # psycopg2 requires postgresql://, not postgres://
+    if url.startswith("postgres://"):
+        url = "postgresql://" + url[len("postgres://"):]
+    # Inject sslmode=require if missing (Neon mandates SSL)
+    if "sslmode=" not in url:
+        sep = "&" if "?" in url else "?"
+        url = url + sep + "sslmode=require"
+    elif "sslmode=disable" in url or "sslmode=prefer" in url:
+        import re as _re
+        url = _re.sub(r"sslmode=[a-zA-Z0-9_-]+", "sslmode=require", url)
+    return url
+
+
 def get_db():
     db_url = str(app.config.get("DATABASE", ""))
     db = None
@@ -177,12 +198,20 @@ def get_db():
             def rollback(self): return self._conn.rollback()
             def close(self): return self._conn.close()
 
+        # Normalize URL for Neon / any managed PostgreSQL provider
+        db_url = _normalize_db_url(db_url)
+
         try:
             from urllib.parse import urlparse as _urlparse
             _parsed = _urlparse(db_url)
             parsed_host = _parsed.hostname
             parsed_db   = _parsed.path.lstrip("/")
             parsed_user = _parsed.username
+            # Detect provider from hostname
+            provider = "Neon" if parsed_host and "neon.tech" in parsed_host else \
+                       "Supabase" if parsed_host and "supabase.co" in parsed_host else \
+                       "PostgreSQL"
+            print(f"[DB] Provider: {provider}")
             print("[DB HOST]", parsed_host)
             print("[DB NAME]", parsed_db)
             print("[DB USER]", parsed_user)
@@ -190,10 +219,10 @@ def get_db():
             pass
 
         try:
-            print("[DB] Connecting to PostgreSQL...")
+            print("[DB] Connecting to PostgreSQL (Neon)...")
             conn = psycopg2.connect(
                 db_url,
-                connect_timeout=10
+                connect_timeout=15,
             )
             conn.set_session(autocommit=False)
             db = _PostgresDB(conn)
@@ -853,10 +882,12 @@ def _dashboard_default_context():
         "current_active_period": None,
         "upcoming_timetable": [],
         "recent_activity": [],
-        "database_info": {
-            "storage": "PostgreSQL" if str(app.config.get("DATABASE", "")).startswith("postgres") else "SQLite",
-            "path": app.config.get("DATABASE", ""),
-        },
+        "database_info": (lambda _url=str(app.config.get("DATABASE", "")): {
+            "storage": "Neon PostgreSQL" if "neon.tech" in _url else
+                       "Supabase PostgreSQL" if "supabase.co" in _url else
+                       "PostgreSQL" if _url.startswith("postgres") else "SQLite",
+            "path": _url,
+        })(),
         "mail_info": {
             "configured": is_mail_configured(),
             "server": app.config.get("MAIL_SERVER"),
@@ -865,7 +896,7 @@ def _dashboard_default_context():
             "tls": app.config.get("MAIL_USE_TLS"),
             "render_env": render_env,
         },
-        "persistence_warning": render_env and not str(app.config.get("DATABASE", "")).startswith("postgres"),
+        "persistence_warning": render_env and not str(app.config.get("DATABASE", "")).startswith("postgres"),  # Neon = postgres URL = no warning
         "error_mode": False,
     }
 
