@@ -4373,6 +4373,8 @@ def register_routes(app, db_getter=None):
             where_clauses.append(
                 "(LOWER(TRIM(COALESCE(s.name,''))) LIKE LOWER(TRIM(%s))"
                 " OR LOWER(TRIM(COALESCE(t.name,''))) LIKE LOWER(TRIM(%s))"
+                " OR LOWER(TRIM(COALESCE(te.subject_name,''))) LIKE LOWER(TRIM(%s))"
+                " OR LOWER(TRIM(COALESCE(te.faculty_name,''))) LIKE LOWER(TRIM(%s))"
                 " OR LOWER(TRIM(COALESCE(ts.subject_name,''))) LIKE LOWER(TRIM(%s))"
                 " OR LOWER(TRIM(COALESCE(ts.faculty_name,''))) LIKE LOWER(TRIM(%s))"
                 " OR LOWER(TRIM(COALESCE(te.section,''))) LIKE LOWER(TRIM(%s))"
@@ -4403,7 +4405,7 @@ def register_routes(app, db_getter=None):
         try:
             if total_count > 0:
                 offset = max(0, (page - 1) * PAGE_SIZE)
-                visible_clause = "AND NOT (\n                        COALESCE(te.day, '') = ''\n                        AND COALESCE(te.start_time, '') = ''\n                        AND COALESCE(te.end_time, '') = ''\n                        AND COALESCE(te.section, '') = ''\n                        AND COALESCE(CAST(COALESCE(te.semester, ts.semester) AS TEXT), '') = ''\n                        AND COALESCE(te.room, '') = ''\n                        AND COALESCE(s.name, ts.subject_name, '') = ''\n                        AND COALESCE(t.name, ts.faculty_name, '') = ''\n                        AND COALESCE(b.name, ts.branch, '') = ''\n                      )"
+                visible_clause = "AND NOT (\n                        COALESCE(te.day, '') = ''\n                        AND COALESCE(te.start_time, '') = ''\n                        AND COALESCE(te.end_time, '') = ''\n                        AND COALESCE(te.section, '') = ''\n                        AND COALESCE(CAST(COALESCE(te.semester, ts.semester) AS TEXT), '') = ''\n                        AND COALESCE(te.room, '') = ''\n                        AND COALESCE(s.name, te.subject_name, ts.subject_name, '') = ''\n                        AND COALESCE(t.name, te.faculty_name, ts.faculty_name, '') = ''\n                        AND COALESCE(b.name, ts.branch, '') = ''\n                      )"
                 if not where_sql:
                     visible_clause = visible_clause.replace("AND NOT", "WHERE NOT", 1)
                 sql = f"""
@@ -4415,8 +4417,8 @@ def register_routes(app, db_getter=None):
                         COALESCE(te.semester, ts.semester) AS semester,
                         te.room,
                         te.is_lab,
-                        COALESCE(s.name, ts.subject_name, '') AS subject_name,
-                        COALESCE(t.name, ts.faculty_name, '') AS faculty_name,
+                        COALESCE(s.name, te.subject_name, ts.subject_name, '') AS subject_name,
+                        COALESCE(t.name, te.faculty_name, ts.faculty_name, '') AS faculty_name,
                         COALESCE(b.name, ts.branch, '') AS branch_name
                     FROM timetable_entries te
                     LEFT JOIN subjects s ON te.subject_id = s.id
