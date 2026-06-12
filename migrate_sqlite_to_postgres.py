@@ -10,6 +10,7 @@ TABLES = [
     "students",
     "subjects",
     "attendance",
+    "timetable_entries",
     "users",
     "settings",
 ]
@@ -38,6 +39,28 @@ def _set_sequence(conn, table: str, id_col: str = "id") -> None:
             "SELECT setval(pg_get_serial_sequence(%s, %s), %s, %s)",
             (table, id_col, max_id, bool(max_id)),
         )
+
+
+def _print_row_counts_sqlite(conn, tables):
+    print("\nSQLite row counts before migration:")
+    for table in tables:
+        try:
+            count = conn.execute(f"SELECT COUNT(*) AS count FROM {table}").fetchone()[0]
+            print(f"Table: {table} | Rows: {count}")
+        except Exception as exc:
+            print(f"Table not found: {table}")
+
+
+def _print_row_counts_postgres(conn, tables, label="Postgres row counts"):
+    print(f"\n{label}:")
+    with conn.cursor() as cur:
+        for table in tables:
+            try:
+                cur.execute(f"SELECT COUNT(*) FROM {table}")
+                count = cur.fetchone()[0]
+                print(f"Table: {table} | Rows: {count}")
+            except Exception as exc:
+                print(f"Table not found: {table}")
 
 
 def main() -> int:
@@ -70,6 +93,32 @@ def main() -> int:
     try:
         with pg_conn:
             with pg_conn.cursor() as cur:
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS timetable_entries (
+                        id SERIAL PRIMARY KEY,
+                        branch_id INTEGER,
+                        section TEXT,
+                        semester INTEGER,
+                        day TEXT,
+                        start_time TEXT,
+                        end_time TEXT,
+                        subject_id INTEGER,
+                        teacher_id INTEGER,
+                        subject_name TEXT,
+                        faculty_name TEXT,
+                        is_lab INTEGER DEFAULT 0,
+                        room TEXT,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    );
+                    """
+                )
+                cur.execute(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS uq_timetable_entries_dedupe ON timetable_entries (branch_id, section, semester, day, start_time, end_time, subject_id, teacher_id, room)"
+                )
+
+        with pg_conn:
+            with pg_conn.cursor() as cur:
                 # Verify required tables exist on Postgres
                 for t in TABLES:
                     cur.execute(
@@ -81,6 +130,9 @@ def main() -> int:
                         raise RuntimeError(
                             f"Postgres table '{t}' does not exist. Deploy the app first so init_db() creates tables."
                         )
+
+        _print_row_counts_sqlite(sqlite_conn, TABLES)
+        _print_row_counts_postgres(pg_conn, TABLES, label="Postgres row counts before migration")
 
         copied = {}
         with pg_conn:
@@ -115,8 +167,10 @@ def main() -> int:
         for t in TABLES:
             print(f"- {t}: {copied.get(t, 0)}")
 
-        print("\nNext: Set DATABASE_URL in your Render dashboard and redeploy.")
-        print("Then visit /admin/check-db on your app to confirm data counts.")
+        _print_row_counts_postgres(pg_conn, TABLES, label="Postgres row counts after migration")
+
+        print("\nMigration complete. Verify that the required record counts are present in Postgres.")
+        print("If the app is running on Neon, keep DATABASE_URL set to the correct connection string.")
         return 0
 
     finally:
