@@ -3066,6 +3066,47 @@ def _resolve_teacher_id(teacher_name: str, teacher_cache: Dict[str, Optional[int
     return None
 
 
+def _refresh_timetable_entry_ids(db) -> Dict[str, int]:
+    subject_index = _build_subject_lookup_index(db)
+    teacher_index = _build_teacher_lookup_index(db)
+    subject_cache: Dict[str, Optional[int]] = {}
+    teacher_cache: Dict[str, Optional[int]] = {}
+    update_count = 0
+    total_rows = 0
+    try:
+        rows = _db_execute(db, "SELECT id, subject_name, faculty_name FROM timetable_entries WHERE subject_id IS NULL OR teacher_id IS NULL").fetchall()
+        for row in rows:
+            total_rows += 1
+            entry_id = row[0] if not hasattr(row, 'keys') else row['id']
+            subject_name = row[1] if not hasattr(row, 'keys') else row['subject_name']
+            faculty_name = row[2] if not hasattr(row, 'keys') else row['faculty_name']
+            subject_id = _resolve_subject_id(subject_name or "", subject_cache, subject_index) if subject_name else None
+            teacher_id = _resolve_teacher_id(faculty_name or "", teacher_cache, teacher_index) if faculty_name else None
+            if subject_id is None and teacher_id is None:
+                continue
+            updates = []
+            params = []
+            if subject_id is not None:
+                updates.append("subject_id = %s")
+                params.append(subject_id)
+            if teacher_id is not None:
+                updates.append("teacher_id = %s")
+                params.append(teacher_id)
+            params.append(entry_id)
+            try:
+                _db_execute(db, f"UPDATE timetable_entries SET {', '.join(updates)} WHERE id = %s", tuple(params))
+                update_count += 1
+            except Exception:
+                logger.exception("Failed to refresh timetable entry ids for entry_id=%s", entry_id)
+        try:
+            db.commit()
+        except Exception:
+            pass
+    except Exception:
+        logger.exception("Failed to refresh timetable entries subject/teacher IDs")
+    return {"total_rows": total_rows, "updated": update_count}
+
+
 def get_upcoming_classes(db, branch: str = "", section: str = "", limit: int = 3, now: Optional[datetime] = None):
     """Return upcoming classes for the current day using normalized data first."""
     current = _current_local_datetime(now)
@@ -4296,6 +4337,8 @@ def register_routes(app, db_getter=None):
         last_imported_file = session.get("timetable_last_imported_file")
         if session.pop("timetable_refresh_normalized", None):
             logger.info("Refreshing normalized timetable rows for manage view")
+            refresh_stats = _refresh_timetable_entry_ids(db)
+            logger.info("Refreshed timetable entries subject/teacher IDs: %s", refresh_stats)
         rows = []
         rows_source = "raw"
         try:
