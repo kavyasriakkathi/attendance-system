@@ -151,8 +151,8 @@
                     <td>{{ branch_value }}</td>
                     <td>{{ row.get('section') or '' }}</td>
                     <td>{{ semester_value }}</td>
-                    <td>{{ subject_value }}</td>
-                    <td>{{ faculty_value }}</td>
+                    <td>{% if subject_value %}{{ subject_value }}{% else %}<span class="missing">Unassigned subject</span>{% endif %}</td>
+                    <td>{% if faculty_value %}{{ faculty_value }}{% else %}<span class="missing">Unassigned faculty</span>{% endif %}</td>
                     <td>{{ row.get('room') or '' }}</td>
                     <td>{% if lab_value is not none %}{{ 'Lab' if lab_value else 'Theory' }}{% endif %}</td>
                 </tr>

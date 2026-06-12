@@ -668,6 +668,12 @@ button:disabled,
 .badge-success { background: #d1f7ec; color: #0b6e54; }
 .badge-danger { background: #fee2e2; color: #991b1b; }
 
+.missing {
+    color: var(--text-secondary);
+    font-style: italic;
+    opacity: 0.9;
+}
+
 @media (max-width: 768px) {
     header {
         padding: 12px 16px;
