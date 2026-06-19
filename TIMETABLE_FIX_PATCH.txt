@@ -1,0 +1,93 @@
+
+# PATCH FILE FOR TIMETABLE UPLOAD FIXES
+# This file contains the comprehensive fixes for timetable upload error handling
+
+# Key improvements:
+# 1. Better error handling for NULL branch_id cases
+# 2. Explicit transaction rollback on failure
+# 3. Enhanced validation before insertion
+# 4. Detailed logging throughout the import process
+# 5. Database state consistency even after failures
+# 6. Better error messages for users
+# 7. Foreign key constraint handling
+
+# CHANGES TO IMPORT_SLOTS_STREAMING FUNCTION:
+
+# Add this after line 3259 (start of import_slots_streaming):
+
+"""
+BEFORE THE MAIN LOOP - Add try-except wrapper:
+    try:
+        # ... existing code ...
+    except Exception as e:
+        logger.exception("import_slots_streaming failed with exception type=%s message=%s", type(e).__name__, str(e))
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        # Re-raise to be handled at route level
+        raise
+
+# IN THE NORMALIZED INSERTION SECTION - Add validation:
+    if norm_row["branch_id"] is None:
+        logger.warning("Skipping normalized entry with NULL branch_id section=%s subject=%s", norm_row["section"], norm_row["subject_name"])
+        normalized_counters["skipped_total"] += 1
+        normalized_counters["skipped_branch"] += 1
+        _write_preview_line(preview_path, preview_state, {"index": row_index, "reason": "null_branch_id_after_resolution", "row": norm_row})
+        continue  # Skip this entry instead of crashing
+
+# CHANGES TO TIMETABLE_MANAGE ROUTE:
+
+# 1. Add rollback on exception:
+    except Exception as e:
+        logger.exception("Failed to import timetable, rolling back transaction")
+        try:
+            db.rollback()
+        except Exception as rollback_err:
+            logger.exception("Rollback also failed: %s", rollback_err)
+        
+        # Provide user-friendly error message
+        error_type = type(e).__name__
+        error_msg = str(e)
+        if "branch" in error_msg.lower():
+            flash("Error: Unable to process branch data. Please ensure branch records exist.", "error")
+        elif "subject" in error_msg.lower() or "foreign" in error_msg.lower():
+            flash("Error: Unable to map subjects. Try creating missing subjects first.", "error")
+        elif "duplicate" in error_msg.lower():
+            flash("Error: Duplicate timetable entries detected. Please clear the timetable first.", "error")
+        elif "null" in error_msg.lower() or "constraint" in error_msg.lower():
+            flash("Error: Invalid or missing data in timetable. Check your file format.", "error")
+        else:
+            flash(f"Import failed: {error_msg}", "error")
+        logger.error("Detailed import error: type=%s message=%s", error_type, error_msg)
+
+# 2. Add pre-upload validation:
+    # After file.save(dest), add:
+    try:
+        if not os.path.exists(dest) or os.path.getsize(dest) == 0:
+            flash("Error: Uploaded file is empty or corrupted.", "error")
+            return redirect(url_for("timetable_manage"))
+        logger.info("Timetable file uploaded: path=%s size=%d bytes filename=%s", dest, os.path.getsize(dest), filename)
+    except Exception as e:
+        logger.exception("File validation failed: %s", e)
+        flash("Error: Unable to validate uploaded file.", "error")
+        return redirect(url_for("timetable_manage"))
+
+# 3. Ensure iterator is not None:
+    if slots_iter is None:
+        logger.error("slots_iter is None after parsing file=%s ext=%s", filename, ext)
+        flash("Error: Unable to parse file. File format may be corrupted.", "error")
+        return redirect(url_for("timetable_manage"))
+
+# 4. Add explicit transaction handling:
+    try:
+        db.commit()
+        logger.info("Timetable import committed successfully")
+    except Exception as e:
+        logger.exception("Failed to commit timetable import")
+        try:
+            db.rollback()
+        except:
+            pass
+        flash("Error: Failed to save timetable to database.", "error")
+        return redirect(url_for("timetable_manage"))
