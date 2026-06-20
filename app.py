@@ -3054,10 +3054,32 @@ def student_login():
         try:
             db = get_db()
             placeholder = get_placeholder()
+
+            # ── Primary lookup: exact username match ───────────────────────
             user = db.execute(
                 f"SELECT id, username, password, role, student_id FROM users WHERE username = {placeholder}",
                 (username,),
             ).fetchone()
+
+            # ── Fallback: some old CSV imports stored enrollment as "12345.0"
+            #    (pandas float → str). Try matching via students.enrollment so
+            #    students who type their clean enrollment can still log in.
+            if not user:
+                student_row = db.execute(
+                    f"SELECT id FROM students WHERE enrollment = {placeholder}",
+                    (username,),
+                ).fetchone()
+                if student_row:
+                    student_id_fb = row_get(student_row, "id")
+                    user = db.execute(
+                        f"""
+                        SELECT u.id, u.username, u.password, u.role, u.student_id
+                        FROM users u
+                        WHERE u.student_id = {placeholder} AND u.role = 'student'
+                        LIMIT 1
+                        """,
+                        (student_id_fb,),
+                    ).fetchone()
 
             if user and row_get(user, "role") == "student" and check_password_hash(row_get(user, "password"), password):
                 session.clear()
@@ -3083,6 +3105,133 @@ def student_login():
                 pass
 
     return render_template("student_login.html", next=next_url)
+
+
+@app.route("/repair_student_logins", methods=["GET", "POST"])
+@login_required
+def repair_student_logins():
+    """Admin-only: backfill missing users rows for students and fix malformed usernames.
+
+    Covers two problems left by the old CSV import:
+    1. Students inserted but user account INSERT never ran (row errored out).
+    2. users.username stored as '12345.0' instead of '12345' (pandas float artifact).
+    """
+    if session.get("role") != "admin":
+        flash("Admin access required.", "error")
+        return redirect(url_for("dashboard"))
+
+    db = None
+    try:
+        db = get_db()
+        placeholder = get_placeholder()
+        is_postgres = str(app.config.get("DATABASE", "")).startswith("postgres")
+
+        # ── Step 1: fix malformed usernames stored as float strings ("12345.0") ─
+        fixed_usernames = 0
+        try:
+            malformed = db.execute(
+                "SELECT u.id, u.username, s.enrollment "
+                "FROM users u JOIN students s ON u.student_id = s.id "
+                "WHERE u.role = 'student' AND u.username != s.enrollment"
+            ).fetchall()
+            for row in malformed:
+                u_id = row_get(row, "id")
+                correct_enrollment = str(row_get(row, "enrollment") or "").strip()
+                if not correct_enrollment:
+                    continue
+                try:
+                    db.execute(
+                        f"UPDATE users SET username = {placeholder} WHERE id = {placeholder}",
+                        (correct_enrollment, u_id),
+                    )
+                    fixed_usernames += 1
+                    print(f"[repair_student_logins] Fixed username id={u_id} -> '{correct_enrollment}'")
+                except Exception as upd_err:
+                    print(f"[repair_student_logins] Could not fix user id={u_id}: {repr(upd_err)}")
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
+        except Exception as e:
+            print(f"[repair_student_logins] Username fix scan failed: {repr(e)}")
+
+        # ── Step 2: create missing user accounts for students with no users row ─
+        created = 0
+        skipped = 0
+        students_without_login = db.execute(
+            "SELECT s.id, s.enrollment FROM students s "
+            "WHERE NOT EXISTS ("
+            "  SELECT 1 FROM users u WHERE u.student_id = s.id AND u.role = 'student'"
+            ")"
+        ).fetchall()
+
+        for s_row in students_without_login:
+            s_id = row_get(s_row, "id")
+            enrollment = str(row_get(s_row, "enrollment") or "").strip()
+            if not enrollment or enrollment.lower() in ("nan", "none", ""):
+                skipped += 1
+                print(f"[repair_student_logins] Skipping student id={s_id} — blank enrollment")
+                continue
+
+            password_plain = enrollment[-4:] if len(enrollment) >= 4 else enrollment
+            password_hash = generate_password_hash(password_plain)
+
+            try:
+                if is_postgres:
+                    db.execute(
+                        f"""
+                        INSERT INTO users (username, password, role, student_id)
+                        VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder})
+                        ON CONFLICT (username) DO NOTHING
+                        """,
+                        (enrollment, password_hash, "student", s_id),
+                    )
+                else:
+                    db.execute(
+                        f"INSERT OR IGNORE INTO users (username, password, role, student_id) "
+                        f"VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder})",
+                        (enrollment, password_hash, "student", s_id),
+                    )
+                created += 1
+                print(f"[repair_student_logins] Created login for student id={s_id} enrollment='{enrollment}'")
+            except Exception as ins_err:
+                print(f"[repair_student_logins] Insert failed for student id={s_id}: {repr(ins_err)}")
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+                skipped += 1
+
+        try:
+            db.commit()
+        except Exception as ce:
+            print(f"[repair_student_logins] Commit error: {repr(ce)}")
+
+        msg = (
+            f"Repair complete: {created} logins created, "
+            f"{fixed_usernames} usernames corrected, "
+            f"{skipped} skipped."
+        )
+        flash(msg, "success")
+        print(f"[repair_student_logins] {msg}")
+
+    except Exception as e:
+        print(f"[repair_student_logins] FATAL: {repr(e)}")
+        print(traceback.format_exc())
+        if db:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+        flash("Repair failed — check server logs.", "error")
+    finally:
+        if db:
+            try:
+                db.close()
+            except Exception:
+                pass
+
+    return redirect(url_for("students"))
 
 
 @app.route("/teacher_login", methods=["GET", "POST"])
