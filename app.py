@@ -1752,6 +1752,23 @@ def init_db(db=None):
             ("low_attendance_threshold", str(app.config["LOW_ATTENDANCE_THRESHOLD"])),
         )
 
+    # ✅ One-time migration: rename MECH branch to CSW
+    try:
+        mech_row = db.execute(
+            f"SELECT id FROM branches WHERE UPPER(TRIM(name)) = {placeholder}", ("MECH",)
+        ).fetchone()
+        csw_exists = db.execute(
+            f"SELECT id FROM branches WHERE UPPER(TRIM(name)) = {placeholder}", ("CSW",)
+        ).fetchone()
+        if mech_row and not csw_exists:
+            db.execute(
+                f"UPDATE branches SET name = {placeholder} WHERE id = {placeholder}",
+                ("CSW", row_get(mech_row, "id")),
+            )
+            print("[init_db] Renamed branch MECH -> CSW")
+    except Exception as _e:
+        print(f"[init_db] Branch rename migration skipped: {repr(_e)}")
+
     db.commit()
     if created_here:
         try:
