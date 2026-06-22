@@ -2865,12 +2865,25 @@ def upload_students_csv():
                 failed += 1
                 continue
 
-            # branch_id must convert cleanly to an integer
+            # branch_id: try numeric first, then resolve by branch name (e.g. "CSW", "CSE")
             branch_id = _safe_int_csv(branch_raw)
+            if branch_id is None:
+                # Try resolving by branch name string (e.g. "CSW", "cse", "MECH")
+                branch_name_lookup = str(branch_raw).strip() if branch_raw else ""
+                if branch_name_lookup and branch_name_lookup.lower() not in ("nan", "none", "n/a", "null", "-", ""):
+                    try:
+                        _br_row = db.execute(
+                            f"SELECT id FROM branches WHERE UPPER(name) = {placeholder}",
+                            (branch_name_lookup.upper(),),
+                        ).fetchone()
+                        if _br_row:
+                            branch_id = row_get(_br_row, "id")
+                    except Exception:
+                        pass
             if branch_id is None:
                 print(
                     f"[upload_students_csv] Row {total} ({enrollment}): "
-                    f"invalid branch_id value {repr(branch_raw)!r}, skipping"
+                    f"invalid branch_id value {repr(branch_raw)!r} — not a number and no matching branch name, skipping"
                 )
                 failed += 1
                 continue
@@ -3040,7 +3053,7 @@ def students():
             clauses.append(f"students.branch_id = {placeholder}")
             params.append(branch_filter)
         if clauses: query += " WHERE " + " AND ".join(clauses)
-        query += " ORDER BY students.name"
+        query += " ORDER BY students.enrollment"
         
         students_list = db.execute(query, params).fetchall()
         branches_list = db.execute("SELECT id, name FROM branches ORDER BY name").fetchall()
