@@ -2919,13 +2919,16 @@ def _resolve_or_create_branch_id(db, branch_name: str, branch_cache: Optional[Di
         _db_execute(db, _insert_ignore_sql(db, "branches", ["name", "location"]), (branch_name, "Auto-imported timetable branch"))
         try:
             db.commit()
-        except Exception:
+        except Exception as commit_err:
+            logger.warning("Failed to commit branch creation: branch=%s error=%s", branch_name, commit_err)
             pass
-    except Exception:
-        logger.exception("Failed to auto-create branch %s", branch_name)
+    except Exception as create_err:
+        logger.exception("Failed to auto-create branch: branch=%s error=%s", branch_name, create_err)
         return None
 
     branch_id = _lookup_branch_id(db, branch_name)
+    if branch_id is None:
+        logger.warning("Branch creation or lookup failed: branch=%s cache_key=%s", branch_name, cache_key)
     if branch_cache is not None:
         branch_cache[cache_key] = branch_id
     return branch_id
@@ -3288,6 +3291,7 @@ def import_slots_streaming(db, slots_iter: Iterable[Dict]):
     if PREVIEW_ROW_CAP > 0:
         preview_path = os.path.join(os.path.dirname(__file__), "uploads", "last_import_debug.jsonl")
         os.makedirs(os.path.dirname(preview_path), exist_ok=True)
+
     # Commit every 5-10 rows for low-memory environments
     batch_size = max(5, min(10, int(BATCH_INSERT_SIZE)))
     inserted_since_commit = 0
@@ -3477,26 +3481,35 @@ def import_slots_streaming(db, slots_iter: Iterable[Dict]):
                     raise
 
         if inserted_since_commit >= batch_size:
-            db.commit()
-            batch_commits += 1
-            inserted_since_commit = 0
-            if len(branch_cache) > 64 or len(subject_cache) > 64 or len(teacher_cache) > 64:
-                logger.debug("Clearing timetable import caches (branch=%d, subject=%d, teacher=%d)", len(branch_cache), len(subject_cache), len(teacher_cache))
-                branch_cache.clear()
-                subject_cache.clear()
-                teacher_cache.clear()
-            logger.info(
-                "import batch commit section=%s processed=%d commits=%d mem_estimate_kb=%.1f",
-                row.get("section"),
-                row_index,
-                batch_commits,
-                mem_estimate / 1024.0,
-            )
-            _write_preview_line(
-                preview_path,
-                preview_state,
-                {"type": "batch_commit", "processed": row_index, "raw_inserted": raw_counters["inserted"], "normalized_inserted": normalized_counters["inserted"], "timestamp": time.time()},
-            )
+            try:
+                db.commit()
+                batch_commits += 1
+                inserted_since_commit = 0
+                if len(branch_cache) > 64 or len(subject_cache) > 64 or len(teacher_cache) > 64:
+                    logger.debug("Clearing timetable import caches (branch=%d, subject=%d, teacher=%d)", len(branch_cache), len(subject_cache), len(teacher_cache))
+                    branch_cache.clear()
+                    subject_cache.clear()
+                    teacher_cache.clear()
+                logger.info(
+                    "import batch commit section=%s processed=%d commits=%d mem_estimate_kb=%.1f",
+                    row.get("section"),
+                    row_index,
+                    batch_commits,
+                    mem_estimate / 1024.0,
+                )
+                _write_preview_line(
+                    preview_path,
+                    preview_state,
+                    {"type": "batch_commit", "processed": row_index, "raw_inserted": raw_counters["inserted"], "normalized_inserted": normalized_counters["inserted"], "timestamp": time.time()},
+                )
+            except Exception as batch_commit_err:
+                logger.exception("Batch commit failed at row_index=%d: %s", row_index, batch_commit_err)
+                try:
+                    db.rollback()
+                    logger.info("Rolled back failed batch at row_index=%d", row_index)
+                except:
+                    pass
+                raise
 
         if row_index % max(10, batch_size) == 0:
             elapsed = time.time() - start_ts
@@ -3515,8 +3528,18 @@ def import_slots_streaming(db, slots_iter: Iterable[Dict]):
             )
 
     if inserted_since_commit > 0:
-        db.commit()
-        batch_commits += 1
+        try:
+            db.commit()
+            batch_commits += 1
+            logger.info("Final batch commit successful: row_count=%d", inserted_since_commit)
+        except Exception as final_commit_err:
+            logger.exception("Final batch commit failed: %s", final_commit_err)
+            try:
+                db.rollback()
+                logger.info("Rolled back final batch after commit failure")
+            except:
+                pass
+            raise
 
     # Final cleanup to free memory
     branch_cache.clear()
@@ -4189,11 +4212,24 @@ def register_routes(app, db_getter=None):
             if not file:
                 flash("Please upload a file.", "error")
                 return redirect(url_for("timetable_manage"))
+            
             filename = file.filename or "upload"
             safe_path = os.path.join(os.path.dirname(__file__), "uploads")
             os.makedirs(safe_path, exist_ok=True)
             dest = os.path.join(safe_path, filename)
-            file.save(dest)
+            
+            # Validate file before saving
+            try:
+                file.save(dest)
+                if not os.path.exists(dest) or os.path.getsize(dest) == 0:
+                    logger.error("Uploaded file validation failed: path=%s size=%d", dest, os.path.getsize(dest) if os.path.exists(dest) else 0)
+                    flash("Error: Uploaded file is empty or corrupted.", "error")
+                    return redirect(url_for("timetable_manage"))
+                logger.info("Timetable file uploaded successfully: path=%s size=%d bytes filename=%s", dest, os.path.getsize(dest), filename)
+            except Exception as e:
+                logger.exception("File save or validation failed: %s", e)
+                flash("Error: Unable to save the uploaded file. Please try again.", "error")
+                return redirect(url_for("timetable_manage"))
             # Parse file
             ext = os.path.splitext(filename)[1].lower()
             try:
@@ -4232,7 +4268,15 @@ def register_routes(app, db_getter=None):
                     flash("Unsupported file type or missing parser dependencies.", "error")
                     return redirect(url_for("timetable_manage"))
 
+                # Validate slots_iter before import
+                if slots_iter is None:
+                    logger.error("slots_iter is None after parsing file=%s ext=%s", filename, ext)
+                    flash("Error: Unable to parse file contents. The file format may be corrupted or unsupported.", "error")
+                    return redirect(url_for("timetable_manage"))
+                
+                logger.info("Beginning timetable import from file=%s ext=%s", filename, ext)
                 import_info = import_slots_streaming(db, slots_iter)
+                logger.info("Timetable import completed successfully")
                 inserted_info = import_info.get("raw_insert", {})
                 normalized_info = import_info.get("normalized_insert", {})
                 i_c = inserted_info.get("counters", {}) if isinstance(inserted_info, dict) else {}
@@ -4314,9 +4358,26 @@ def register_routes(app, db_getter=None):
                     raise TimetablePDFValidationError(
                         "The timetable parser produced rows, but none were inserted into timetable_entries. Check branch/section normalization, subject mapping, and timetable row validation."
                     )
+                
+                # Ensure final commit after successful import
+                try:
+                    db.commit()
+                    logger.info("Final transaction commit successful after timetable import")
+                except Exception as commit_err:
+                    logger.exception("Final transaction commit failed: %s", commit_err)
+                    try:
+                        db.rollback()
+                    except:
+                        pass
+                    flash("Error: Failed to finalize database changes. Please try again.", "error")
+                    return redirect(url_for("timetable_manage"))
             except TimetablePDFValidationError as e:
                 logger.warning("PDF validation failed: %s", str(e))
                 flash(str(e), "error")
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
                 if pdf_stats:
                     try:
                         preview_path = os.path.join(os.path.dirname(__file__), "uploads", "last_import_debug.json")
@@ -4326,7 +4387,32 @@ def register_routes(app, db_getter=None):
                     except Exception:
                         logger.exception("Failed to write PDF validation preview")
             except Exception as e:
-                logger.exception("Failed to import timetable")
+                logger.exception("Failed to import timetable: exception_type=%s message=%s", type(e).__name__, str(e))
+                try:
+                    db.rollback()
+                    logger.info("Database rolled back due to import failure")
+                except Exception as rollback_err:
+                    logger.exception("Rollback also failed: %s", rollback_err)
+                
+                # Provide user-friendly error message based on exception type
+                error_msg = str(e).lower()
+                if "constraint" in error_msg or "foreign" in error_msg:
+                    flash("Error: Database constraint violation. Some entries may have invalid branch/subject/teacher references. Check that all required data exists.", "error")
+                elif "branch" in error_msg:
+                    flash("Error: Unable to resolve branch data. Ensure branch records exist in the system.", "error")
+                elif "subject" in error_msg or "teacher" in error_msg:
+                    flash("Error: Unable to map subjects or teachers. Create missing records first.", "error")
+                elif "duplicate" in error_msg:
+                    flash("Error: Duplicate timetable entries detected. Clear the timetable first before re-importing.", "error")
+                elif "null" in error_msg or "none" in error_msg:
+                    flash("Error: Invalid or missing data in the timetable file. Check the file format and ensure all required columns are present.", "error")
+                elif "permission" in error_msg or "access" in error_msg:
+                    flash("Error: Permission denied or file access issue. Please try again.", "error")
+                else:
+                    flash(f"Import failed: {str(e)[:100]}. Check server logs for details.", "error")
+                
+                # Always log detailed error information for debugging
+                logger.error("Detailed import error: exception_type=%s full_message=%s", type(e).__name__, str(e))
                 flash(f"Failed to import timetable: {e}", "error")
             return redirect(url_for("timetable_manage"))
 
