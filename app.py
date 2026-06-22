@@ -321,7 +321,7 @@ def _fast_student_hash(password: str) -> str:
 
     check_password_hash() understands this format without any changes.
     """
-    return generate_password_hash(password, method="pbkdf2:sha256", salt_length=8)
+    return generate_password_hash(password, method="pbkdf2:sha256:10000", salt_length=8)
 
 
 def _normalize_lookup_key(value):
@@ -2809,10 +2809,10 @@ def upload_students_csv():
     import io
 
     try:
-        # Read the entire upload into a byte buffer once, then wrap in a text reader.
-        # This is safe because a typical student CSV is << 1 MB.
-        raw_bytes = file.read()
-        text_stream = io.StringIO(raw_bytes.decode("utf-8-sig", errors="replace"))
+        # Wrap the file stream in a TextIOWrapper to stream it line-by-line
+        # instead of reading the entire file into memory at once.
+        # This keeps memory usage extremely low.
+        text_stream = io.TextIOWrapper(file.stream, encoding="utf-8-sig", errors="replace")
         reader = csv.DictReader(text_stream)
     except Exception as e:
         print(f"[upload_students_csv] Failed to read CSV: {repr(e)}")
