@@ -1112,6 +1112,103 @@ def _ensure_teacher_schema(db):
             pass
 
 
+def _ensure_teacher_support_schema(db):
+    _ensure_column(db, "teachers", "password_hash", "TEXT")
+    _ensure_column(db, "teachers", "phone", "TEXT")
+    _ensure_column(db, "teachers", "status", "TEXT")
+
+    if str(app.config.get("DATABASE", "")).startswith("postgres"):
+        db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS teacher_subject_assignments (
+                id SERIAL PRIMARY KEY,
+                teacher_id INTEGER NOT NULL,
+                subject_id INTEGER NOT NULL,
+                branch_id INTEGER NOT NULL,
+                section TEXT,
+                semester TEXT,
+                academic_year TEXT
+            )
+            """
+        )
+        db.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_teacher_subject_assignments_teacher
+            ON teacher_subject_assignments (teacher_id)
+            """
+        )
+    else:
+        db.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS teacher_subject_assignments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                teacher_id INTEGER NOT NULL,
+                subject_id INTEGER NOT NULL,
+                branch_id INTEGER NOT NULL,
+                section TEXT,
+                semester TEXT,
+                academic_year TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_teacher_subject_assignments_teacher
+            ON teacher_subject_assignments (teacher_id);
+            """
+        )
+
+    _ensure_column(db, "teacher_subject_assignments", "section", "TEXT")
+    _ensure_column(db, "teacher_subject_assignments", "semester", "TEXT")
+    _ensure_column(db, "teacher_subject_assignments", "academic_year", "TEXT")
+
+    try:
+        db.commit()
+    except Exception:
+        pass
+
+
+def _get_teacher_assignments(db, teacher_id):
+    placeholder = get_placeholder()
+    try:
+        rows = db.execute(
+            f"""
+            SELECT
+                tsa.id,
+                tsa.teacher_id,
+                tsa.subject_id,
+                tsa.branch_id,
+                tsa.section,
+                tsa.semester,
+                tsa.academic_year,
+                s.name AS subject_name,
+                b.name AS branch_name,
+                b.location AS branch_location
+            FROM teacher_subject_assignments tsa
+            LEFT JOIN subjects s ON s.id = tsa.subject_id
+            LEFT JOIN branches b ON b.id = tsa.branch_id
+            WHERE tsa.teacher_id = {placeholder}
+            ORDER BY b.name, s.name, tsa.section, tsa.semester
+            """,
+            (teacher_id,),
+        ).fetchall()
+    except Exception:
+        rows = []
+
+    return [
+        {
+            "id": row_get(row, "id"),
+            "teacher_id": row_get(row, "teacher_id"),
+            "subject_id": row_get(row, "subject_id"),
+            "branch_id": row_get(row, "branch_id"),
+            "section": row_get(row, "section") or "",
+            "semester": row_get(row, "semester") or "",
+            "academic_year": row_get(row, "academic_year") or "",
+            "subject_name": row_get(row, "subject_name") or "",
+            "branch_name": row_get(row, "branch_name") or "",
+            "branch_location": row_get(row, "branch_location") or "",
+        }
+        for row in rows
+    ]
+
+
 def teacher_login_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
@@ -1197,21 +1294,86 @@ def get_teacher_context(db=None):
         if not teacher:
             return None
 
-        assigned_branches, assigned_subjects = _resolve_teacher_assignments(db, teacher_id)
+        assigned_classes = _get_teacher_assignments(db, teacher_id)
+
+        assigned_branches = []
+        assigned_subjects = []
+
+        for assignment in assigned_classes:
+            branch_id = row_get(assignment, "branch_id")
+            subject_id = row_get(assignment, "subject_id")
+            if branch_id is not None and not any(str(row_get(item, "id")) == str(branch_id) for item in assigned_branches):
+                branch_row = db.execute(
+                    f"SELECT id, name, location FROM branches WHERE id = {placeholder}",
+                    (branch_id,),
+                ).fetchone()
+                if branch_row:
+                    assigned_branches.append(
+                        {
+                            "id": row_get(branch_row, "id"),
+                            "name": row_get(branch_row, "name"),
+                            "location": row_get(branch_row, "location"),
+                            "section": row_get(assignment, "section") or "",
+                        }
+                    )
+            if subject_id is not None and not any(str(row_get(item, "id")) == str(subject_id) for item in assigned_subjects):
+                subject_row = db.execute(
+                    f"SELECT id, name, branch_id FROM subjects WHERE id = {placeholder}",
+                    (subject_id,),
+                ).fetchone()
+                if subject_row:
+                    assigned_subjects.append(
+                        {
+                            "id": row_get(subject_row, "id"),
+                            "name": row_get(subject_row, "name"),
+                            "branch_id": row_get(subject_row, "branch_id"),
+                        }
+                    )
+
+        legacy_branches, legacy_subjects = _resolve_teacher_assignments(db, teacher_id)
+        if not assigned_branches and legacy_branches:
+            assigned_branches = [
+                {
+                    "id": row_get(branch, "id"),
+                    "name": row_get(branch, "name"),
+                    "location": row_get(branch, "location"),
+                    "section": "",
+                }
+                for branch in legacy_branches
+            ]
+        if not assigned_subjects and legacy_subjects:
+            assigned_subjects = [
+                {
+                    "id": row_get(subject, "id"),
+                    "name": row_get(subject, "name"),
+                    "branch_id": row_get(subject, "branch_id"),
+                }
+                for subject in legacy_subjects
+            ]
+
         if not assigned_branches and row_get(teacher, "branch_id") is not None:
             branch_row = db.execute(
                 f"SELECT id, name, location FROM branches WHERE id = {placeholder}",
                 (row_get(teacher, "branch_id"),),
             ).fetchone()
             if branch_row:
-                assigned_branches = [branch_row]
+                assigned_branches = [{
+                    "id": row_get(branch_row, "id"),
+                    "name": row_get(branch_row, "name"),
+                    "location": row_get(branch_row, "location"),
+                    "section": "",
+                }]
         if not assigned_subjects and row_get(teacher, "subject_id") is not None:
             subject_row = db.execute(
                 f"SELECT id, name, branch_id FROM subjects WHERE id = {placeholder}",
                 (row_get(teacher, "subject_id"),),
             ).fetchone()
             if subject_row:
-                assigned_subjects = [subject_row]
+                assigned_subjects = [{
+                    "id": row_get(subject_row, "id"),
+                    "name": row_get(subject_row, "name"),
+                    "branch_id": row_get(subject_row, "branch_id"),
+                }]
 
         def _dedupe(rows, key_name):
             seen = set()
@@ -1231,6 +1393,13 @@ def get_teacher_context(db=None):
         current_subject_id = session.get("teacher_subject_id") or row_get(teacher, "subject_id")
         current_section = (session.get("teacher_section") or "").strip()
         current_branch_name = session.get("teacher_branch_name") or ""
+
+        if assigned_classes and not current_branch_id:
+            first_assignment = assigned_classes[0]
+            current_branch_id = row_get(first_assignment, "branch_id")
+            current_subject_id = row_get(first_assignment, "subject_id")
+            current_section = row_get(first_assignment, "section") or current_section
+            current_branch_name = row_get(first_assignment, "branch_name") or current_branch_name
 
         if current_branch_id and not current_branch_name:
             branch_row = db.execute(
@@ -1256,6 +1425,11 @@ def get_teacher_context(db=None):
                 subject_name = row_get(subject_row, "name") or subject_name
 
         teacher_name = row_get(teacher, "name") or row_get(teacher, "username") or session.get("username") or "Teacher"
+
+        assigned_subject_ids = [str(row_get(item, "id")) for item in assigned_subjects if row_get(item, "id") is not None]
+        assigned_branch_ids = [str(row_get(item, "id")) for item in assigned_branches if row_get(item, "id") is not None]
+        assigned_sections = sorted({row_get(item, "section") for item in assigned_classes if row_get(item, "section")})
+        assigned_semesters = sorted({row_get(item, "semester") for item in assigned_classes if row_get(item, "semester")})
 
         return {
             "teacher": {
@@ -1286,6 +1460,11 @@ def get_teacher_context(db=None):
                 ],
                 "assigned_subjects_count": len(assigned_subjects),
                 "assigned_branches_count": len(assigned_branches),
+                "assigned_classes": assigned_classes,
+                "assigned_subject_ids": assigned_subject_ids,
+                "assigned_branch_ids": assigned_branch_ids,
+                "assigned_sections": assigned_sections,
+                "assigned_semesters": assigned_semesters,
             },
             "teacher_id": row_get(teacher, "id"),
             "name": teacher_name,
@@ -1316,6 +1495,11 @@ def get_teacher_context(db=None):
                 for subject in assigned_subjects
             ],
             "assigned_subjects_count": len(assigned_subjects),
+            "assigned_classes": assigned_classes,
+            "assigned_subject_ids": assigned_subject_ids,
+            "assigned_branch_ids": assigned_branch_ids,
+            "assigned_sections": assigned_sections,
+            "assigned_semesters": assigned_semesters,
         }
     finally:
         if created_here:
@@ -2535,6 +2719,244 @@ def admin_import_data():
             db.close()
         except Exception:
             pass
+
+@app.route("/teachers", methods=["GET", "POST"])
+@login_required
+def teachers_management():
+    if session.get("role") != "admin":
+        abort(403)
+
+    db = None
+    try:
+        db = get_db()
+        placeholder = get_placeholder()
+        if request.method == "POST":
+            action = (request.form.get("action") or "").strip()
+            teacher_id = (request.form.get("teacher_id") or "").strip()
+
+            if action == "add":
+                name = (request.form.get("name") or "").strip()
+                username = (request.form.get("username") or "").strip()
+                password = (request.form.get("password") or "").strip()
+                email = (request.form.get("email") or "").strip()
+                phone = (request.form.get("phone") or "").strip()
+                status = (request.form.get("status") or "active").strip() or "active"
+
+                if not name or not username or not password:
+                    flash("Name, username and password are required.", "error")
+                else:
+                    existing = db.execute(
+                        f"SELECT id FROM teachers WHERE username = {placeholder}",
+                        (username,),
+                    ).fetchone()
+                    if existing:
+                        flash("A teacher with that username already exists.", "error")
+                    else:
+                        if str(app.config.get("DATABASE", "")).startswith("postgres"):
+                            cur = db.execute(
+                                f"INSERT INTO teachers (name, username, password, password_hash, email, phone, status) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}) RETURNING id",
+                                (name, username, generate_password_hash(password), generate_password_hash(password), email, phone, status),
+                            )
+                            new_teacher_id = row_get(cur.fetchone(), "id")
+                        else:
+                            cur = db.execute(
+                                f"INSERT INTO teachers (name, username, password, password_hash, email, phone, status) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})",
+                                (name, username, generate_password_hash(password), generate_password_hash(password), email, phone, status),
+                            )
+                            new_teacher_id = cur.lastrowid
+                            
+                        db.execute(
+                            f"INSERT INTO users (username, password, role) VALUES ({placeholder}, {placeholder}, {placeholder})",
+                            (username, generate_password_hash(password), "teacher"),
+                        )
+                        
+                        # Process dynamic assignment rows
+                        assign_subjects = request.form.getlist("assign_subject_id[]")
+                        assign_branches = request.form.getlist("assign_branch_id[]")
+                        assign_sections = request.form.getlist("assign_section[]")
+                        assign_semesters = request.form.getlist("assign_semester[]")
+                        for i in range(len(assign_subjects)):
+                            s_id = assign_subjects[i]
+                            b_id = assign_branches[i] if i < len(assign_branches) else ""
+                            sec = assign_sections[i] if i < len(assign_sections) else ""
+                            sem = assign_semesters[i] if i < len(assign_semesters) else ""
+                            if s_id and b_id:
+                                db.execute(
+                                    f"INSERT INTO teacher_subject_assignments (teacher_id, subject_id, branch_id, section, semester) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})",
+                                    (int(new_teacher_id), int(s_id), int(b_id), sec, sem)
+                                )
+                        
+                        db.commit()
+                        flash("Teacher created.", "success")
+
+            elif action == "edit" and teacher_id.isdigit():
+                name = (request.form.get("name") or "").strip()
+                username = (request.form.get("username") or "").strip()
+                email = (request.form.get("email") or "").strip()
+                phone = (request.form.get("phone") or "").strip()
+                password = (request.form.get("password") or "").strip()
+                status = (request.form.get("status") or "active").strip() or "active"
+                if not name or not username:
+                    flash("Name and username are required.", "error")
+                else:
+                    if password:
+                        db.execute(
+                            f"UPDATE teachers SET name = {placeholder}, username = {placeholder}, email = {placeholder}, phone = {placeholder}, status = {placeholder}, password = {placeholder}, password_hash = {placeholder} WHERE id = {placeholder}",
+                            (name, username, email, phone, status, generate_password_hash(password), generate_password_hash(password), int(teacher_id)),
+                        )
+                        db.execute(
+                            f"UPDATE users SET username = {placeholder}, password = {placeholder} WHERE id = {placeholder} AND role = {placeholder}",
+                            (username, generate_password_hash(password), int(teacher_id), "teacher"),
+                        )
+                    else:
+                        db.execute(
+                            f"UPDATE teachers SET name = {placeholder}, username = {placeholder}, email = {placeholder}, phone = {placeholder}, status = {placeholder} WHERE id = {placeholder}",
+                            (name, username, email, phone, status, int(teacher_id)),
+                        )
+                        db.execute(
+                            f"UPDATE users SET username = {placeholder} WHERE id = {placeholder} AND role = {placeholder}",
+                            (username, int(teacher_id), "teacher"),
+                        )
+                        
+                    # Process dynamic assignment rows
+                    db.execute(f"DELETE FROM teacher_subject_assignments WHERE teacher_id = {placeholder}", (int(teacher_id),))
+                    
+                    assign_subjects = request.form.getlist("assign_subject_id[]")
+                    assign_branches = request.form.getlist("assign_branch_id[]")
+                    assign_sections = request.form.getlist("assign_section[]")
+                    assign_semesters = request.form.getlist("assign_semester[]")
+                    for i in range(len(assign_subjects)):
+                        s_id = assign_subjects[i]
+                        b_id = assign_branches[i] if i < len(assign_branches) else ""
+                        sec = assign_sections[i] if i < len(assign_sections) else ""
+                        sem = assign_semesters[i] if i < len(assign_semesters) else ""
+                        if s_id and b_id:
+                            db.execute(
+                                f"INSERT INTO teacher_subject_assignments (teacher_id, subject_id, branch_id, section, semester) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})",
+                                (int(teacher_id), int(s_id), int(b_id), sec, sem)
+                            )
+                            
+                    db.commit()
+                    flash("Teacher updated.", "success")
+
+            elif action == "delete" and teacher_id.isdigit():
+                db.execute(f"DELETE FROM teachers WHERE id = {placeholder}", (int(teacher_id),))
+                db.execute(f"DELETE FROM users WHERE username = {placeholder} AND role = {placeholder}", (username, "teacher"))
+                db.commit()
+                flash("Teacher deleted.", "success")
+
+            elif action == "reset_password" and teacher_id.isdigit():
+                new_password = (request.form.get("new_password") or "").strip()
+                if len(new_password) < 4:
+                    flash("Password must be at least 4 characters.", "error")
+                else:
+                    db.execute(
+                        f"UPDATE teachers SET password = {placeholder}, password_hash = {placeholder} WHERE id = {placeholder}",
+                        (generate_password_hash(new_password), generate_password_hash(new_password), int(teacher_id)),
+                    )
+                    db.execute(
+                        f"UPDATE users SET password = {placeholder} WHERE id = {placeholder} AND role = {placeholder}",
+                        (generate_password_hash(new_password), int(teacher_id), "teacher"),
+                    )
+                    db.commit()
+                    flash("Password reset successfully.", "success")
+
+        teachers = db.execute(
+            f"SELECT id, name, username, password, password_hash, email, phone, status FROM teachers ORDER BY name"
+        ).fetchall()
+        subjects = db.execute("SELECT id, name FROM subjects ORDER BY name").fetchall()
+        branches = db.execute("SELECT id, name FROM branches ORDER BY name").fetchall()
+        teacher_assignments = {}
+        teacher_subjects_map = {}
+        teacher_branches_map = {}
+        rows = db.execute("SELECT tsa.teacher_id, tsa.subject_id, tsa.branch_id, tsa.section, tsa.semester, tsa.academic_year, s.name as subject_name, b.name as branch_name FROM teacher_subject_assignments tsa LEFT JOIN subjects s ON s.id = tsa.subject_id LEFT JOIN branches b ON b.id = tsa.branch_id ORDER BY tsa.teacher_id").fetchall()
+        for row in rows:
+            tid = row_get(row, "teacher_id")
+            s_id = row_get(row, "subject_id")
+            b_id = row_get(row, "branch_id")
+            s_name = row_get(row, "subject_name")
+            b_name = row_get(row, "branch_name")
+            
+            teacher_assignments.setdefault(tid, []).append({
+                "subject_id": s_id,
+                "branch_id": b_id,
+                "section": row_get(row, "section") or "",
+                "semester": row_get(row, "semester") or "",
+                "academic_year": row_get(row, "academic_year") or "",
+            })
+            if s_id and s_id not in [x["id"] for x in teacher_subjects_map.setdefault(tid, [])]:
+                teacher_subjects_map[tid].append({"id": s_id, "name": s_name})
+            if b_id and b_id not in [x["id"] for x in teacher_branches_map.setdefault(tid, [])]:
+                teacher_branches_map[tid].append({"id": b_id, "name": b_name})
+
+        return render_template(
+            "admin_teachers.html",
+            teachers=teachers,
+            subjects=subjects,
+            branches=branches,
+            teacher_assignments=teacher_assignments,
+            teacher_subjects_map=teacher_subjects_map,
+            teacher_branches_map=teacher_branches_map,
+        )
+    finally:
+        if db is not None:
+            try:
+                db.close()
+            except Exception:
+                pass
+
+
+@app.route("/assign-teachers", methods=["GET", "POST"])
+@login_required
+def assign_teachers():
+    if session.get("role") != "admin":
+        abort(403)
+
+    db = None
+    try:
+        db = get_db()
+        if request.method == "POST":
+            teacher_id = (request.form.get("teacher_id") or "").strip()
+            subject_id = (request.form.get("subject_id") or "").strip()
+            branch_id = (request.form.get("branch_id") or "").strip()
+            section = (request.form.get("section") or "").strip()
+            semester = (request.form.get("semester") or "").strip()
+            academic_year = (request.form.get("academic_year") or "").strip()
+            if not teacher_id or not subject_id or not branch_id:
+                flash("Teacher, subject and branch are required.", "error")
+            else:
+                db.execute(
+                    f"DELETE FROM teacher_subject_assignments WHERE teacher_id = {placeholder} AND subject_id = {placeholder} AND branch_id = {placeholder}",
+                    (int(teacher_id), int(subject_id), int(branch_id)),
+                )
+                db.execute(
+                    f"INSERT INTO teacher_subject_assignments (teacher_id, subject_id, branch_id, section, semester, academic_year) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})",
+                    (int(teacher_id), int(subject_id), int(branch_id), section, semester, academic_year),
+                )
+                db.commit()
+                flash("Assignment saved.", "success")
+
+        teachers = db.execute("SELECT id, name, username FROM teachers ORDER BY name").fetchall()
+        subjects = db.execute("SELECT id, name FROM subjects ORDER BY name").fetchall()
+        branches = db.execute("SELECT id, name FROM branches ORDER BY name").fetchall()
+        assignments = db.execute(
+            "SELECT tsa.id, tsa.teacher_id, tsa.subject_id, tsa.branch_id, tsa.section, tsa.semester, tsa.academic_year, t.name AS teacher_name, s.name AS subject_name, b.name AS branch_name FROM teacher_subject_assignments tsa JOIN teachers t ON t.id = tsa.teacher_id JOIN subjects s ON s.id = tsa.subject_id JOIN branches b ON b.id = tsa.branch_id ORDER BY t.name, s.name, b.name"
+        ).fetchall()
+
+        return render_template(
+            "assign_teachers.html",
+            teachers=teachers,
+            subjects=subjects,
+            branches=branches,
+            assignments=assignments,
+        )
+    finally:
+        if db is not None:
+            try:
+                db.close()
+            except Exception:
+                pass
+
 
 @app.route("/branches", methods=["GET", "POST"])
 @login_required

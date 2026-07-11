@@ -9,50 +9,39 @@
     </div>
     <p style="color: var(--text-secondary); margin-bottom: 25px;">Create and assign teachers to one or more branches. Each teacher teaches one subject across their assigned branches.</p>
 
-    <form method="post" class="form-row" style="background: #f0f9ff; padding: 20px; border-radius: 12px; border: 1px solid #bae6fd;">
+    <form method="post" style="background: #f0f9ff; padding: 20px; border-radius: 12px; border: 1px solid #bae6fd;">
         <input type="hidden" name="action" value="add" />
-        <div>
-            <label>Teacher Name</label>
-            <input type="text" name="name" required placeholder="e.g. Dr. Priya Sharma" />
-        </div>
-        <div>
-            <label>Username</label>
-            <input type="text" name="username" required placeholder="e.g. priya_math" autocomplete="off" />
-        </div>
-        <div>
-            <label>Password</label>
-            <input type="password" name="password" required placeholder="Min. 4 characters" autocomplete="new-password" />
-        </div>
-        <div>
-            <label>Assigned Subjects (Select one or more)</label>
-            <div style="background:white; border:1px solid #bfdbfe; border-radius:6px; padding:10px; max-height:150px; overflow-y:auto;">
-                {% for subject in subjects %}
-                <div style="margin-bottom:8px;">
-                    <label style="display:flex; align-items:center; cursor:pointer; margin:0;">
-                        <input type="checkbox" name="subject_ids" value="{{ subject.id }}" style="margin-right:8px; cursor:pointer;" />
-                        <span>{{ subject.name }}</span>
-                    </label>
-                </div>
-                {% endfor %}
+        <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-bottom:15px;">
+            <div>
+                <label>Teacher Name</label>
+                <input type="text" name="name" required placeholder="e.g. Dr. Priya Sharma" style="width:100%;" />
             </div>
-            <small style="color:var(--text-secondary); margin-top:5px; display:block;">Select at least one subject</small>
-        </div>
-        <div>
-            <label>Assign Branches (Select one or more)</label>
-            <div style="background:white; border:1px solid #bfdbfe; border-radius:6px; padding:10px; max-height:150px; overflow-y:auto;">
-                {% for branch in branches %}
-                <div style="margin-bottom:8px;">
-                    <label style="display:flex; align-items:center; cursor:pointer; margin:0;">
-                        <input type="checkbox" name="branch_ids" value="{{ branch.id }}" style="margin-right:8px; cursor:pointer;" />
-                        <span>{{ branch.name }}</span>
-                    </label>
-                </div>
-                {% endfor %}
+            <div>
+                <label>Username</label>
+                <input type="text" name="username" required placeholder="e.g. priya_math" autocomplete="off" style="width:100%;" />
             </div>
-            <small style="color:var(--text-secondary); margin-top:5px; display:block;">Select at least one branch</small>
+            <div>
+                <label>Email</label>
+                <input type="email" name="email" placeholder="Optional" autocomplete="off" style="width:100%;" />
+            </div>
+            <div>
+                <label>Password</label>
+                <input type="password" name="password" required placeholder="Min. 4 characters" autocomplete="new-password" style="width:100%;" />
+            </div>
         </div>
-        <div style="display: flex; align-items: flex-end;">
-            <button type="submit" style="width: 100%;"><i class="fa-solid fa-user-plus"></i> Add Teacher</button>
+        
+        <div style="margin-bottom: 20px;">
+            <label style="display:flex; justify-content:space-between; align-items:center;">
+                <span>Class Assignments</span>
+                <button type="button" onclick="addAssignmentRow('add_assignments_container')" style="background:#e0f2fe; color:#0369a1; border:1px dashed #7dd3fc; padding:4px 10px; font-size:0.85rem; border-radius:4px; cursor:pointer;">+ Add Class</button>
+            </label>
+            <div id="add_assignments_container" style="display:flex; flex-direction:column; gap:10px; margin-top:8px;">
+                <!-- JavaScript will add rows here -->
+            </div>
+        </div>
+
+        <div style="display: flex; justify-content: flex-end;">
+            <button type="submit" style="padding:10px 20px;"><i class="fa-solid fa-user-plus"></i> Add Teacher</button>
         </div>
     </form>
 </div>
@@ -111,7 +100,7 @@
                         <div style="display: flex; gap: 6px; flex-wrap: wrap;">
                             <!-- Edit Button -->
                             <button type="button" class="button" style="background:#3b82f6; padding:5px 10px; font-size:0.82rem;"
-                                onclick="openEditModal({{ teacher.id }}, '{{ teacher.name|replace("'", "\\'") }}', '{{ teacher.username }}')">
+                                onclick="openEditModal({{ teacher.id }}, '{{ teacher.name|replace("'", "\\'") }}', '{{ teacher.username }}', '{{ teacher.email or '' }}')">
                                 <i class="fa-solid fa-pen"></i> Edit
                             </button>
                             <!-- Reset Password Button -->
@@ -144,40 +133,36 @@
         <form method="post">
             <input type="hidden" name="action" value="edit" />
             <input type="hidden" name="teacher_id" id="edit_teacher_id" />
-            <div style="margin-bottom:15px;">
-                <label>Teacher Name</label>
-                <input type="text" name="name" id="edit_name" required style="width:100%; margin-top:5px;" />
-            </div>
-            <div style="margin-bottom:15px;">
-                <label>Username</label>
-                <input type="text" name="username" id="edit_username" required style="width:100%; margin-top:5px;" autocomplete="off" />
-            </div>
-            <div style="margin-bottom:15px;">
-                <label>Assigned Subjects (Select one or more)</label>
-                <div style="background:#f9fafb; border:1px solid #e5e7eb; border-radius:6px; padding:10px; max-height:150px; overflow-y:auto;" id="edit_subjects_container">
-                    {% for subject in subjects %}
-                    <div style="margin-bottom:8px;">
-                        <label style="display:flex; align-items:center; cursor:pointer; margin:0;">
-                            <input type="checkbox" name="subject_ids" value="{{ subject.id }}" class="edit_subject_checkbox" style="margin-right:8px; cursor:pointer;" />
-                            <span>{{ subject.name }}</span>
-                        </label>
-                    </div>
-                    {% endfor %}
+            
+            <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-bottom:15px;">
+                <div>
+                    <label>Teacher Name</label>
+                    <input type="text" name="name" id="edit_name" required style="width:100%;" />
+                </div>
+                <div>
+                    <label>Username</label>
+                    <input type="text" name="username" id="edit_username" required style="width:100%;" autocomplete="off" />
+                </div>
+                <div>
+                    <label>Email</label>
+                    <input type="email" name="email" id="edit_email" placeholder="Optional" style="width:100%;" />
+                </div>
+                <div>
+                    <label>New Password (Optional)</label>
+                    <input type="password" name="password" placeholder="Leave blank to keep current" autocomplete="new-password" style="width:100%;" />
                 </div>
             </div>
-            <div style="margin-bottom:20px;">
-                <label>Assign Branches (Select one or more)</label>
-                <div style="background:#f9fafb; border:1px solid #e5e7eb; border-radius:6px; padding:10px; max-height:150px; overflow-y:auto;" id="edit_branches_container">
-                    {% for branch in branches %}
-                    <div style="margin-bottom:8px;">
-                        <label style="display:flex; align-items:center; cursor:pointer; margin:0;">
-                            <input type="checkbox" name="branch_ids" value="{{ branch.id }}" class="edit_branch_checkbox" style="margin-right:8px; cursor:pointer;" />
-                            <span>{{ branch.name }}</span>
-                        </label>
-                    </div>
-                    {% endfor %}
+
+            <div style="margin-bottom: 20px;">
+                <label style="display:flex; justify-content:space-between; align-items:center;">
+                    <span>Class Assignments</span>
+                    <button type="button" onclick="addAssignmentRow('edit_assignments_container')" style="background:#e0f2fe; color:#0369a1; border:1px dashed #7dd3fc; padding:4px 10px; font-size:0.85rem; border-radius:4px; cursor:pointer;">+ Add Class</button>
+                </label>
+                <div id="edit_assignments_container" style="display:flex; flex-direction:column; gap:10px; margin-top:8px; max-height:200px; overflow-y:auto; padding-right:5px;">
+                    <!-- Rows dynamically added -->
                 </div>
             </div>
+            
             <div style="display:flex; gap:10px;">
                 <button type="submit" style="flex:1; background:var(--primary-color);">Save Changes</button>
                 <button type="button" onclick="closeEditModal()" style="flex:1; background:#6b7280;">Cancel</button>
@@ -207,39 +192,75 @@
 </div>
 
 <script>
-const teacherBranchesMap = {
-    {% for teacher_id, branches in teacher_branches_map.items() %}
-    {{ teacher_id }}: [{% for branch in branches %}{{ branch.id }}{{ "," if not loop.last }}{% endfor %}],
-    {% endfor %}
-};
-const teacherSubjectsMap = {
-    {% for teacher_id, subs in teacher_subjects_map.items() %}
-    {{ teacher_id }}: [{% for s in subs %}{{ s.id }}{{ "," if not loop.last }}{% endfor %}],
+const subjectsOptions = `{% for subject in subjects %}<option value="{{ subject.id }}">{{ subject.name|replace("'", "\\'") }}</option>{% endfor %}`;
+const branchesOptions = `{% for branch in branches %}<option value="{{ branch.id }}">{{ branch.name|replace("'", "\\'") }}</option>{% endfor %}`;
+
+const teacherAssignments = {
+    {% for teacher_id, assignments in teacher_assignments.items() %}
+    {{ teacher_id }}: [
+        {% for a in assignments %}
+        {
+            subject_id: "{{ a.subject_id }}",
+            branch_id: "{{ a.branch_id }}",
+            section: "{{ a.section|replace("'", "\\'") }}",
+            semester: "{{ a.semester|replace("'", "\\'") }}"
+        }{{ "," if not loop.last }}
+        {% endfor %}
+    ],
     {% endfor %}
 };
 
-function openEditModal(id, name, username) {
+function addAssignmentRow(containerId, data = null) {
+    const container = document.getElementById(containerId);
+    const row = document.createElement('div');
+    row.style.display = 'flex';
+    row.style.gap = '8px';
+    row.style.alignItems = 'center';
+    row.style.background = '#f8fafc';
+    row.style.padding = '8px';
+    row.style.borderRadius = '6px';
+    row.style.border = '1px solid #e2e8f0';
+    
+    let subjectHtml = `<select name="assign_subject_id[]" required style="flex:2; padding:6px; font-size:0.9rem;"><option value="">Select Subject</option>${subjectsOptions}</select>`;
+    let branchHtml = `<select name="assign_branch_id[]" required style="flex:2; padding:6px; font-size:0.9rem;"><option value="">Select Branch</option>${branchesOptions}</select>`;
+    
+    row.innerHTML = `
+        ${subjectHtml}
+        ${branchHtml}
+        <input type="text" name="assign_section[]" placeholder="Sec (opt)" style="flex:1; width:60px; padding:6px; font-size:0.9rem;" />
+        <input type="text" name="assign_semester[]" placeholder="Sem (opt)" style="flex:1; width:60px; padding:6px; font-size:0.9rem;" />
+        <button type="button" onclick="this.parentElement.remove()" style="background:#fee2e2; color:#ef4444; border:none; padding:6px 10px; border-radius:4px; cursor:pointer;" title="Remove row"><i class="fa-solid fa-times"></i></button>
+    `;
+    
+    if (data) {
+        row.querySelector('[name="assign_subject_id[]"]').value = data.subject_id;
+        row.querySelector('[name="assign_branch_id[]"]').value = data.branch_id;
+        row.querySelector('[name="assign_section[]"]').value = data.section;
+        row.querySelector('[name="assign_semester[]"]').value = data.semester;
+    }
+    
+    container.appendChild(row);
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    addAssignmentRow('add_assignments_container');
+});
+
+function openEditModal(id, name, username, email) {
     document.getElementById('edit_teacher_id').value = id;
     document.getElementById('edit_name').value = name;
     document.getElementById('edit_username').value = username;
+    document.getElementById('edit_email').value = email || '';
 
-    // Uncheck all branch & subject checkboxes first
-    document.querySelectorAll('.edit_branch_checkbox').forEach(cb => cb.checked = false);
-    document.querySelectorAll('.edit_subject_checkbox').forEach(cb => cb.checked = false);
-
-    // Check the assigned branches
-    const assignedBranches = teacherBranchesMap[id] || [];
-    assignedBranches.forEach(branchId => {
-        const checkbox = document.querySelector(`.edit_branch_checkbox[value="${branchId}"]`);
-        if (checkbox) checkbox.checked = true;
-    });
-
-    // Check the assigned subjects
-    const assignedSubjects = teacherSubjectsMap[id] || [];
-    assignedSubjects.forEach(subId => {
-        const checkbox = document.querySelector(`.edit_subject_checkbox[value="${subId}"]`);
-        if (checkbox) checkbox.checked = true;
-    });
+    const container = document.getElementById('edit_assignments_container');
+    container.innerHTML = ''; 
+    
+    const assignments = teacherAssignments[id] || [];
+    if (assignments.length > 0) {
+        assignments.forEach(a => addAssignmentRow('edit_assignments_container', a));
+    } else {
+        addAssignmentRow('edit_assignments_container'); 
+    }
 
     document.getElementById('editModal').style.display = 'flex';
 }
@@ -258,7 +279,6 @@ function closeResetModal() {
     document.getElementById('resetModal').style.display = 'none';
 }
 
-// Close modals when clicking outside
 document.getElementById('editModal').addEventListener('click', function(e){ if(e.target===this) closeEditModal(); });
 document.getElementById('resetModal').addEventListener('click', function(e){ if(e.target===this) closeResetModal(); });
 </script>
