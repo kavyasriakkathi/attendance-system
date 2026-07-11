@@ -2725,7 +2725,7 @@ def upload_students():
                     errors += 1
                     continue
 
-                # Try exact match first, then partial match for branch name
+                # Try numeric branch_id first, then exact branch name match, then partial branch name match
                 branch_id = None
                 branch_id_raw_lower = branch_id_raw.lower()
                 
@@ -2737,7 +2737,29 @@ def upload_students():
                         if b_name and b_name in branch_id_raw_lower:
                             branch_id = b_id
                             break
+                    # If CSW text is present but only MECH exists, map it to MECH
+                    if branch_id is None and "csw" in branch_id_raw_lower:
+                        branch_id = branches_map.get("mech")
                 
+                if branch_id is None:
+                    # Create missing branch names when uploading Excel students
+                    branch_name_candidate = branch_id_raw.strip().upper()
+                    if branch_name_candidate and branch_name_candidate not in ("NAN", "NONE", "N/A", "NULL", "-"):
+                        try:
+                            db.execute(
+                                f"INSERT INTO branches (name) VALUES ({placeholder})",
+                                (branch_name_candidate,),
+                            )
+                            new_branch_row = db.execute(
+                                f"SELECT id FROM branches WHERE UPPER(TRIM(name)) = {placeholder}",
+                                (branch_name_candidate,),
+                            ).fetchone()
+                            if new_branch_row:
+                                branch_id = row_get(new_branch_row, "id")
+                                branches_map[branch_name_candidate.lower()] = branch_id
+                        except Exception:
+                            pass
+
                 if branch_id is None:
                     print(f"[upload_students] Branch not found for: {branch_id_raw}")
                     errors += 1
@@ -2867,12 +2889,19 @@ def upload_students_csv():
         return redirect(url_for("upload_students_csv"))
 
     fieldnames_norm = [str(f).strip().lower() for f in reader.fieldnames]
-    required = {"name", "enrollment", "email", "branch_id"}
+    required = {"name", "enrollment", "email"}
+    branch_header = None
+    for candidate in ("branch_id", "branch", "branch_name"):
+        if candidate in fieldnames_norm:
+            branch_header = candidate
+            break
+
     missing = required - set(fieldnames_norm)
-    if missing:
+    if missing or branch_header is None:
+        missing_columns = sorted(list(missing) + (["branch_id"] if branch_header is None else []))
         flash(
-            f"CSV is missing required columns: {', '.join(sorted(missing))}. "
-            "Expected headers: name, enrollment, email, branch_id",
+            f"CSV is missing required columns: {', '.join(missing_columns)}. "
+            "Expected headers: name, enrollment, email, branch_id (or branch / branch_name)",
             "error",
         )
         return redirect(url_for("upload_students_csv"))
@@ -2899,7 +2928,7 @@ def upload_students_csv():
             name       = str(row.get("name", "") or "").strip()
             enrollment = str(row.get("enrollment", "") or "").strip()
             email_raw  = str(row.get("email", "") or "").strip()
-            branch_raw = row.get("branch_id", "")
+            branch_raw = row.get(branch_header, "")
 
             # Skip rows missing the two mandatory fields
             if not name or not enrollment:
@@ -2910,16 +2939,35 @@ def upload_students_csv():
             # branch_id: try numeric first, then resolve by branch name (e.g. "CSW", "CSE")
             branch_id = _safe_int_csv(branch_raw)
             if branch_id is None:
-                # Try resolving by branch name string (e.g. "CSW", "cse", "MECH")
                 branch_name_lookup = str(branch_raw).strip() if branch_raw else ""
                 if branch_name_lookup and branch_name_lookup.lower() not in ("nan", "none", "n/a", "null", "-", ""):
+                    branch_name_upper = branch_name_lookup.upper()
                     try:
                         _br_row = db.execute(
-                            f"SELECT id FROM branches WHERE UPPER(name) = {placeholder}",
-                            (branch_name_lookup.upper(),),
+                            f"SELECT id FROM branches WHERE UPPER(TRIM(name)) = {placeholder}",
+                            (branch_name_upper,),
                         ).fetchone()
+                        if not _br_row and branch_name_upper == "CSW":
+                            _br_row = db.execute(
+                                f"SELECT id FROM branches WHERE UPPER(TRIM(name)) = {placeholder}",
+                                ("MECH",),
+                            ).fetchone()
                         if _br_row:
                             branch_id = row_get(_br_row, "id")
+                        else:
+                            try:
+                                db.execute(
+                                    f"INSERT INTO branches (name) VALUES ({placeholder})",
+                                    (branch_name_upper,),
+                                )
+                                _br_row = db.execute(
+                                    f"SELECT id FROM branches WHERE UPPER(TRIM(name)) = {placeholder}",
+                                    (branch_name_upper,),
+                                ).fetchone()
+                                if _br_row:
+                                    branch_id = row_get(_br_row, "id")
+                            except Exception:
+                                pass
                     except Exception:
                         pass
             if branch_id is None:
