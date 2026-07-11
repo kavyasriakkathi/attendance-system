@@ -2542,19 +2542,97 @@ def branches():
     db = get_db()
     placeholder = get_placeholder()
     if request.method == "POST":
-        name = request.form["name"].strip()
-        location = request.form["location"].strip()
-        if name:
-            try:
-                db.execute(f"INSERT INTO branches (name, location) VALUES ({placeholder}, {placeholder})", (name, location))
-                db.commit()
-                flash("Branch added successfully.", "success")
-            except Exception as e:
-                db.rollback()
-                print(f"Error adding branch: {e}")
-                flash("Branch name already exists.", "error")
+        action   = request.form.get("action", "add").strip()
+        name     = request.form.get("name", "").strip()
+        location = request.form.get("location", "").strip()
+        branch_id_raw = request.form.get("branch_id", "").strip()
+
+        if action == "edit":
+            # ── Rename an existing branch ──────────────────────────────────────
+            branch_id_val = _coerce_int(branch_id_raw)
+            if not branch_id_val:
+                flash("Invalid branch selected for editing.", "error")
+            elif not name:
+                flash("Branch name is required.", "error")
+            else:
+                try:
+                    db.execute(
+                        f"UPDATE branches SET name = {placeholder}, location = {placeholder} "
+                        f"WHERE id = {placeholder}",
+                        (name, location, branch_id_val),
+                    )
+                    db.commit()
+                    flash(f"Branch renamed to '{name}' successfully.", "success")
+                except Exception as e:
+                    db.rollback()
+                    print(f"Error updating branch: {e}")
+                    flash("Could not rename branch. Name may already exist.", "error")
+
+        elif action == "delete":
+            # ── Delete a branch ────────────────────────────────────────────────
+            branch_id_val = _coerce_int(branch_id_raw)
+            if not branch_id_val:
+                flash("Invalid branch selected for deletion.", "error")
+            else:
+                try:
+                    db.execute(
+                        f"DELETE FROM branches WHERE id = {placeholder}",
+                        (branch_id_val,),
+                    )
+                    db.commit()
+                    flash("Branch deleted successfully.", "success")
+                except Exception as e:
+                    db.rollback()
+                    print(f"Error deleting branch: {e}")
+                    flash("Could not delete branch. It may be in use.", "error")
+
         else:
-            flash("Branch name is required.", "error")
+            # ── Add one or more branches (action == "add") ─────────────────────
+            if not name:
+                flash("Branch name is required.", "error")
+            else:
+                sections_raw = request.form.get("sections", "").strip()
+                # Build list of names to insert
+                if sections_raw:
+                    section_list = [s.strip() for s in sections_raw.split(",") if s.strip()]
+                    names_to_insert = [f"{name}-{s}" for s in section_list]
+                else:
+                    names_to_insert = [name]
+
+                added = 0
+                already_exists = []
+                is_postgres = str(app.config.get("DATABASE", "")).startswith("postgres")
+                for branch_name in names_to_insert:
+                    try:
+                        if is_postgres:
+                            result = db.execute(
+                                f"INSERT INTO branches (name, location) VALUES ({placeholder}, {placeholder}) "
+                                f"ON CONFLICT (name) DO NOTHING RETURNING id",
+                                (branch_name, location),
+                            ).fetchone()
+                            if result:
+                                added += 1
+                            else:
+                                already_exists.append(branch_name)
+                        else:
+                            cur = db.execute(
+                                f"INSERT OR IGNORE INTO branches (name, location) VALUES ({placeholder}, {placeholder})",
+                                (branch_name, location),
+                            )
+                            if getattr(cur, "rowcount", 0) > 0:
+                                added += 1
+                            else:
+                                already_exists.append(branch_name)
+                    except Exception as e:
+                        db.rollback()
+                        print(f"Error adding branch '{branch_name}': {e}")
+                        flash(f"Error adding branch '{branch_name}'.", "error")
+
+                if added:
+                    db.commit()
+                    flash(f"{added} branch(es) added successfully.", "success")
+                if already_exists:
+                    flash(f"Already exists (skipped): {', '.join(already_exists)}", "warning")
 
     branches = db.execute(f"SELECT * FROM branches ORDER BY name").fetchall()
     db.close()
@@ -2609,11 +2687,16 @@ def upload_students():
             flash("Only .xlsx files are supported.", "error")
             return redirect(url_for("upload_students"))
 
-        # ✅ Extract branch name from filename (e.g., "ECE-B.xlsx" → "ECE-B")
-        branch_name_from_file = filename.rsplit(".", 1)[0].strip().upper()
-        if not branch_name_from_file:
-            flash("Invalid filename — cannot determine branch name.", "error")
-            return redirect(url_for("upload_students"))
+        # Derive branch name from the uploaded filename
+        # Example: "ECE-B.xlsx" -> "ECE-B", "CSE-A (1).xlsx" -> "CSE-A (1)"
+        # This is the ONLY safe source of truth for the branch -- never use
+        # generated placeholder names like COPILOT_BRANCH_*.
+        import os as _os
+        filename_branch_name = _os.path.splitext(filename)[0].strip()
+        # Remove any parenthesised copy-number suffix added by the OS, e.g. " (1)"
+        import re as _re
+        filename_branch_name = _re.sub(r'\s*\(\d+\)$', '', filename_branch_name).strip()
+
 
         try:
             import pandas as pd
@@ -2622,30 +2705,24 @@ def upload_students():
             return redirect(url_for("upload_students"))
 
         try:
-            import pandas as pd
             # Read the file ONCE into memory to save RAM
             df_full = pd.read_excel(file, header=None)
-            
+
             if df_full.empty:
                 flash("The Excel file is empty.", "error")
                 return redirect(url_for("upload_students"))
 
             # Find the header row by searching for keywords in the first 50 rows
             header_idx = 0
-            found_header = False
             for i, row in df_full.head(50).iterrows():
                 row_str = " ".join([str(cell).lower() for cell in row])
                 if any(k in row_str for k in ["name", "enrollment", "h.t.no", "mail", "branch", "section"]):
                     header_idx = i
-                    found_header = True
                     break
-            
+
             # Slice the existing dataframe instead of re-reading from disk
-            # This is much more memory-efficient on small servers
             df = df_full.iloc[header_idx + 1:].copy()
             df.columns = [str(c).strip() for c in df_full.iloc[header_idx].tolist()]
-            
-            # Explicitly clear the full dataframe from memory
             del df_full
 
             if df.empty:
@@ -2671,7 +2748,12 @@ def upload_students():
             'email': 'email',
             'mail id': 'email',
             'email id': 'email',
+            'branch_id': 'branch_id',
+            'branch id': 'branch_id',
+            'branch': 'branch_id',
+            'section': 'branch_id',
         }
+
 
         # Normalize existing columns and rename based on mapping
         current_cols = [str(c).strip().lower() for c in df.columns]
@@ -2679,19 +2761,24 @@ def upload_students():
         for col in current_cols:
             found = False
             for alias, target in column_mapping.items():
-                if alias in col: # partial match for robustness
+                if alias in col:
                     new_cols.append(target)
                     found = True
                     break
             if not found:
                 new_cols.append(col)
-        
         df.columns = new_cols
-        required = {"name", "enrollment", "email"}
-        missing = required - set(df.columns)
-        
+
+        # Minimum required columns (branch_id is optional when filename provides it)
+        core_required = {"name", "enrollment"}
+        missing = core_required - set(df.columns)
         if missing:
-            flash(f"Missing columns: {', '.join(sorted(missing))}. We searched for keywords like 'Name', 'Enrollment', and 'Mail'.", "error")
+            flash(
+                f"Missing columns: {', '.join(sorted(missing))}. "
+                "We searched for keywords like 'Name', 'Enrollment', 'Mail', 'Branch', and 'Section'.",
+                "error",
+            )
+
             return redirect(url_for("upload_students"))
 
         db = get_db()
@@ -2702,40 +2789,93 @@ def upload_students():
         errors = 0
 
         try:
-            # ✅ Create or reuse branch based on filename
-            existing_branch = db.execute(
-                f"SELECT id FROM branches WHERE UPPER(TRIM(name)) = {placeholder}",
-                (branch_name_from_file,),
-            ).fetchone()
-            if existing_branch:
-                branch_id_from_filename = row_get(existing_branch, "id")
-            else:
-                try:
-                    db.execute(
-                        f"INSERT INTO branches (name) VALUES ({placeholder})",
-                        (branch_name_from_file,),
-                    )
-                    new_branch = db.execute(
-                        f"SELECT id FROM branches WHERE UPPER(TRIM(name)) = {placeholder}",
-                        (branch_name_from_file,),
-                    ).fetchone()
-                    branch_id_from_filename = row_get(new_branch, "id")
-                except Exception as e:
-                    print(f"[upload_students] Failed to create branch '{branch_name_from_file}': {repr(e)}")
-                    flash(f"Failed to create branch from filename. Error: {repr(e)}", "error")
-                    return redirect(url_for("upload_students"))
+            # Resolve / auto-create the branch from the filename.
+            # Filename is the authoritative branch source; data-column branch_id
+            # is used only as a fallback when the file has multiple branches.
+            filename_branch_id = None
+            if filename_branch_name:
+                br_row = db.execute(
+                    f"SELECT id FROM branches WHERE UPPER(name) = {placeholder}",
+                    (filename_branch_name.upper(),),
+                ).fetchone()
+                if br_row:
+                    filename_branch_id = row_get(br_row, "id")
+                else:
+                    # Auto-create the branch so every import works regardless
+                    # of whether the admin pre-created it.
+                    print(f"[upload_students] Auto-creating branch '{filename_branch_name}' from filename.")
+                    if is_postgres:
+                        new_br = db.execute(
+                            f"INSERT INTO branches (name, location) VALUES ({placeholder}, {placeholder}) "
+                            f"ON CONFLICT (name) DO NOTHING RETURNING id",
+                            (filename_branch_name, ""),
+                        ).fetchone()
+                        if new_br:
+                            filename_branch_id = row_get(new_br, "id")
+                        else:
+                            # Concurrent insert by another worker -- just look it up
+                            br_row2 = db.execute(
+                                f"SELECT id FROM branches WHERE UPPER(name) = {placeholder}",
+                                (filename_branch_name.upper(),),
+                            ).fetchone()
+                            filename_branch_id = row_get(br_row2, "id") if br_row2 else None
+                    else:
+                        cur = db.execute(
+                            f"INSERT OR IGNORE INTO branches (name, location) VALUES ({placeholder}, {placeholder})",
+                            (filename_branch_name, ""),
+                        )
+                        if getattr(cur, "rowcount", 0) > 0:
+                            filename_branch_id = cur.lastrowid
+                        else:
+                            br_row2 = db.execute(
+                                f"SELECT id FROM branches WHERE UPPER(name) = {placeholder}",
+                                (filename_branch_name.upper(),),
+                            ).fetchone()
+                            filename_branch_id = row_get(br_row2, "id") if br_row2 else None
+                    if filename_branch_id:
+                        db.commit()  # Commit the new branch before inserting students
+
+            # Pre-fetch all branches for data-column fallback matching
+            branches_map = {}
+            for b in db.execute("SELECT id, name FROM branches").fetchall():
+                b_name = row_get(b, "name")
+                b_id = row_get(b, "id")
+                if b_name is not None:
+                    branches_map[str(b_name).lower()] = b_id
+                if b_id is not None:
+                    branches_map[str(b_id)] = b_id
+
 
             for _, row in df.iterrows():
-                name = str(row.get("name", "")).strip()
+                name       = str(row.get("name", "")).strip()
                 enrollment = str(row.get("enrollment", "")).strip()
-                email = str(row.get("email", "")).strip()
+                email      = str(row.get("email", "") or "").strip()
+
 
                 if not name or not enrollment:
                     errors += 1
                     continue
 
-                # ✅ Use branch from filename, not from file content
-                branch_id = branch_id_from_filename
+                # Prefer filename-derived branch; fall back to data column
+                branch_id = filename_branch_id
+
+                if branch_id is None and "branch_id" in df.columns:
+                    branch_id_raw = str(row.get("branch_id", "")).strip()
+                    if branch_id_raw and branch_id_raw.lower() not in ("nan", "none", ""):
+                        branch_id_raw_lower = branch_id_raw.lower()
+                        if branch_id_raw_lower in branches_map:
+                            branch_id = branches_map[branch_id_raw_lower]
+                        else:
+                            for b_name, b_id in branches_map.items():
+                                if b_name and b_name in branch_id_raw_lower:
+                                    branch_id = b_id
+                                    break
+
+                if branch_id is None:
+                    print(f"[upload_students] Could not resolve branch for row (enrollment={enrollment})")
+                    errors += 1
+                    continue
+
 
                 email_value = email or None
 
@@ -2755,7 +2895,8 @@ def upload_students():
                         continue
                 else:
                     cur = db.execute(
-                        f"INSERT OR IGNORE INTO students (name, enrollment, email, branch_id) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder})",
+                        f"INSERT OR IGNORE INTO students (name, enrollment, email, branch_id) "
+                        f"VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder})",
                         (name, enrollment, email_value, branch_id),
                     )
                     if getattr(cur, "rowcount", 0) == 0:
@@ -2775,7 +2916,8 @@ def upload_students():
                     )
                 else:
                     db.execute(
-                        f"INSERT OR IGNORE INTO users (username, password, role, student_id) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder})",
+                        f"INSERT OR IGNORE INTO users (username, password, role, student_id) "
+                        f"VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder})",
                         (enrollment, generate_password_hash(default_password), "student", student_id),
                     )
 
