@@ -3266,6 +3266,8 @@ def upload_students():
                     branches_map[str(b_name).lower()] = b_id
                 if b_id is not None:
                     branches_map[str(b_id)] = b_id
+                    
+            csw_id = branches_map.get("csw")
 
 
             for _, row in df.iterrows():
@@ -3297,6 +3299,14 @@ def upload_students():
                     print(f"[upload_students] Could not resolve branch for row (enrollment={enrollment})")
                     errors += 1
                     continue
+
+                # CSW branch validation
+                if csw_id and branch_id == csw_id:
+                    enr_upper = enrollment.upper()
+                    if not (enr_upper.startswith("25TQ1A56") and enr_upper[8:].isdigit() and 1 <= int(enr_upper[8:]) <= 61):
+                        print(f"[upload_students] Skipped: {enrollment} is invalid for CSW branch.")
+                        errors += 1
+                        continue
 
 
                 email_value = email or None
@@ -3496,6 +3506,14 @@ def upload_students_csv():
 
             # ✅ Use branch from filename, not from file content
             branch_id = branch_id_from_filename
+            
+            # CSW branch validation
+            if branch_name_from_file == "CSW":
+                enr_upper = enrollment.upper()
+                if not (enr_upper.startswith("25TQ1A56") and enr_upper[8:].isdigit() and 1 <= int(enr_upper[8:]) <= 61):
+                    print(f"[upload_students_csv] Row {total}: skipping — invalid enrollment for CSW branch ({enrollment})")
+                    failed += 1
+                    continue
 
             email_value = email_raw if email_raw and email_raw.lower() not in ("nan", "none", "n/a") else None
 
