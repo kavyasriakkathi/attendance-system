@@ -2609,6 +2609,12 @@ def upload_students():
             flash("Only .xlsx files are supported.", "error")
             return redirect(url_for("upload_students"))
 
+        # ✅ Extract branch name from filename (e.g., "ECE-B.xlsx" → "ECE-B")
+        branch_name_from_file = filename.rsplit(".", 1)[0].strip().upper()
+        if not branch_name_from_file:
+            flash("Invalid filename — cannot determine branch name.", "error")
+            return redirect(url_for("upload_students"))
+
         try:
             import pandas as pd
         except Exception:
@@ -2665,10 +2671,6 @@ def upload_students():
             'email': 'email',
             'mail id': 'email',
             'email id': 'email',
-            'branch_id': 'branch_id',
-            'branch id': 'branch_id',
-            'branch': 'branch_id',
-            'section': 'branch_id'
         }
 
         # Normalize existing columns and rename based on mapping
@@ -2685,11 +2687,11 @@ def upload_students():
                 new_cols.append(col)
         
         df.columns = new_cols
-        required = {"name", "enrollment", "email", "branch_id"}
+        required = {"name", "enrollment", "email"}
         missing = required - set(df.columns)
         
         if missing:
-            flash(f"Missing columns: {', '.join(sorted(missing))}. We searched for keywords like 'Name', 'Enrollment', 'Mail', 'Branch', and 'Section'.", "error")
+            flash(f"Missing columns: {', '.join(sorted(missing))}. We searched for keywords like 'Name', 'Enrollment', and 'Mail'.", "error")
             return redirect(url_for("upload_students"))
 
         db = get_db()
@@ -2700,70 +2702,40 @@ def upload_students():
         errors = 0
 
         try:
-            # Pre-fetch branches for name matching
-            branches_map = {}
-            for b in db.execute("SELECT id, name FROM branches").fetchall():
-                # Support both name and ID lookups
-                b_name = row_get(b, "name")
-                b_id = row_get(b, "id")
-                if b_name is not None:
-                    branches_map[str(b_name).lower()] = b_id
-                if b_id is not None:
-                    branches_map[str(b_id)] = b_id
+            # ✅ Create or reuse branch based on filename
+            existing_branch = db.execute(
+                f"SELECT id FROM branches WHERE UPPER(TRIM(name)) = {placeholder}",
+                (branch_name_from_file,),
+            ).fetchone()
+            if existing_branch:
+                branch_id_from_filename = row_get(existing_branch, "id")
+            else:
+                try:
+                    db.execute(
+                        f"INSERT INTO branches (name) VALUES ({placeholder})",
+                        (branch_name_from_file,),
+                    )
+                    new_branch = db.execute(
+                        f"SELECT id FROM branches WHERE UPPER(TRIM(name)) = {placeholder}",
+                        (branch_name_from_file,),
+                    ).fetchone()
+                    branch_id_from_filename = row_get(new_branch, "id")
+                except Exception as e:
+                    print(f"[upload_students] Failed to create branch '{branch_name_from_file}': {repr(e)}")
+                    flash(f"Failed to create branch from filename. Error: {repr(e)}", "error")
+                    return redirect(url_for("upload_students"))
 
             for _, row in df.iterrows():
                 name = str(row.get("name", "")).strip()
                 enrollment = str(row.get("enrollment", "")).strip()
                 email = str(row.get("email", "")).strip()
-                branch_id_raw = str(row.get("branch_id", "")).strip()
 
                 if not name or not enrollment:
                     errors += 1
                     continue
 
-                if not branch_id_raw or branch_id_raw.lower() == "nan":
-                    errors += 1
-                    continue
-
-                # Try numeric branch_id first, then exact branch name match, then partial branch name match
-                branch_id = None
-                branch_id_raw_lower = branch_id_raw.lower()
-                
-                if branch_id_raw_lower in branches_map:
-                    branch_id = branches_map[branch_id_raw_lower]
-                else:
-                    # Partial match: if "CSM" is in "I CSM-B"
-                    for b_name, b_id in branches_map.items():
-                        if b_name and b_name in branch_id_raw_lower:
-                            branch_id = b_id
-                            break
-                    # If CSW text is present but only MECH exists, map it to MECH
-                    if branch_id is None and "csw" in branch_id_raw_lower:
-                        branch_id = branches_map.get("mech")
-                
-                if branch_id is None:
-                    # Create missing branch names when uploading Excel students
-                    branch_name_candidate = branch_id_raw.strip().upper()
-                    if branch_name_candidate and branch_name_candidate not in ("NAN", "NONE", "N/A", "NULL", "-"):
-                        try:
-                            db.execute(
-                                f"INSERT INTO branches (name) VALUES ({placeholder})",
-                                (branch_name_candidate,),
-                            )
-                            new_branch_row = db.execute(
-                                f"SELECT id FROM branches WHERE UPPER(TRIM(name)) = {placeholder}",
-                                (branch_name_candidate,),
-                            ).fetchone()
-                            if new_branch_row:
-                                branch_id = row_get(new_branch_row, "id")
-                                branches_map[branch_name_candidate.lower()] = branch_id
-                        except Exception:
-                            pass
-
-                if branch_id is None:
-                    print(f"[upload_students] Branch not found for: {branch_id_raw}")
-                    errors += 1
-                    continue
+                # ✅ Use branch from filename, not from file content
+                branch_id = branch_id_from_filename
 
                 email_value = email or None
 
@@ -2868,6 +2840,12 @@ def upload_students_csv():
         flash("Only .csv files are supported.", "error")
         return redirect(url_for("upload_students_csv"))
 
+    # ✅ Extract branch name from filename (e.g., "ECE-B.csv" → "ECE-B")
+    branch_name_from_file = fname.rsplit(".", 1)[0].strip().upper()
+    if not branch_name_from_file:
+        flash("Invalid filename — cannot determine branch name.", "error")
+        return redirect(url_for("upload_students_csv"))
+
     # ── 2. Parse header row via stdlib csv (no pandas → no large memory spike) ─
     import csv
     import io
@@ -2890,26 +2868,43 @@ def upload_students_csv():
 
     fieldnames_norm = [str(f).strip().lower() for f in reader.fieldnames]
     required = {"name", "enrollment", "email"}
-    branch_header = None
-    for candidate in ("branch_id", "branch", "branch_name"):
-        if candidate in fieldnames_norm:
-            branch_header = candidate
-            break
-
     missing = required - set(fieldnames_norm)
-    if missing or branch_header is None:
-        missing_columns = sorted(list(missing) + (["branch_id"] if branch_header is None else []))
+    if missing:
         flash(
-            f"CSV is missing required columns: {', '.join(missing_columns)}. "
-            "Expected headers: name, enrollment, email, branch_id (or branch / branch_name)",
+            f"CSV is missing required columns: {', '.join(sorted(missing))}. "
+            "Expected headers: name, enrollment, email",
             "error",
         )
         return redirect(url_for("upload_students_csv"))
 
-    # ── 3. Stream rows into the database ──────────────────────────────────────
+    # ── 3. Create or reuse branch from filename ────────────────────────────────
     db = get_db()
     placeholder = get_placeholder()
     is_postgres = str(app.config.get("DATABASE", "")).startswith("postgres")
+
+    existing_branch = db.execute(
+        f"SELECT id FROM branches WHERE UPPER(TRIM(name)) = {placeholder}",
+        (branch_name_from_file,),
+    ).fetchone()
+    if existing_branch:
+        branch_id_from_filename = row_get(existing_branch, "id")
+    else:
+        try:
+            db.execute(
+                f"INSERT INTO branches (name) VALUES ({placeholder})",
+                (branch_name_from_file,),
+            )
+            new_branch = db.execute(
+                f"SELECT id FROM branches WHERE UPPER(TRIM(name)) = {placeholder}",
+                (branch_name_from_file,),
+            ).fetchone()
+            branch_id_from_filename = row_get(new_branch, "id")
+        except Exception as e:
+            print(f"[upload_students_csv] Failed to create branch '{branch_name_from_file}': {repr(e)}")
+            flash(f"Failed to create branch from filename. Error: {repr(e)}", "error")
+            return redirect(url_for("upload_students_csv"))
+
+    # ── 4. Stream rows into the database ──────────────────────────────────────
 
     total = 0
     inserted = 0
@@ -2928,7 +2923,6 @@ def upload_students_csv():
             name       = str(row.get("name", "") or "").strip()
             enrollment = str(row.get("enrollment", "") or "").strip()
             email_raw  = str(row.get("email", "") or "").strip()
-            branch_raw = row.get(branch_header, "")
 
             # Skip rows missing the two mandatory fields
             if not name or not enrollment:
@@ -2936,47 +2930,8 @@ def upload_students_csv():
                 failed += 1
                 continue
 
-            # branch_id: try numeric first, then resolve by branch name (e.g. "CSW", "CSE")
-            branch_id = _safe_int_csv(branch_raw)
-            if branch_id is None:
-                branch_name_lookup = str(branch_raw).strip() if branch_raw else ""
-                if branch_name_lookup and branch_name_lookup.lower() not in ("nan", "none", "n/a", "null", "-", ""):
-                    branch_name_upper = branch_name_lookup.upper()
-                    try:
-                        _br_row = db.execute(
-                            f"SELECT id FROM branches WHERE UPPER(TRIM(name)) = {placeholder}",
-                            (branch_name_upper,),
-                        ).fetchone()
-                        if not _br_row and branch_name_upper == "CSW":
-                            _br_row = db.execute(
-                                f"SELECT id FROM branches WHERE UPPER(TRIM(name)) = {placeholder}",
-                                ("MECH",),
-                            ).fetchone()
-                        if _br_row:
-                            branch_id = row_get(_br_row, "id")
-                        else:
-                            try:
-                                db.execute(
-                                    f"INSERT INTO branches (name) VALUES ({placeholder})",
-                                    (branch_name_upper,),
-                                )
-                                _br_row = db.execute(
-                                    f"SELECT id FROM branches WHERE UPPER(TRIM(name)) = {placeholder}",
-                                    (branch_name_upper,),
-                                ).fetchone()
-                                if _br_row:
-                                    branch_id = row_get(_br_row, "id")
-                            except Exception:
-                                pass
-                    except Exception:
-                        pass
-            if branch_id is None:
-                print(
-                    f"[upload_students_csv] Row {total} ({enrollment}): "
-                    f"invalid branch_id value {repr(branch_raw)!r} — not a number and no matching branch name, skipping"
-                )
-                failed += 1
-                continue
+            # ✅ Use branch from filename, not from file content
+            branch_id = branch_id_from_filename
 
             email_value = email_raw if email_raw and email_raw.lower() not in ("nan", "none", "n/a") else None
 
