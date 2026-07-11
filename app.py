@@ -1752,20 +1752,45 @@ def init_db(db=None):
             ("low_attendance_threshold", str(app.config["LOW_ATTENDANCE_THRESHOLD"])),
         )
 
-    # ✅ One-time migration: rename MECH branch to CSW
+    # ✅ One-time migration: rename MECH branch to CSW (merge if both exist)
     try:
         mech_row = db.execute(
             f"SELECT id FROM branches WHERE UPPER(TRIM(name)) = {placeholder}", ("MECH",)
         ).fetchone()
-        csw_exists = db.execute(
+        csw_row = db.execute(
             f"SELECT id FROM branches WHERE UPPER(TRIM(name)) = {placeholder}", ("CSW",)
         ).fetchone()
-        if mech_row and not csw_exists:
-            db.execute(
-                f"UPDATE branches SET name = {placeholder} WHERE id = {placeholder}",
-                ("CSW", row_get(mech_row, "id")),
-            )
-            print("[init_db] Renamed branch MECH -> CSW")
+        if mech_row:
+            mech_id = row_get(mech_row, "id")
+            if not csw_row:
+                # Simple rename when CSW doesn't exist yet
+                db.execute(
+                    f"UPDATE branches SET name = {placeholder} WHERE id = {placeholder}",
+                    ("CSW", mech_id),
+                )
+                print("[init_db] Renamed branch MECH -> CSW")
+            else:
+                # CSW already exists; reassign all foreign keys from MECH -> CSW then remove MECH
+                csw_id = row_get(csw_row, "id")
+                fk_updates = [
+                    ("students", "branch_id"),
+                    ("subjects", "branch_id"),
+                    ("timetable_entries", "branch_id"),
+                    ("attendance", "branch_id"),
+                    ("teacher_branches", "branch_id"),
+                    ("teachers", "branch_id"),
+                ]
+                for table, col in fk_updates:
+                    try:
+                        db.execute(f"UPDATE {table} SET {col} = {placeholder} WHERE {col} = {placeholder}", (csw_id, mech_id))
+                    except Exception:
+                        # Some tables may not exist in older schemas; ignore failures
+                        pass
+                try:
+                    db.execute(f"DELETE FROM branches WHERE id = {placeholder}", (mech_id,))
+                except Exception:
+                    pass
+                print("[init_db] Merged branch MECH into existing CSW (reassigned FK rows)")
     except Exception as _e:
         print(f"[init_db] Branch rename migration skipped: {repr(_e)}")
 
