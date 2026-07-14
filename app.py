@@ -3926,7 +3926,7 @@ def teacher_login():
                     session["teacher_id"] = teacher_id
                     session["teacher_name"] = session.get("username")
                 session.permanent = True
-                return redirect(url_for("dashboard"))
+                return redirect(url_for("teacher_dashboard"))
 
             flash("Invalid teacher login credentials.", "error")
 
