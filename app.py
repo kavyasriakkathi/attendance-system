@@ -1286,7 +1286,7 @@ def get_teacher_context(db=None):
         if not teacher:
             try:
                 teacher = db.execute(
-                    f"SELECT id, username, username AS name, password, NULL AS subject_id, NULL AS branch_id, NULL AS subject_name FROM users WHERE id = {placeholder} AND role = {placeholder}",
+                    f"SELECT id, username, username AS name, password, CAST(NULL AS INTEGER) AS subject_id, CAST(NULL AS INTEGER) AS branch_id, CAST(NULL AS TEXT) AS subject_name FROM users WHERE id = {placeholder} AND role = {placeholder}",
                     (teacher_id, "teacher"),
                 ).fetchone()
             except Exception:
@@ -3962,7 +3962,7 @@ def teacher_select_branch():
                 # Verify this branch/section pair is assigned to this teacher.
                 assigned = db.execute(
                     f"""
-                    SELECT id, section FROM teacher_assignments
+                    SELECT id, section FROM teacher_subject_assignments
                     WHERE teacher_id = {placeholder} AND branch_id = {placeholder}
                     """,
                     (teacher_id, selected_branch_id),
