@@ -1286,7 +1286,7 @@ def get_teacher_context(db=None):
         if not teacher:
             try:
                 teacher = db.execute(
-                    f"SELECT id, username, username AS name, password, subject_id, branch_id, subject_name FROM users WHERE id = {placeholder} AND role = {placeholder}",
+                    f"SELECT id, username, username AS name, password, NULL AS subject_id, NULL AS branch_id, NULL AS subject_name FROM users WHERE id = {placeholder} AND role = {placeholder}",
                     (teacher_id, "teacher"),
                 ).fetchone()
             except Exception:
