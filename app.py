@@ -1352,28 +1352,34 @@ def get_teacher_context(db=None):
             ]
 
         if not assigned_branches and row_get(teacher, "branch_id") is not None:
-            branch_row = db.execute(
-                f"SELECT id, name, location FROM branches WHERE id = {placeholder}",
-                (row_get(teacher, "branch_id"),),
-            ).fetchone()
-            if branch_row:
-                assigned_branches = [{
-                    "id": row_get(branch_row, "id"),
-                    "name": row_get(branch_row, "name"),
-                    "location": row_get(branch_row, "location"),
-                    "section": "",
-                }]
+            try:
+                branch_row = db.execute(
+                    f"SELECT id, name, location FROM branches WHERE id = {placeholder}",
+                    (row_get(teacher, "branch_id"),),
+                ).fetchone()
+                if branch_row:
+                    assigned_branches = [{
+                        "id": row_get(branch_row, "id"),
+                        "name": row_get(branch_row, "name"),
+                        "location": row_get(branch_row, "location"),
+                        "section": "",
+                    }]
+            except Exception:
+                pass
         if not assigned_subjects and row_get(teacher, "subject_id") is not None:
-            subject_row = db.execute(
-                f"SELECT id, name, branch_id FROM subjects WHERE id = {placeholder}",
-                (row_get(teacher, "subject_id"),),
-            ).fetchone()
-            if subject_row:
-                assigned_subjects = [{
-                    "id": row_get(subject_row, "id"),
-                    "name": row_get(subject_row, "name"),
-                    "branch_id": row_get(subject_row, "branch_id"),
-                }]
+            try:
+                subject_row = db.execute(
+                    f"SELECT id, name, branch_id FROM subjects WHERE id = {placeholder}",
+                    (row_get(teacher, "subject_id"),),
+                ).fetchone()
+                if subject_row:
+                    assigned_subjects = [{
+                        "id": row_get(subject_row, "id"),
+                        "name": row_get(subject_row, "name"),
+                        "branch_id": row_get(subject_row, "branch_id"),
+                    }]
+            except Exception:
+                pass
 
         def _dedupe(rows, key_name):
             seen = set()
@@ -1402,12 +1408,15 @@ def get_teacher_context(db=None):
             current_branch_name = row_get(first_assignment, "branch_name") or current_branch_name
 
         if current_branch_id and not current_branch_name:
-            branch_row = db.execute(
-                f"SELECT id, name, location FROM branches WHERE id = {placeholder}",
-                (current_branch_id,),
-            ).fetchone()
-            if branch_row:
-                current_branch_name = row_get(branch_row, "name") or ""
+            try:
+                branch_row = db.execute(
+                    f"SELECT id, name, location FROM branches WHERE id = {placeholder}",
+                    (current_branch_id,),
+                ).fetchone()
+                if branch_row:
+                    current_branch_name = row_get(branch_row, "name") or ""
+            except Exception:
+                pass
 
         if not current_branch_id and assigned_branches:
             current_branch_id = row_get(assigned_branches[0], "id")
@@ -1417,12 +1426,15 @@ def get_teacher_context(db=None):
 
         subject_name = row_get(teacher, "subject_name") or ""
         if current_subject_id:
-            subject_row = db.execute(
-                f"SELECT id, name, branch_id FROM subjects WHERE id = {placeholder}",
-                (current_subject_id,),
-            ).fetchone()
-            if subject_row:
-                subject_name = row_get(subject_row, "name") or subject_name
+            try:
+                subject_row = db.execute(
+                    f"SELECT id, name, branch_id FROM subjects WHERE id = {placeholder}",
+                    (current_subject_id,),
+                ).fetchone()
+                if subject_row:
+                    subject_name = row_get(subject_row, "name") or subject_name
+            except Exception:
+                pass
 
         teacher_name = row_get(teacher, "name") or row_get(teacher, "username") or session.get("username") or "Teacher"
 
