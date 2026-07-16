@@ -7342,7 +7342,13 @@ def trigger_low_attendance_scan():
 def internal_error(error):
     """Global handler for Internal Server Errors."""
     print(f"[CRITICAL] 500 ERROR: {repr(error)}")
-    print(traceback.format_exc())
+    import traceback
+    if hasattr(error, 'original_exception') and error.original_exception:
+        print("--- ORIGINAL EXCEPTION TRACEBACK ---")
+        traceback.print_exception(type(error.original_exception), error.original_exception, error.original_exception.__traceback__)
+        print("------------------------------------")
+    else:
+        print(traceback.format_exc())
     return "<h1>Internal Server Error</h1><p>Our team has been notified. Please try again later.</p>", 500
 
 @app.errorhandler(404)
