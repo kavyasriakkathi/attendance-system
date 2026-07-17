@@ -1158,6 +1158,11 @@ def _ensure_teacher_support_schema(db):
     _ensure_column(db, "teacher_subject_assignments", "section", "TEXT")
     _ensure_column(db, "teacher_subject_assignments", "semester", "TEXT")
     _ensure_column(db, "teacher_subject_assignments", "academic_year", "TEXT")
+    
+    # Ensure other critical columns exist for queries used in teacher_dashboard and get_teacher_context
+    _ensure_column(db, "students", "import_order", "INTEGER")
+    _ensure_column(db, "branches", "location", "TEXT")
+    _ensure_column(db, "subjects", "branch_id", "INTEGER")
 
     try:
         db.commit()
