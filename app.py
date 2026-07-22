@@ -8244,6 +8244,329 @@ def student_results():
             except: pass
 
 
+def _ensure_student_profile_schema(db):
+    """Ensure student profile columns and academic history tracking tables exist safely."""
+    _ensure_column(db, "students", "section", "TEXT")
+    _ensure_column(db, "students", "semester", "TEXT DEFAULT 'Semester 1'")
+    _ensure_column(db, "students", "academic_year", "TEXT DEFAULT '2025-2026'")
+    _ensure_column(db, "students", "status", "TEXT DEFAULT 'Active'")
+    _ensure_column(db, "students", "cgpa", "REAL DEFAULT 0.0")
+
+    placeholder = get_placeholder()
+    is_pg = str(app.config.get("DATABASE", "")).startswith("postgres")
+    try:
+        if is_pg:
+            db.execute("""
+            CREATE TABLE IF NOT EXISTS student_academic_history (
+                id SERIAL PRIMARY KEY,
+                student_id INTEGER NOT NULL,
+                semester TEXT NOT NULL,
+                sgpa REAL DEFAULT 0.0,
+                total_subjects INTEGER DEFAULT 0,
+                passed_subjects INTEGER DEFAULT 0,
+                failed_subjects INTEGER DEFAULT 0,
+                promotion_status TEXT DEFAULT 'Promoted',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+        else:
+            db.execute("""
+            CREATE TABLE IF NOT EXISTS student_academic_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                student_id INTEGER NOT NULL,
+                semester TEXT NOT NULL,
+                sgpa REAL DEFAULT 0.0,
+                total_subjects INTEGER DEFAULT 0,
+                passed_subjects INTEGER DEFAULT 0,
+                failed_subjects INTEGER DEFAULT 0,
+                promotion_status TEXT DEFAULT 'Promoted',
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+        try: db.commit()
+        except: pass
+    except Exception as e:
+        try: db.rollback()
+        except: pass
+        print(f"[_ensure_student_profile_schema] history table warning: {e}")
+
+
+def get_student_academic_profile_context(db, student_id):
+    """Build complete academic profile, attendance analytics, semester results, and history."""
+    _ensure_student_profile_schema(db)
+    placeholder = get_placeholder()
+
+    student_row = db.execute(
+        f"SELECT s.*, b.name AS branch_name FROM students s LEFT JOIN branches b ON s.branch_id = b.id WHERE s.id = {placeholder}",
+        (student_id,),
+    ).fetchone()
+
+    if not student_row:
+        return None
+
+    student = dict(student_row)
+    branch_id = row_get(student, "branch_id")
+    enrollment = row_get(student, "enrollment") or ""
+    section = (row_get(student, "section") or row_get(student, "branch_section") or "CSM-A").strip()
+    semester = str(row_get(student, "semester") or "Semester 1").strip()
+    if semester.isdigit():
+        semester = f"Semester {semester}"
+    academic_year = row_get(student, "academic_year") or "2025-2026"
+    status = row_get(student, "status") or "Active"
+
+    student["section"] = section
+    student["semester"] = semester
+    student["academic_year"] = academic_year
+    student["status"] = status
+
+    # 1. Attendance Analytics
+    attendance_records = db.execute(
+        f"SELECT a.date, a.status, a.subject_id, COALESCE(s.name, a.subject_name) AS subject_name "
+        f"FROM attendance a LEFT JOIN subjects s ON a.subject_id = s.id "
+        f"WHERE a.student_id = {placeholder} ORDER BY a.date DESC",
+        (student_id,),
+    ).fetchall()
+
+    total_classes = len(attendance_records)
+    present_count = len([r for r in attendance_records if row_get(r, "status") == "Present"])
+    absent_count = total_classes - present_count
+    overall_attendance_pct = round((present_count / total_classes * 100.0), 1) if total_classes > 0 else 0.0
+
+    # Subject-wise attendance breakdown
+    subjects_raw = db.execute(
+        f"SELECT id, name FROM subjects WHERE branch_id = {placeholder} ORDER BY name",
+        (branch_id,),
+    ).fetchall()
+
+    subject_attendance = []
+    shortage_subjects = []
+    for sub in subjects_raw:
+        s_id = row_get(sub, "id")
+        sub_name = row_get(sub, "name")
+        sub_recs = [r for r in attendance_records if row_get(r, "subject_id") == s_id]
+        sub_tot = len(sub_recs)
+        sub_pres = len([r for r in sub_recs if row_get(r, "status") == "Present"])
+        sub_abs = sub_tot - sub_pres
+        sub_pct = round((sub_pres / sub_tot * 100.0), 1) if sub_tot > 0 else 0.0
+        is_shortage = (sub_tot > 0 and sub_pct < 75.0)
+        if is_shortage:
+            shortage_subjects.append({"name": sub_name, "percentage": sub_pct})
+
+        subject_attendance.append({
+            "id": s_id,
+            "name": sub_name,
+            "total": sub_tot,
+            "present": sub_pres,
+            "absent": sub_abs,
+            "percentage": sub_pct,
+            "is_shortage": is_shortage,
+        })
+
+    attendance_shortage_warning = (overall_attendance_pct < 75.0 or len(shortage_subjects) > 0)
+
+    # 2. Results Section (Semester 1 to Semester 8)
+    _ensure_results_schema(db)
+    mark_rows = db.execute(
+        f"SELECT m.*, s.name AS subject_name, e.exam_name, e.exam_type, e.academic_year, e.semester "
+        f"FROM marks m JOIN subjects s ON m.subject_id = s.id JOIN exams e ON m.exam_id = e.id "
+        f"WHERE m.student_id = {placeholder} ORDER BY e.semester ASC, s.name ASC",
+        (student_id,),
+    ).fetchall()
+
+    semesters_data = {}
+    for sem_num in range(1, 9):
+        sem_key = f"Semester {sem_num}"
+        semesters_data[sem_key] = {
+            "name": sem_key,
+            "num": sem_num,
+            "subjects": [],
+            "total_obtained": 0.0,
+            "total_max": 0.0,
+            "gp_sum": 0.0,
+            "sgpa": 0.0,
+            "pct": 0.0,
+            "passed_count": 0,
+            "failed_count": 0,
+            "status": "N/A",
+            "has_results": False,
+        }
+
+    total_cgpa_gp = 0.0
+    total_cgpa_count = 0
+    latest_sgpa = 0.0
+
+    for mr in mark_rows:
+        sem_raw = str(row_get(mr, "semester") or "1").strip()
+        if sem_raw.isdigit():
+            sem_key = f"Semester {sem_raw}"
+        elif not sem_raw.startswith("Semester"):
+            sem_key = f"Semester {sem_raw}"
+        else:
+            sem_key = sem_raw
+
+        if sem_key not in semesters_data:
+            semesters_data[sem_key] = {
+                "name": sem_key,
+                "num": 1,
+                "subjects": [],
+                "total_obtained": 0.0,
+                "total_max": 0.0,
+                "gp_sum": 0.0,
+                "sgpa": 0.0,
+                "pct": 0.0,
+                "passed_count": 0,
+                "failed_count": 0,
+                "status": "N/A",
+                "has_results": False,
+            }
+
+        m_obt = float(row_get(mr, "marks_obtained") or 0)
+        m_max = float(row_get(mr, "max_marks") or 100)
+        g_info = calculate_grade(m_obt, m_max)
+
+        sem_dict = semesters_data[sem_key]
+        sem_dict["has_results"] = True
+        sem_dict["total_obtained"] += m_obt
+        sem_dict["total_max"] += m_max
+        sem_dict["gp_sum"] += g_info["gp"]
+        if g_info["status"] == "Pass":
+            sem_dict["passed_count"] += 1
+        else:
+            sem_dict["failed_count"] += 1
+
+        total_cgpa_gp += g_info["gp"]
+        total_cgpa_count += 1
+
+        sem_dict["subjects"].append({
+            "exam_name": row_get(mr, "exam_name"),
+            "exam_type": row_get(mr, "exam_type"),
+            "subject_name": row_get(mr, "subject_name"),
+            "mid1_marks": row_get(mr, "mid1_marks"),
+            "mid2_marks": row_get(mr, "mid2_marks"),
+            "mid3_marks": row_get(mr, "mid3_marks"),
+            "external_marks": row_get(mr, "external_marks"),
+            "marks_obtained": m_obt,
+            "max_marks": m_max,
+            "pct": g_info["pct"],
+            "grade": g_info["grade"],
+            "status": g_info["status"],
+        })
+
+    # Calculate SGPA per semester and Academic History
+    academic_history = []
+    overall_backlogs = 0
+
+    for sem_num in range(1, 9):
+        sem_key = f"Semester {sem_num}"
+        s_data = semesters_data[sem_key]
+        cnt = len(s_data["subjects"])
+        if cnt > 0:
+            s_data["pct"] = round((s_data["total_obtained"] / s_data["total_max"] * 100.0), 1) if s_data["total_max"] > 0 else 0.0
+            s_data["sgpa"] = round((s_data["gp_sum"] / cnt), 2)
+            if s_data["failed_count"] == 0:
+                s_data["status"] = "Pass"
+                prom_status = "Promoted"
+            else:
+                s_data["status"] = "Fail"
+                prom_status = "Promoted with Backlogs"
+                overall_backlogs += s_data["failed_count"]
+
+            latest_sgpa = s_data["sgpa"]
+        else:
+            prom_status = "Current / Pending" if sem_key == semester else "Upcoming"
+
+        academic_history.append({
+            "semester": sem_key,
+            "sem_num": sem_num,
+            "has_results": s_data["has_results"],
+            "total_subjects": cnt,
+            "passed_subjects": s_data["passed_count"],
+            "failed_subjects": s_data["failed_count"],
+            "sgpa": s_data["sgpa"],
+            "pct": s_data["pct"],
+            "status": s_data["status"],
+            "promotion_status": prom_status,
+        })
+
+    cgpa = round((total_cgpa_gp / total_cgpa_count), 2) if total_cgpa_count > 0 else 0.0
+
+    # Overall Promotion Status
+    if overall_backlogs > 0:
+        overall_promotion_status = f"Promoted with {overall_backlogs} Backlog(s)"
+    else:
+        overall_promotion_status = f"Promoted / Active ({semester})"
+
+    # Performance Rating
+    if overall_attendance_pct >= 85 and (cgpa >= 8.0 or overall_attendance_pct >= 85):
+        performance_rating = "Excellent"
+        rating_class = "success"
+    elif overall_attendance_pct >= 75 and (cgpa >= 6.5 or overall_attendance_pct >= 65):
+        performance_rating = "Good"
+        rating_class = "info"
+    elif overall_attendance_pct >= 65 and (cgpa >= 5.0):
+        performance_rating = "Average"
+        rating_class = "warning"
+    else:
+        performance_rating = "Needs Improvement"
+        rating_class = "danger"
+
+    return {
+        "student": student,
+        "total_classes": total_classes,
+        "present_count": present_count,
+        "absent_count": absent_count,
+        "overall_attendance_pct": overall_attendance_pct,
+        "subject_attendance": subject_attendance,
+        "attendance_shortage_warning": attendance_shortage_warning,
+        "shortage_subjects": shortage_subjects,
+        "semesters_data": semesters_data,
+        "cgpa": cgpa,
+        "latest_sgpa": latest_sgpa,
+        "academic_history": academic_history,
+        "overall_promotion_status": overall_promotion_status,
+        "performance_rating": performance_rating,
+        "rating_class": rating_class,
+    }
+
+
+@app.route("/student/profile", methods=["GET"])
+@app.route("/student-profile", methods=["GET"])
+@app.route("/student_profile", methods=["GET"])
+def student_profile():
+    if session.get("role") != "student":
+        flash("Please log in with a student account to view profile.", "error")
+        return redirect(url_for("student_login"))
+
+    db = None
+    try:
+        db = get_db()
+        student_id = session.get("student_id")
+        if not student_id and session.get("username"):
+            placeholder = get_placeholder()
+            st_row = db.execute(f"SELECT id FROM students WHERE enrollment = {placeholder}", (session.get("username"),)).fetchone()
+            if st_row:
+                student_id = row_get(st_row, "id")
+
+        if not student_id:
+            flash("Student profile not found.", "error")
+            return redirect(url_for("student_login"))
+
+        context = get_student_academic_profile_context(db, student_id)
+        if not context:
+            flash("Student profile records unavailable.", "error")
+            return redirect(url_for("student_login"))
+
+        return render_template("student_profile.html", **context)
+    except Exception as e:
+        print(f"[student_profile ERROR]: {repr(e)}")
+        flash("Error loading student profile.", "error")
+        return redirect(url_for("student_login"))
+    finally:
+        if db:
+            try: db.close()
+            except: pass
+
+
 @app.route("/admin/results", methods=["GET"])
 def admin_results():
     if session.get("role") != "admin":

@@ -22,6 +22,9 @@
         <nav>
             {% if session.role == 'student' %}
             <a class="nav-link" href="{{ url_for('student_dashboard') }}"><i class="fa-solid fa-user-graduate"></i> Dashboard</a>
+            {% if has_endpoint('student_profile') %}
+            <a class="nav-link" href="{{ url_for('student_profile') }}"><i class="fa-solid fa-id-card"></i> Profile</a>
+            {% endif %}
             {% if has_endpoint('student_results') %}
             <a class="nav-link" href="{{ url_for('student_results') }}"><i class="fa-solid fa-square-poll-vertical"></i> My Results</a>
             {% endif %}
