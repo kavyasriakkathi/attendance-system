@@ -5012,6 +5012,7 @@ def _ensure_results_schema(db):
             CREATE TABLE IF NOT EXISTS exams (
                 id SERIAL PRIMARY KEY,
                 exam_name TEXT NOT NULL,
+                exam_type TEXT DEFAULT 'internal_1',
                 academic_year TEXT NOT NULL,
                 semester TEXT NOT NULL,
                 branch_id INTEGER NOT NULL REFERENCES branches(id) ON DELETE CASCADE,
@@ -5024,6 +5025,10 @@ def _ensure_results_schema(db):
                 student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
                 subject_id INTEGER NOT NULL REFERENCES subjects(id) ON DELETE CASCADE,
                 exam_id INTEGER NOT NULL REFERENCES exams(id) ON DELETE CASCADE,
+                mid1_marks REAL DEFAULT 0,
+                mid2_marks REAL DEFAULT 0,
+                mid3_marks REAL DEFAULT 0,
+                external_marks REAL DEFAULT 0,
                 marks_obtained REAL NOT NULL,
                 max_marks REAL NOT NULL DEFAULT 100,
                 entered_by_teacher INTEGER NOT NULL,
@@ -5036,6 +5041,7 @@ def _ensure_results_schema(db):
             CREATE TABLE IF NOT EXISTS exams (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 exam_name TEXT NOT NULL,
+                exam_type TEXT DEFAULT 'internal_1',
                 academic_year TEXT NOT NULL,
                 semester TEXT NOT NULL,
                 branch_id INTEGER NOT NULL,
@@ -5049,6 +5055,10 @@ def _ensure_results_schema(db):
                 student_id INTEGER NOT NULL,
                 subject_id INTEGER NOT NULL,
                 exam_id INTEGER NOT NULL,
+                mid1_marks REAL DEFAULT 0,
+                mid2_marks REAL DEFAULT 0,
+                mid3_marks REAL DEFAULT 0,
+                external_marks REAL DEFAULT 0,
                 marks_obtained REAL NOT NULL,
                 max_marks REAL NOT NULL DEFAULT 100,
                 entered_by_teacher INTEGER NOT NULL,
@@ -5059,6 +5069,21 @@ def _ensure_results_schema(db):
                 UNIQUE(student_id, subject_id, exam_id)
             );
             """)
+
+        # Safely alter tables to add missing columns for existing databases
+        for col_def in [
+            ("exams", "exam_type", "TEXT DEFAULT 'internal_1'"),
+            ("marks", "mid1_marks", "REAL DEFAULT 0"),
+            ("marks", "mid2_marks", "REAL DEFAULT 0"),
+            ("marks", "mid3_marks", "REAL DEFAULT 0"),
+            ("marks", "external_marks", "REAL DEFAULT 0"),
+        ]:
+            table_name, col_name, col_type = col_def
+            try:
+                db.execute(f"ALTER TABLE {table_name} ADD COLUMN {col_name} {col_type}")
+            except Exception:
+                pass
+
         try:
             db.commit()
         except Exception:
@@ -7859,17 +7884,22 @@ def admin_exams():
             action = (request.form.get("action") or "").strip()
             if action == "create":
                 exam_name = (request.form.get("exam_name") or "").strip()
+                exam_type = (request.form.get("exam_type") or "internal_1").strip()
                 academic_year = (request.form.get("academic_year") or "").strip()
-                semester = (request.form.get("semester") or "").strip()
+                semester = (request.form.get("semester") or "1").strip()
+                if not semester.startswith("Semester"):
+                    semester_str = f"Semester {semester}"
+                else:
+                    semester_str = semester
                 branch_id = _coerce_int(request.form.get("branch_id"))
                 section = (request.form.get("section") or "A").strip()
 
-                if not exam_name or not academic_year or not semester or not branch_id:
+                if not exam_name or not academic_year or not branch_id:
                     flash("Exam name, academic year, semester, and branch are required.", "error")
                 else:
                     db.execute(
-                        f"INSERT INTO exams (exam_name, academic_year, semester, branch_id, section) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})",
-                        (exam_name, academic_year, semester, branch_id, section),
+                        f"INSERT INTO exams (exam_name, exam_type, academic_year, semester, branch_id, section) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})",
+                        (exam_name, exam_type, academic_year, semester_str, branch_id, section),
                     )
                     db.commit()
                     flash("Examination created successfully.", "success")
@@ -7916,9 +7946,7 @@ def teacher_enter_marks():
         teacher_row = db.execute(f"SELECT id FROM users WHERE username = {placeholder}", (teacher_user,)).fetchone()
         teacher_id = row_get(teacher_row, "id") if teacher_row else 0
 
-        # Subjects list
         assigned_subjects = db.execute("SELECT id, name FROM subjects ORDER BY name").fetchall()
-
         branches = db.execute("SELECT id, name FROM branches ORDER BY name").fetchall()
         exams = db.execute(
             "SELECT e.*, b.name AS branch_name FROM exams e JOIN branches b ON e.branch_id = b.id ORDER BY e.id DESC"
@@ -7934,6 +7962,11 @@ def teacher_enter_marks():
             ex_id = _coerce_int(selected_exam_id)
             global_max_marks = float(request.form.get("max_marks", 100) or 100)
             student_ids = request.form.getlist("student_id[]")
+
+            mid1_list = request.form.getlist("mid1_marks[]")
+            mid2_list = request.form.getlist("mid2_marks[]")
+            mid3_list = request.form.getlist("mid3_marks[]")
+            ext_list = request.form.getlist("external_marks[]")
             marks_list = request.form.getlist("marks_obtained[]")
 
             if not sub_id or not ex_id:
@@ -7941,33 +7974,56 @@ def teacher_enter_marks():
             else:
                 for idx, st_id_str in enumerate(student_ids):
                     st_id = _coerce_int(st_id_str)
-                    raw_val = marks_list[idx] if idx < len(marks_list) else ""
-                    if st_id and raw_val != "":
-                        try:
-                            val = float(raw_val)
-                            if val < 0 or val > global_max_marks:
-                                flash(f"Marks for student ID {st_id} ({val}) exceed maximum allowed ({global_max_marks}).", "error")
-                                continue
+                    if not st_id:
+                        continue
 
-                            existing_mark = db.execute(
-                                f"SELECT id FROM marks WHERE student_id = {placeholder} AND subject_id = {placeholder} AND exam_id = {placeholder}",
-                                (st_id, sub_id, ex_id),
-                            ).fetchone()
+                    def _parse_flt(lst, index):
+                        if index < len(lst) and lst[index] is not None and str(lst[index]).strip() != "":
+                            try:
+                                return float(lst[index])
+                            except ValueError:
+                                return None
+                        return None
 
-                            if existing_mark:
-                                db.execute(
-                                    f"UPDATE marks SET marks_obtained = {placeholder}, max_marks = {placeholder}, entered_by_teacher = {placeholder}, created_at = CURRENT_TIMESTAMP WHERE id = {placeholder}",
-                                    (val, global_max_marks, teacher_id, row_get(existing_mark, "id")),
-                                )
-                            else:
-                                db.execute(
-                                    f"INSERT INTO marks (student_id, subject_id, exam_id, marks_obtained, max_marks, entered_by_teacher) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})",
-                                    (st_id, sub_id, ex_id, val, global_max_marks, teacher_id),
-                                )
-                        except ValueError:
-                            pass
+                    m1 = _parse_flt(mid1_list, idx)
+                    m2 = _parse_flt(mid2_list, idx)
+                    m3 = _parse_flt(mid3_list, idx)
+                    ext = _parse_flt(ext_list, idx)
+                    tot = _parse_flt(marks_list, idx)
+
+                    # Compute total if individual components provided
+                    if tot is None:
+                        internals = [v for v in [m1, m2, m3] if v is not None]
+                        int_score = max(internals) if internals else 0.0
+                        ext_score = ext if ext is not None else 0.0
+                        if internals or ext is not None:
+                            tot = int_score + ext_score
+
+                    if tot is not None:
+                        val = min(max(0.0, float(tot)), global_max_marks)
+
+                        existing_mark = db.execute(
+                            f"SELECT id FROM marks WHERE student_id = {placeholder} AND subject_id = {placeholder} AND exam_id = {placeholder}",
+                            (st_id, sub_id, ex_id),
+                        ).fetchone()
+
+                        m1_val = m1 if m1 is not None else 0.0
+                        m2_val = m2 if m2 is not None else 0.0
+                        m3_val = m3 if m3 is not None else 0.0
+                        ext_val = ext if ext is not None else 0.0
+
+                        if existing_mark:
+                            db.execute(
+                                f"UPDATE marks SET mid1_marks = {placeholder}, mid2_marks = {placeholder}, mid3_marks = {placeholder}, external_marks = {placeholder}, marks_obtained = {placeholder}, max_marks = {placeholder}, entered_by_teacher = {placeholder}, created_at = CURRENT_TIMESTAMP WHERE id = {placeholder}",
+                                (m1_val, m2_val, m3_val, ext_val, val, global_max_marks, teacher_id, row_get(existing_mark, "id")),
+                            )
+                        else:
+                            db.execute(
+                                f"INSERT INTO marks (student_id, subject_id, exam_id, mid1_marks, mid2_marks, mid3_marks, external_marks, marks_obtained, max_marks, entered_by_teacher) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})",
+                                (st_id, sub_id, ex_id, m1_val, m2_val, m3_val, ext_val, val, global_max_marks, teacher_id),
+                            )
                 db.commit()
-                flash("Student examination marks saved successfully.", "success")
+                flash("University examination marks saved successfully.", "success")
 
         students = []
         if selected_subject_id and selected_exam_id:
@@ -7980,13 +8036,21 @@ def teacher_enter_marks():
             for st in students_raw:
                 st_dict = dict(st)
                 mark_row = db.execute(
-                    f"SELECT marks_obtained, max_marks FROM marks WHERE student_id = {placeholder} AND subject_id = {placeholder} AND exam_id = {placeholder}",
+                    f"SELECT mid1_marks, mid2_marks, mid3_marks, external_marks, marks_obtained, max_marks FROM marks WHERE student_id = {placeholder} AND subject_id = {placeholder} AND exam_id = {placeholder}",
                     (row_get(st, "id"), _coerce_int(selected_subject_id), _coerce_int(selected_exam_id)),
                 ).fetchone()
                 if mark_row:
+                    st_dict["mid1_marks"] = row_get(mark_row, "mid1_marks")
+                    st_dict["mid2_marks"] = row_get(mark_row, "mid2_marks")
+                    st_dict["mid3_marks"] = row_get(mark_row, "mid3_marks")
+                    st_dict["external_marks"] = row_get(mark_row, "external_marks")
                     st_dict["marks_obtained"] = row_get(mark_row, "marks_obtained")
                     st_dict["max_marks"] = row_get(mark_row, "max_marks")
                 else:
+                    st_dict["mid1_marks"] = None
+                    st_dict["mid2_marks"] = None
+                    st_dict["mid3_marks"] = None
+                    st_dict["external_marks"] = None
                     st_dict["marks_obtained"] = None
                     st_dict["max_marks"] = 100
                 students.append(st_dict)
@@ -8050,41 +8114,77 @@ def student_results():
         st_id = row_get(student, "id")
         b_id = row_get(student, "branch_id")
 
-        exams = db.execute(
-            f"SELECT e.*, b.name AS branch_name FROM exams e JOIN branches b ON e.branch_id = b.id WHERE e.branch_id = {placeholder} ORDER BY e.id DESC",
-            (b_id,),
+        mark_rows = db.execute(
+            f"SELECT m.*, s.name AS subject_name, e.exam_name, e.exam_type, e.academic_year, e.semester "
+            f"FROM marks m JOIN subjects s ON m.subject_id = s.id JOIN exams e ON m.exam_id = e.id "
+            f"WHERE m.student_id = {placeholder} ORDER BY e.semester ASC, s.name ASC",
+            (st_id,),
         ).fetchall()
-        if not exams:
-            exams = db.execute("SELECT e.*, b.name AS branch_name FROM exams e JOIN branches b ON e.branch_id = b.id ORDER BY e.id DESC").fetchall()
 
-        selected_exam_id = request.args.get("exam_id") or ""
+        # Initialize Semester breakdown for Semesters 1 to 8
+        semesters_data = {}
+        for sem_num in range(1, 9):
+            sem_key = f"Semester {sem_num}"
+            semesters_data[sem_key] = {
+                "name": sem_key,
+                "num": sem_num,
+                "subjects": [],
+                "total_obtained": 0.0,
+                "total_max": 0.0,
+                "gp_sum": 0.0,
+                "sgpa": 0.0,
+                "pct": 0.0,
+                "status": "N/A",
+                "has_results": False,
+            }
 
-        query = f"SELECT m.*, s.name AS subject_name, e.exam_name, e.academic_year, e.semester FROM marks m JOIN subjects s ON m.subject_id = s.id JOIN exams e ON m.exam_id = e.id WHERE m.student_id = {placeholder} "
-        params = [st_id]
-        if selected_exam_id:
-            query += f"AND m.exam_id = {placeholder} "
-            params.append(_coerce_int(selected_exam_id))
-        query += "ORDER BY e.id DESC, s.name ASC"
-
-        mark_rows = db.execute(query, tuple(params)).fetchall()
-
-        results = []
-        total_obtained = 0.0
-        total_max = 0.0
-        gp_sum = 0.0
+        total_cgpa_gp = 0.0
+        total_cgpa_count = 0
 
         for mr in mark_rows:
+            sem_raw = str(row_get(mr, "semester") or "1").strip()
+            if sem_raw.isdigit():
+                sem_key = f"Semester {sem_raw}"
+            elif not sem_raw.startswith("Semester"):
+                sem_key = f"Semester {sem_raw}"
+            else:
+                sem_key = sem_raw
+
+            if sem_key not in semesters_data:
+                semesters_data[sem_key] = {
+                    "name": sem_key,
+                    "num": 1,
+                    "subjects": [],
+                    "total_obtained": 0.0,
+                    "total_max": 0.0,
+                    "gp_sum": 0.0,
+                    "sgpa": 0.0,
+                    "pct": 0.0,
+                    "status": "N/A",
+                    "has_results": False,
+                }
+
             m_obt = float(row_get(mr, "marks_obtained") or 0)
             m_max = float(row_get(mr, "max_marks") or 100)
             g_info = calculate_grade(m_obt, m_max)
 
-            total_obtained += m_obt
-            total_max += m_max
-            gp_sum += g_info["gp"]
+            sem_dict = semesters_data[sem_key]
+            sem_dict["has_results"] = True
+            sem_dict["total_obtained"] += m_obt
+            sem_dict["total_max"] += m_max
+            sem_dict["gp_sum"] += g_info["gp"]
 
-            results.append({
+            total_cgpa_gp += g_info["gp"]
+            total_cgpa_count += 1
+
+            sem_dict["subjects"].append({
                 "exam_name": row_get(mr, "exam_name"),
+                "exam_type": row_get(mr, "exam_type"),
                 "subject_name": row_get(mr, "subject_name"),
+                "mid1_marks": row_get(mr, "mid1_marks"),
+                "mid2_marks": row_get(mr, "mid2_marks"),
+                "mid3_marks": row_get(mr, "mid3_marks"),
+                "external_marks": row_get(mr, "external_marks"),
                 "marks_obtained": m_obt,
                 "max_marks": m_max,
                 "pct": g_info["pct"],
@@ -8092,10 +8192,17 @@ def student_results():
                 "status": g_info["status"],
             })
 
-        count = len(results)
-        overall_pct = round((total_obtained / total_max * 100.0), 1) if total_max > 0 else 0.0
-        sgpa = round((gp_sum / count), 2) if count > 0 else 0.0
-        pass_status = "Pass" if count > 0 and all(r["status"] == "Pass" for r in results) else ("Pass" if count > 0 else "N/A")
+        # Calculate SGPA per semester
+        active_semesters_count = 0
+        for sem_key, s_data in semesters_data.items():
+            cnt = len(s_data["subjects"])
+            if cnt > 0:
+                active_semesters_count += 1
+                s_data["pct"] = round((s_data["total_obtained"] / s_data["total_max"] * 100.0), 1) if s_data["total_max"] > 0 else 0.0
+                s_data["sgpa"] = round((s_data["gp_sum"] / cnt), 2)
+                s_data["status"] = "Pass" if all(sub["status"] == "Pass" for sub in s_data["subjects"]) else "Fail"
+
+        cgpa = round((total_cgpa_gp / total_cgpa_count), 2) if total_cgpa_count > 0 else 0.0
 
         # Attendance calculation
         att_rows = db.execute(
@@ -8106,12 +8213,14 @@ def student_results():
         att_present = len([r for r in att_rows if row_get(r, "status") == "Present"])
         attendance_pct = round((att_present / att_total * 100.0), 1) if att_total > 0 else 0.0
 
+        overall_pct = round((sum(s["total_obtained"] for s in semesters_data.values()) / sum(s["total_max"] for s in semesters_data.values()) * 100.0), 1) if sum(s["total_max"] for s in semesters_data.values()) > 0 else 0.0
+
         # Performance correlation classification
-        if attendance_pct >= 85 and overall_pct >= 80:
+        if attendance_pct >= 85 and (cgpa >= 8.0 or overall_pct >= 80):
             performance_rating = "Excellent"
-        elif attendance_pct >= 75 and overall_pct >= 65:
+        elif attendance_pct >= 75 and (cgpa >= 6.5 or overall_pct >= 65):
             performance_rating = "Good"
-        elif attendance_pct >= 65 and overall_pct >= 50:
+        elif attendance_pct >= 65 and (cgpa >= 5.0 or overall_pct >= 50):
             performance_rating = "Average"
         else:
             performance_rating = "Needs Improvement"
@@ -8119,14 +8228,9 @@ def student_results():
         return render_template(
             "student_results.html",
             student=student,
-            exams=exams,
-            results=results,
-            selected_exam_id=selected_exam_id,
-            total_obtained=total_obtained,
-            total_max=total_max,
+            semesters_data=semesters_data,
+            cgpa=cgpa,
             overall_pct=overall_pct,
-            sgpa=sgpa,
-            pass_status=pass_status,
             attendance_pct=attendance_pct,
             performance_rating=performance_rating,
         )
@@ -8162,7 +8266,7 @@ def admin_results():
 
         query = (
             f"SELECT m.*, st.name AS student_name, st.enrollment, s.name AS subject_name, "
-            f"e.exam_name, e.semester, b.name AS branch_name "
+            f"e.exam_name, e.exam_type, e.semester, b.name AS branch_name "
             f"FROM marks m "
             f"JOIN students st ON m.student_id = st.id "
             f"JOIN subjects s ON m.subject_id = s.id "
@@ -8182,8 +8286,9 @@ def admin_results():
             query += f"AND m.subject_id = {placeholder} "
             params.append(_coerce_int(selected_subject_id))
         if selected_semester:
+            sem_str = selected_semester if selected_semester.startswith("Semester") else f"Semester {selected_semester}"
             query += f"AND e.semester = {placeholder} "
-            params.append(selected_semester)
+            params.append(sem_str)
 
         query += "ORDER BY e.id DESC, st.enrollment ASC"
 
@@ -8207,7 +8312,12 @@ def admin_results():
                 "student_name": row_get(mr, "student_name"),
                 "branch_name": row_get(mr, "branch_name"),
                 "exam_name": row_get(mr, "exam_name"),
+                "exam_type": row_get(mr, "exam_type"),
                 "subject_name": row_get(mr, "subject_name"),
+                "mid1_marks": row_get(mr, "mid1_marks"),
+                "mid2_marks": row_get(mr, "mid2_marks"),
+                "mid3_marks": row_get(mr, "mid3_marks"),
+                "external_marks": row_get(mr, "external_marks"),
                 "marks_obtained": m_obt,
                 "max_marks": m_max,
                 "pct": g_info["pct"],
