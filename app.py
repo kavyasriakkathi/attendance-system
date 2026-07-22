@@ -1147,14 +1147,20 @@ def _ensure_teacher_schema(db):
         ("teacher1",),
     ).fetchone()
     if not teacher:
-        db.execute(
-            f"INSERT INTO teachers (name, username, password, subject_id, branch_id, subject_name) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})",
-            ("Teacher One", "teacher1", generate_password_hash("1234"), None, None, ""),
-        )
         try:
-            db.commit()
+            db.execute(
+                f"INSERT INTO teachers (name, username, password, subject_id, branch_id, subject_name) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})",
+                ("Teacher One", "teacher1", generate_password_hash("1234"), 1, 1, ""),
+            )
+            try:
+                db.commit()
+            except Exception:
+                pass
         except Exception:
-            pass
+            try:
+                db.rollback()
+            except Exception:
+                pass
 
 
 def _ensure_teacher_support_schema(db):
@@ -2816,55 +2822,76 @@ def manage_teachers():
                     if existing:
                         flash("A teacher with that username already exists.", "error")
                     else:
-                        if str(app.config.get("DATABASE", "")).startswith("postgres"):
-                            cur = db.execute(
-                                f"INSERT INTO teachers (name, username, password, password_hash, email, phone, status) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}) RETURNING id",
-                                (name, username, generate_password_hash(password), generate_password_hash(password), email, phone, status),
-                            )
-                            new_teacher_id = row_get(cur.fetchone(), "id")
-                        else:
-                            cur = db.execute(
-                                f"INSERT INTO teachers (name, username, password, password_hash, email, phone, status) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})",
-                                (name, username, generate_password_hash(password), generate_password_hash(password), email, phone, status),
-                            )
-                            new_teacher_id = cur.lastrowid
-                            
-                        db.execute(
-                            f"INSERT INTO users (username, password, role) VALUES ({placeholder}, {placeholder}, {placeholder})",
-                            (username, generate_password_hash(password), "teacher"),
-                        )
-                        
-                        # Process dynamic assignment rows
                         assign_subjects = request.form.getlist("assign_subject_id[]") or request.form.getlist("subject_ids") or request.form.getlist("subject_ids[]")
                         assign_branches = request.form.getlist("assign_branch_id[]") or request.form.getlist("branch_ids") or request.form.getlist("branch_ids[]")
                         assign_sections = request.form.getlist("assign_section[]") or request.form.getlist("sections") or request.form.getlist("sections[]")
                         assign_semesters = request.form.getlist("assign_semester[]") or request.form.getlist("semesters") or request.form.getlist("semesters[]")
-                        for i in range(len(assign_subjects)):
-                            s_id = assign_subjects[i]
-                            b_id = assign_branches[i] if i < len(assign_branches) else ""
-                            sec = assign_sections[i] if i < len(assign_sections) else ""
-                            sem = assign_semesters[i] if i < len(assign_semesters) else ""
-                            if s_id and b_id:
-                                db.execute(
-                                    f"INSERT INTO teacher_subject_assignments (teacher_id, subject_id, branch_id, section, semester) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})",
-                                    (int(new_teacher_id), int(s_id), int(b_id), sec, sem)
+
+                        first_b_id = int(assign_branches[0]) if (assign_branches and str(assign_branches[0]).isdigit()) else 1
+                        first_s_id = int(assign_subjects[0]) if (assign_subjects and str(assign_subjects[0]).isdigit()) else 1
+
+                        try:
+                            pwd_hash = generate_password_hash(password)
+                            if str(app.config.get("DATABASE", "")).startswith("postgres"):
+                                cur = db.execute(
+                                    f"INSERT INTO teachers (name, username, password, password_hash, email, phone, status, branch_id, subject_id) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}) RETURNING id",
+                                    (name, username, pwd_hash, pwd_hash, email, phone, status, first_b_id, first_s_id),
                                 )
-                                # Legacy table populating for test/backward compatibility
-                                try:
-                                    existing_ts = db.execute(f"SELECT id FROM teacher_subjects WHERE teacher_id = {placeholder} AND subject_id = {placeholder}", (int(new_teacher_id), int(s_id))).fetchone()
-                                    if not existing_ts:
-                                        db.execute(f"INSERT INTO teacher_subjects (teacher_id, subject_id) VALUES ({placeholder}, {placeholder})", (int(new_teacher_id), int(s_id)))
-                                except Exception:
-                                    pass
-                                try:
-                                    existing_tb = db.execute(f"SELECT id FROM teacher_branches WHERE teacher_id = {placeholder} AND branch_id = {placeholder}", (int(new_teacher_id), int(b_id))).fetchone()
-                                    if not existing_tb:
-                                        db.execute(f"INSERT INTO teacher_branches (teacher_id, branch_id) VALUES ({placeholder}, {placeholder})", (int(new_teacher_id), int(b_id)))
-                                except Exception:
-                                    pass
-                        
-                        db.commit()
-                        flash("Teacher created.", "success")
+                                new_teacher_id = row_get(cur.fetchone(), "id")
+                            else:
+                                cur = db.execute(
+                                    f"INSERT INTO teachers (name, username, password, password_hash, email, phone, status, branch_id, subject_id) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})",
+                                    (name, username, pwd_hash, pwd_hash, email, phone, status, first_b_id, first_s_id),
+                                )
+                                new_teacher_id = cur.lastrowid
+                                
+                            # Synchronize account into users table for authentication
+                            existing_user = db.execute(f"SELECT id FROM users WHERE username = {placeholder}", (username,)).fetchone()
+                            if not existing_user:
+                                db.execute(
+                                    f"INSERT INTO users (username, password, role) VALUES ({placeholder}, {placeholder}, {placeholder})",
+                                    (username, pwd_hash, "teacher"),
+                                )
+                            else:
+                                db.execute(
+                                    f"UPDATE users SET password = {placeholder}, role = 'teacher' WHERE username = {placeholder}",
+                                    (pwd_hash, username),
+                                )
+                            
+                            # Process dynamic assignment rows
+                            for i in range(len(assign_subjects)):
+                                s_id = assign_subjects[i]
+                                b_id = assign_branches[i] if i < len(assign_branches) else ""
+                                sec = assign_sections[i] if i < len(assign_sections) else ""
+                                sem = assign_semesters[i] if i < len(assign_semesters) else ""
+                                if s_id and b_id:
+                                    db.execute(
+                                        f"INSERT INTO teacher_subject_assignments (teacher_id, subject_id, branch_id, section, semester) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})",
+                                        (int(new_teacher_id), int(s_id), int(b_id), sec, sem)
+                                    )
+                                    try:
+                                        existing_ts = db.execute(f"SELECT id FROM teacher_subjects WHERE teacher_id = {placeholder} AND subject_id = {placeholder}", (int(new_teacher_id), int(s_id))).fetchone()
+                                        if not existing_ts:
+                                            db.execute(f"INSERT INTO teacher_subjects (teacher_id, subject_id) VALUES ({placeholder}, {placeholder})", (int(new_teacher_id), int(s_id)))
+                                    except Exception:
+                                        pass
+                                    try:
+                                        existing_tb = db.execute(f"SELECT id FROM teacher_branches WHERE teacher_id = {placeholder} AND branch_id = {placeholder}", (int(new_teacher_id), int(b_id))).fetchone()
+                                        if not existing_tb:
+                                            db.execute(f"INSERT INTO teacher_branches (teacher_id, branch_id) VALUES ({placeholder}, {placeholder})", (int(new_teacher_id), int(b_id)))
+                                    except Exception:
+                                        pass
+                            
+                            db.commit()
+                            flash("Teacher created successfully.", "success")
+                        except Exception as ex:
+                            try:
+                                db.rollback()
+                            except Exception:
+                                pass
+                            print(f"[manage_teachers ADD ERROR] {repr(ex)}")
+                            traceback.print_exc()
+                            flash("Failed to create teacher due to database error.", "error")
 
             elif action == "edit" and teacher_id.isdigit():
                 name = (request.form.get("name") or "").strip()
