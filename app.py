@@ -51,6 +51,9 @@ def _safe_url_build_error_handler(error, endpoint, values):
     return "#"
 
 
+app.url_build_error_handlers.append(_safe_url_build_error_handler)
+
+
 # TIMETABLE MODULE SAFE IMPORT: attempt to import now and log detailed errors.
 _timetable = None
 # Preserve the original import error for diagnostics
@@ -3988,60 +3991,69 @@ def repair_student_logins():
 
 @app.route("/teacher_login", methods=["GET", "POST"])
 def teacher_login():
-    if request.method == "POST":
-        username = (request.form.get("username", "") or "").strip()
-        password = (request.form.get("password", "") or "").strip()
+    try:
+        if request.method == "POST":
+            username = (request.form.get("username", "") or "").strip()
+            password = (request.form.get("password", "") or "").strip()
 
-        if not username or not password:
-            flash("Please enter username and password.", "error")
-            return render_template("teacher_login.html")
+            if not username or not password:
+                flash("Please enter username and password.", "error")
+                return render_template("teacher_login.html", hide_nav=True)
 
-        db = None
-        try:
-            db = get_db()
-            placeholder = get_placeholder()
-            user = db.execute(
-                f"SELECT id, username, password, role FROM users WHERE username = {placeholder}",
-                (username,),
-            ).fetchone()
+            db = None
+            try:
+                db = get_db()
+                placeholder = get_placeholder()
+                user = db.execute(
+                    f"SELECT id, username, password, role FROM users WHERE username = {placeholder}",
+                    (username,),
+                ).fetchone()
 
-            if user and row_get(user, "role") == "teacher" and check_password_hash(row_get(user, "password"), password):
-                # Initialize teacher session fields for downstream routes/templates
-                session.clear()
-                user_id = row_get(user, "id")
-                session["user_id"] = user_id
-                session["username"] = row_get(user, "username")
-                session["role"] = row_get(user, "role")
-                # Try to populate teacher-specific session values from teachers table using username
-                try:
-                    assigned = db.execute(f"SELECT id, name FROM teachers WHERE username = {placeholder}", (row_get(user, "username"),)).fetchone()
-                    if assigned:
-                        session["teacher_id"] = row_get(assigned, "id")
-                        session["teacher_name"] = row_get(assigned, "name")
-                    else:
+                if user and row_get(user, "role") == "teacher" and check_password_hash(row_get(user, "password"), password):
+                    # Initialize teacher session fields for downstream routes/templates
+                    session.clear()
+                    user_id = row_get(user, "id")
+                    session["user_id"] = user_id
+                    session["username"] = row_get(user, "username")
+                    session["role"] = row_get(user, "role")
+                    # Try to populate teacher-specific session values from teachers table using username
+                    try:
+                        assigned = db.execute(f"SELECT id, name FROM teachers WHERE username = {placeholder}", (row_get(user, "username"),)).fetchone()
+                        if assigned:
+                            session["teacher_id"] = row_get(assigned, "id")
+                            session["teacher_name"] = row_get(assigned, "name")
+                        else:
+                            session["teacher_id"] = user_id
+                            session["teacher_name"] = session.get("username")
+                    except Exception as ex:
+                        print(f"[teacher_login] failed resolving teacher context: {ex}")
                         session["teacher_id"] = user_id
                         session["teacher_name"] = session.get("username")
-                except Exception as ex:
-                    print(f"[teacher_login] failed resolving teacher context: {ex}")
-                    session["teacher_id"] = user_id
-                    session["teacher_name"] = session.get("username")
-                session.permanent = True
-                return redirect(url_for("teacher_dashboard"))
+                    session.permanent = True
+                    return redirect(url_for("teacher_dashboard"))
 
-            flash("Invalid teacher login credentials.", "error")
+                flash("Invalid teacher login credentials.", "error")
 
-        except Exception as e:
-            print(f"[teacher_login] ERROR: {repr(e)}")
-            print(traceback.format_exc())
-            flash("Teacher login is temporarily unavailable (database error).", "error")
-        finally:
-            try:
-                if db is not None:
-                    db.close()
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[teacher_login] ERROR: {repr(e)}")
+                print(traceback.format_exc())
+                flash("Teacher login is temporarily unavailable (database error).", "error")
+            finally:
+                try:
+                    if db is not None:
+                        db.close()
+                except Exception:
+                    pass
 
-    return render_template("teacher_login.html", hide_nav=True)
+        return render_template("teacher_login.html", hide_nav=True)
+    except Exception as e:
+        print(f"[teacher_login GET/RENDER ERROR]: {repr(e)}")
+        print(traceback.format_exc())
+        flash("An error occurred loading the login page.", "error")
+        try:
+            return render_template("teacher_login.html", hide_nav=True)
+        except Exception:
+            return "<h1>Teacher Login</h1><p>Login system is starting up, please refresh.</p>", 200
 
 
 @app.route("/teacher/select-branch", methods=["GET", "POST"])
