@@ -56,6 +56,9 @@
             {% if has_endpoint('admin_workload') %}
             <a class="nav-link" href="{{ url_for('admin_workload') }}"><i class="fa-solid fa-briefcase"></i> Workload</a>
             {% endif %}
+            {% if has_endpoint('admin_promotions') %}
+            <a class="nav-link" href="{{ url_for('admin_promotions') }}"><i class="fa-solid fa-angles-up"></i> Promotions</a>
+            {% endif %}
             <a class="nav-link" href="{{ url_for('settings') }}"><i class="fa-solid fa-gear"></i> Settings</a>
             <a class="logout" href="{{ url_for('logout') }}"><i class="fa-solid fa-right-from-bracket"></i></a>
             {% elif session.role == 'teacher' %}

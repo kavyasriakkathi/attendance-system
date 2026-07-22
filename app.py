@@ -9481,5 +9481,380 @@ def teacher_workload():
             except: pass
 
 
+def _ensure_promotion_schema(db):
+    """Ensure promotion history tables and student promotion columns exist safely."""
+    _ensure_student_profile_schema(db)
+    _ensure_column(db, "students", "promotion_status", "TEXT DEFAULT 'Eligible'")
+    _ensure_column(db, "students", "backlogs_count", "INTEGER DEFAULT 0")
+
+    placeholder = get_placeholder()
+    is_pg = str(app.config.get("DATABASE", "")).startswith("postgres")
+    try:
+        if is_pg:
+            db.execute("""
+            CREATE TABLE IF NOT EXISTS student_promotion_history (
+                id SERIAL PRIMARY KEY,
+                student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+                from_semester TEXT NOT NULL,
+                to_semester TEXT NOT NULL,
+                from_academic_year TEXT,
+                to_academic_year TEXT,
+                sgpa REAL DEFAULT 0.0,
+                cgpa REAL DEFAULT 0.0,
+                backlog_count INTEGER DEFAULT 0,
+                promotion_status TEXT NOT NULL,
+                remarks TEXT,
+                promoted_by TEXT DEFAULT 'Admin',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+        else:
+            db.execute("""
+            CREATE TABLE IF NOT EXISTS student_promotion_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                student_id INTEGER NOT NULL,
+                from_semester TEXT NOT NULL,
+                to_semester TEXT NOT NULL,
+                from_academic_year TEXT,
+                to_academic_year TEXT,
+                sgpa REAL DEFAULT 0.0,
+                cgpa REAL DEFAULT 0.0,
+                backlog_count INTEGER DEFAULT 0,
+                promotion_status TEXT NOT NULL,
+                remarks TEXT,
+                promoted_by TEXT DEFAULT 'Admin',
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(student_id) REFERENCES students(id)
+            );
+            """)
+        try:
+            db.commit()
+        except Exception:
+            pass
+    except Exception as e:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        print(f"[_ensure_promotion_schema WARNING]: {repr(e)}")
+
+
+def get_next_semester_name(current_sem):
+    """Calculate next semester name sequentially."""
+    sem_map = {
+        "Semester 1": "Semester 2",
+        "Semester 2": "Semester 3",
+        "Semester 3": "Semester 4",
+        "Semester 4": "Semester 5",
+        "Semester 5": "Semester 6",
+        "Semester 6": "Semester 7",
+        "Semester 7": "Semester 8",
+        "Semester 8": "Graduated",
+    }
+    cur_str = str(current_sem or "Semester 1").strip()
+    if cur_str in sem_map:
+        return sem_map[cur_str]
+
+    if cur_str.isdigit():
+        val = int(cur_str)
+        if val >= 8:
+            return "Graduated"
+        return f"Semester {val + 1}"
+    return "Semester 2"
+
+
+def get_next_academic_year(current_ay, current_sem):
+    """Increment academic year when advancing from even semester (Sem 2, 4, 6, 8)."""
+    cur_ay = str(current_ay or "2025-2026").strip()
+    cur_sem = str(current_sem or "Semester 1").strip()
+
+    if cur_sem in ["Semester 2", "Semester 4", "Semester 6", "Semester 8"]:
+        try:
+            parts = cur_ay.split("-")
+            if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+                y1 = int(parts[0]) + 1
+                y2 = int(parts[1]) + 1
+                return f"{y1}-{y2}"
+        except Exception:
+            pass
+    return cur_ay
+
+
+def evaluate_student_promotion_eligibility(db, student_id):
+    """Evaluate SGPA, backlogs, and promotion eligibility for a student."""
+    placeholder = get_placeholder()
+
+    student = db.execute(
+        f"SELECT s.*, b.name AS branch_name FROM students s LEFT JOIN branches b ON s.branch_id = b.id WHERE s.id = {placeholder}",
+        (student_id,),
+    ).fetchone()
+
+    if not student:
+        return None
+
+    cur_sem = row_get(student, "semester") or "Semester 1"
+    cur_ay = row_get(student, "academic_year") or "2025-2026"
+
+    marks = []
+    try:
+        marks = db.execute(
+            f"SELECT m.* FROM marks m JOIN exams e ON m.exam_id = e.id WHERE m.student_id = {placeholder} AND e.semester = {placeholder}",
+            (student_id, cur_sem),
+        ).fetchall()
+    except Exception:
+        marks = []
+
+    if not marks:
+        try:
+            marks = db.execute(
+                f"SELECT m.* FROM marks m WHERE m.student_id = {placeholder}",
+                (student_id,),
+            ).fetchall()
+        except Exception:
+            marks = []
+
+    total_eval = len(marks)
+    passed_cnt = 0
+    failed_cnt = 0
+    sgpa = 0.0
+
+    if marks:
+        pct_list = []
+        for m in marks:
+            m_obt = row_get(m, "marks_obtained") or 0.0
+            m_max = row_get(m, "max_marks") or 100.0
+            pct = (m_obt / m_max * 100.0) if m_max > 0 else 0.0
+            pct_list.append(pct)
+
+            if pct >= 40.0:
+                passed_cnt += 1
+            else:
+                failed_cnt += 1
+
+        avg_pct = sum(pct_list) / len(pct_list) if pct_list else 0.0
+        sgpa = round(avg_pct / 10.0, 2)
+    else:
+        sgpa = 7.5
+        passed_cnt = 0
+        failed_cnt = 0
+
+    next_sem = get_next_semester_name(cur_sem)
+    next_ay = get_next_academic_year(cur_ay, cur_sem)
+
+    if failed_cnt == 0 and sgpa >= 5.0:
+        status = "Promoted"
+        badge = "success"
+        recommendation = "Eligible for direct promotion to next semester."
+    elif 1 <= failed_cnt <= 3:
+        status = "Promoted with Backlogs"
+        badge = "warning"
+        recommendation = "Promoted with backlogs. Student must clear backlogs in supplementary exams."
+    else:
+        status = "Not Eligible"
+        badge = "danger"
+        recommendation = "Excessive backlogs (> 3) or SGPA < 4.0. Repeat semester required."
+
+    return {
+        "student": {
+            "id": student_id,
+            "name": row_get(student, "name"),
+            "enrollment": row_get(student, "enrollment"),
+            "branch_id": row_get(student, "branch_id"),
+            "branch_name": row_get(student, "branch_name") or "Branch",
+            "section": row_get(student, "section") or "A",
+            "semester": cur_sem,
+            "academic_year": cur_ay,
+            "status": row_get(student, "status") or "Active",
+        },
+        "sgpa": sgpa,
+        "total_evaluated": total_eval,
+        "passed_count": passed_cnt,
+        "backlogs_count": failed_cnt,
+        "next_semester": next_sem,
+        "next_academic_year": next_ay,
+        "status": status,
+        "badge": badge,
+        "recommendation": recommendation,
+    }
+
+
+def promote_single_student(db, student_id, target_semester=None, target_academic_year=None, remarks=None, promoted_by="Admin"):
+    """Execute promotion for a student, updating semester, year, and logging history."""
+    _ensure_promotion_schema(db)
+    placeholder = get_placeholder()
+
+    eval_data = evaluate_student_promotion_eligibility(db, student_id)
+    if not eval_data:
+        return False, "Student record not found."
+
+    student = eval_data["student"]
+    from_sem = student["semester"]
+    from_ay = student["academic_year"]
+
+    to_sem = target_semester or eval_data["next_semester"]
+    to_ay = target_academic_year or eval_data["next_academic_year"]
+    status = eval_data["status"]
+    sgpa = eval_data["sgpa"]
+    backlogs = eval_data["backlogs_count"]
+
+    stud_status = "Graduated" if to_sem == "Graduated" else "Active"
+    db.execute(
+        f"UPDATE students SET semester = {placeholder}, academic_year = {placeholder}, promotion_status = {placeholder}, backlogs_count = {placeholder}, status = {placeholder} WHERE id = {placeholder}",
+        (to_sem, to_ay, status, backlogs, stud_status, student_id),
+    )
+
+    db.execute(
+        f"INSERT INTO student_promotion_history (student_id, from_semester, to_semester, from_academic_year, to_academic_year, sgpa, backlog_count, promotion_status, remarks, promoted_by) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})",
+        (student_id, from_sem, to_sem, from_ay, to_ay, sgpa, backlogs, status, remarks or f"Promoted from {from_sem} to {to_sem}", promoted_by),
+    )
+
+    try:
+        db.execute(
+            f"INSERT INTO student_academic_history (student_id, semester, sgpa, total_subjects, passed_subjects, failed_subjects, promotion_status) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})",
+            (student_id, from_sem, sgpa, eval_data["total_evaluated"], eval_data["passed_count"], backlogs, status),
+        )
+    except Exception:
+        pass
+
+    try:
+        db.commit()
+    except Exception:
+        pass
+
+    return True, f"Successfully promoted {student['name']} ({student['enrollment']}) from {from_sem} to {to_sem}!"
+
+
+@app.route("/admin/promotions", methods=["GET", "POST"])
+@app.route("/admin_promotions", methods=["GET", "POST"])
+def admin_promotions():
+    if session.get("role") != "admin":
+        flash("Admin login required.", "error")
+        return redirect(url_for("login"))
+
+    db = None
+    try:
+        db = get_db()
+        placeholder = get_placeholder()
+        _ensure_promotion_schema(db)
+
+        if request.method == "POST":
+            action = request.form.get("action") or request.form.get("action_type")
+            single_id = request.form.get("single_promote_id")
+
+            if single_id:
+                ok, msg = promote_single_student(db, int(single_id), promoted_by="Admin")
+                if ok:
+                    flash(msg, "success")
+                else:
+                    flash(msg, "error")
+
+            elif action == "promote_selected":
+                selected_ids = request.form.getlist("student_ids")
+                if not selected_ids:
+                    flash("No students selected for promotion.", "warning")
+                else:
+                    promoted_cnt = 0
+                    for sid in selected_ids:
+                        ok, _ = promote_single_student(db, int(sid), promoted_by="Admin")
+                        if ok:
+                            promoted_cnt += 1
+                    flash(f"Successfully promoted {promoted_cnt} selected student(s) to next semester!", "success")
+
+            elif action == "promote_all_eligible":
+                b_id = request.args.get("branch_id")
+                sem = request.args.get("semester")
+                sec = request.args.get("section")
+
+                sql = "SELECT id FROM students WHERE 1=1"
+                params = []
+                if b_id:
+                    sql += f" AND branch_id = {placeholder}"
+                    params.append(b_id)
+                if sem:
+                    sql += f" AND semester = {placeholder}"
+                    params.append(sem)
+                if sec:
+                    sql += f" AND section = {placeholder}"
+                    params.append(sec)
+
+                all_students = db.execute(sql, params).fetchall()
+                promoted_cnt = 0
+                for s in all_students:
+                    sid = row_get(s, "id")
+                    eval_res = evaluate_student_promotion_eligibility(db, sid)
+                    if eval_res and eval_res["status"] in ["Promoted", "Promoted with Backlogs"]:
+                        ok, _ = promote_single_student(db, sid, promoted_by="Admin Bulk")
+                        if ok:
+                            promoted_cnt += 1
+
+                flash(f"Bulk Promotion Complete! Promoted {promoted_cnt} eligible students to next semester.", "success")
+
+            return redirect(url_for("admin_promotions", **request.args))
+
+        selected_branch_id = request.args.get("branch_id", "")
+        selected_semester = request.args.get("semester", "")
+        selected_section = request.args.get("section", "")
+        selected_academic_year = request.args.get("academic_year", "")
+
+        branches = db.execute("SELECT id, name FROM branches ORDER BY name").fetchall()
+
+        sql = "SELECT id FROM students WHERE 1=1"
+        params = []
+        if selected_branch_id:
+            sql += f" AND branch_id = {placeholder}"
+            params.append(selected_branch_id)
+        if selected_semester:
+            sql += f" AND semester = {placeholder}"
+            params.append(selected_semester)
+        if selected_section:
+            sql += f" AND section = {placeholder}"
+            params.append(selected_section)
+        if selected_academic_year:
+            sql += f" AND academic_year = {placeholder}"
+            params.append(selected_academic_year)
+
+        sql += " ORDER BY enrollment ASC"
+        stud_rows = db.execute(sql, params).fetchall()
+
+        student_list = []
+        direct_eligible_count = 0
+        backlog_eligible_count = 0
+        not_eligible_count = 0
+
+        for r in stud_rows:
+            sid = row_get(r, "id")
+            edata = evaluate_student_promotion_eligibility(db, sid)
+            if edata:
+                student_list.append(edata)
+                if edata["status"] == "Promoted":
+                    direct_eligible_count += 1
+                elif edata["status"] == "Promoted with Backlogs":
+                    backlog_eligible_count += 1
+                else:
+                    not_eligible_count += 1
+
+        return render_template(
+            "admin_promotions.html",
+            branches=branches,
+            student_list=student_list,
+            total_students=len(student_list),
+            direct_eligible_count=direct_eligible_count,
+            backlog_eligible_count=backlog_eligible_count,
+            not_eligible_count=not_eligible_count,
+            selected_branch_id=selected_branch_id,
+            selected_semester=selected_semester,
+            selected_section=selected_section,
+            selected_academic_year=selected_academic_year,
+        )
+    except Exception as e:
+        print(f"[admin_promotions ERROR]: {repr(e)}")
+        flash("Error loading promotion dashboard.", "error")
+        return redirect(url_for("dashboard"))
+    finally:
+        if db:
+            try: db.close()
+            except: pass
+
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)

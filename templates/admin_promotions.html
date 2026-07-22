@@ -1,0 +1,199 @@
+{% extends "layout.html" %}
+
+{% block content %}
+<div class="dashboard-header" style="margin-bottom: 25px;">
+    <div>
+        <h1 style="font-size: 1.8rem; font-weight: 700; color: #1e293b; margin: 0; display: flex; align-items: center; gap: 10px;">
+            <i class="fa-solid fa-graduation-cap" style="color: #4f46e5;"></i> Student Promotion & Academic Year Management
+        </h1>
+        <p style="color: #64748b; margin: 4px 0 0 0; font-size: 0.95rem;">
+            Automatic semester upgrade engine based on SGPA and backlogs, bulk promotion, and promotion history tracking.
+        </p>
+    </div>
+</div>
+
+<!-- Filter Bar -->
+<div class="card" style="background: white; border-radius: 16px; padding: 20px; box-shadow: 0 4px 20px rgba(0,0,0,0.05); border: 1px solid #e2e8f0; margin-bottom: 25px;">
+    <form method="GET" action="{{ url_for('admin_promotions') }}" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; align-items: end;">
+        <div>
+            <label style="display: block; font-size: 0.85rem; font-weight: 700; color: #475569; margin-bottom: 6px;">Branch</label>
+            <select name="branch_id" style="width: 100%; padding: 10px 12px; border-radius: 10px; border: 1px solid #cbd5e1; font-size: 0.95rem;">
+                <option value="">All Branches</option>
+                {% for b in branches %}
+                <option value="{{ b.id }}" {% if selected_branch_id|string == b.id|string %}selected{% endif %}>{{ b.name }}</option>
+                {% endfor %}
+            </select>
+        </div>
+
+        <div>
+            <label style="display: block; font-size: 0.85rem; font-weight: 700; color: #475569; margin-bottom: 6px;">Current Semester</label>
+            <select name="semester" style="width: 100%; padding: 10px 12px; border-radius: 10px; border: 1px solid #cbd5e1; font-size: 0.95rem;">
+                <option value="">All Semesters</option>
+                {% for sem in ['Semester 1', 'Semester 2', 'Semester 3', 'Semester 4', 'Semester 5', 'Semester 6', 'Semester 7', 'Semester 8'] %}
+                <option value="{{ sem }}" {% if selected_semester == sem %}selected{% endif %}>{{ sem }}</option>
+                {% endfor %}
+            </select>
+        </div>
+
+        <div>
+            <label style="display: block; font-size: 0.85rem; font-weight: 700; color: #475569; margin-bottom: 6px;">Section</label>
+            <select name="section" style="width: 100%; padding: 10px 12px; border-radius: 10px; border: 1px solid #cbd5e1; font-size: 0.95rem;">
+                <option value="">All Sections</option>
+                {% for sec in ['CSM-A', 'CSM-B', 'CSW-A', 'CSW-B', 'A', 'B', 'C'] %}
+                <option value="{{ sec }}" {% if selected_section == sec %}selected{% endif %}>{{ sec }}</option>
+                {% endfor %}
+            </select>
+        </div>
+
+        <div>
+            <label style="display: block; font-size: 0.85rem; font-weight: 700; color: #475569; margin-bottom: 6px;">Academic Year</label>
+            <select name="academic_year" style="width: 100%; padding: 10px 12px; border-radius: 10px; border: 1px solid #cbd5e1; font-size: 0.95rem;">
+                <option value="">All Years</option>
+                {% for ay in ['2024-2025', '2025-2026', '2026-2027'] %}
+                <option value="{{ ay }}" {% if selected_academic_year == ay %}selected{% endif %}>{{ ay }}</option>
+                {% endfor %}
+            </select>
+        </div>
+
+        <div>
+            <button type="submit" style="width: 100%; padding: 10px 16px; background: #4f46e5; color: white; border: none; border-radius: 10px; font-weight: 700; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 8px;">
+                <i class="fa-solid fa-filter"></i> Filter Students
+            </button>
+        </div>
+    </form>
+</div>
+
+<!-- Promotion Summary Metrics -->
+<div class="metrics-grid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 16px; margin-bottom: 25px;">
+    <div class="metric-card" style="background: white; border: 1px solid #e2e8f0; padding: 20px; border-radius: 14px; box-shadow: 0 4px 15px rgba(0,0,0,0.03);">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+            <div style="font-size: 0.8rem; font-weight: 700; color: #64748b; text-transform: uppercase;">Total Students</div>
+            <i class="fa-solid fa-users" style="color: #4f46e5; font-size: 1.2rem;"></i>
+        </div>
+        <div style="font-size: 1.9rem; font-weight: 800; color: #0f172a; margin-top: 6px;">{{ total_students }}</div>
+        <div style="font-size: 0.8rem; color: #64748b; margin-top: 4px;">In current filter view</div>
+    </div>
+
+    <div class="metric-card" style="background: white; border: 1px solid #e2e8f0; padding: 20px; border-radius: 14px; box-shadow: 0 4px 15px rgba(0,0,0,0.03);">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+            <div style="font-size: 0.8rem; font-weight: 700; color: #64748b; text-transform: uppercase;">Eligible (Direct)</div>
+            <i class="fa-solid fa-circle-check" style="color: #10b981; font-size: 1.2rem;"></i>
+        </div>
+        <div style="font-size: 1.9rem; font-weight: 800; color: #166534; margin-top: 6px;">{{ direct_eligible_count }}</div>
+        <div style="font-size: 0.8rem; color: #64748b; margin-top: 4px;">0 Backlogs & SGPA ≥ 5.0</div>
+    </div>
+
+    <div class="metric-card" style="background: white; border: 1px solid #e2e8f0; padding: 20px; border-radius: 14px; box-shadow: 0 4px 15px rgba(0,0,0,0.03);">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+            <div style="font-size: 0.8rem; font-weight: 700; color: #64748b; text-transform: uppercase;">Promoted w/ Backlogs</div>
+            <i class="fa-solid fa-triangle-exclamation" style="color: #f59e0b; font-size: 1.2rem;"></i>
+        </div>
+        <div style="font-size: 1.9rem; font-weight: 800; color: #d97706; margin-top: 6px;">{{ backlog_eligible_count }}</div>
+        <div style="font-size: 0.8rem; color: #64748b; margin-top: 4px;">1 to 3 Backlogs</div>
+    </div>
+
+    <div class="metric-card" style="background: white; border: 1px solid #e2e8f0; padding: 20px; border-radius: 14px; box-shadow: 0 4px 15px rgba(0,0,0,0.03);">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+            <div style="font-size: 0.8rem; font-weight: 700; color: #64748b; text-transform: uppercase;">Not Eligible / Detained</div>
+            <i class="fa-solid fa-ban" style="color: #ef4444; font-size: 1.2rem;"></i>
+        </div>
+        <div style="font-size: 1.9rem; font-weight: 800; color: #dc2626; margin-top: 6px;">{{ not_eligible_count }}</div>
+        <div style="font-size: 0.8rem; color: #64748b; margin-top: 4px;">> 3 Backlogs or low SGPA</div>
+    </div>
+</div>
+
+<!-- Bulk Promotion Action Form & Table -->
+<form method="POST" action="{{ url_for('admin_promotions') }}" id="promotionForm">
+    <div class="card" style="background: white; border-radius: 16px; padding: 24px; box-shadow: 0 4px 20px rgba(0,0,0,0.05); border: 1px solid #e2e8f0;">
+        <div style="display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 16px; margin-bottom: 20px;">
+            <h2 style="font-size: 1.25rem; font-weight: 800; color: #0f172a; margin: 0;">
+                Student Promotion Matrix
+            </h2>
+            <div style="display: flex; gap: 12px; flex-wrap: wrap;">
+                <button type="submit" name="action" value="promote_selected" class="btn" style="background: #0284c7; color: white; padding: 10px 18px; border-radius: 10px; font-weight: 700; border: none; cursor: pointer; display: flex; align-items: center; gap: 6px;">
+                    <i class="fa-solid fa-user-check"></i> Promote Selected
+                </button>
+                <button type="submit" name="action" value="promote_all_eligible" onclick="return confirm('Are you sure you want to promote ALL eligible students in this class/filter to the next semester?');" class="btn" style="background: #10b981; color: white; padding: 10px 18px; border-radius: 10px; font-weight: 700; border: none; cursor: pointer; display: flex; align-items: center; gap: 6px;">
+                    <i class="fa-solid fa-angles-up"></i> Promote All Eligible
+                </button>
+            </div>
+        </div>
+
+        <div class="table-responsive">
+            <table style="width: 100%; border-collapse: separate; border-spacing: 0; font-size: 0.95rem;">
+                <thead>
+                    <tr style="background: #f8fafc; color: #475569; text-align: left;">
+                        <th style="padding: 12px 16px; border-bottom: 2px solid #e2e8f0; width: 40px;">
+                            <input type="checkbox" id="selectAll" onclick="toggleSelectAll(this)" style="width: 18px; height: 18px; cursor: pointer;">
+                        </th>
+                        <th style="padding: 12px 16px; border-bottom: 2px solid #e2e8f0;">Student Name & Roll No</th>
+                        <th style="padding: 12px 16px; border-bottom: 2px solid #e2e8f0;">Branch & Section</th>
+                        <th style="padding: 12px 16px; border-bottom: 2px solid #e2e8f0; text-align: center;">Current Semester</th>
+                        <th style="padding: 12px 16px; border-bottom: 2px solid #e2e8f0; text-align: center;">SGPA</th>
+                        <th style="padding: 12px 16px; border-bottom: 2px solid #e2e8f0; text-align: center;">Backlogs</th>
+                        <th style="padding: 12px 16px; border-bottom: 2px solid #e2e8f0; text-align: center;">Target Semester</th>
+                        <th style="padding: 12px 16px; border-bottom: 2px solid #e2e8f0; text-align: center;">Eligibility Status</th>
+                        <th style="padding: 12px 16px; border-bottom: 2px solid #e2e8f0; text-align: center;">Action</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for item in student_list %}
+                    <tr style="border-bottom: 1px solid #f1f5f9;">
+                        <td style="padding: 14px 16px;">
+                            <input type="checkbox" name="student_ids" value="{{ item.student.id }}" class="student-checkbox" style="width: 18px; height: 18px; cursor: pointer;">
+                        </td>
+                        <td style="padding: 14px 16px;">
+                            <div style="font-weight: 800; color: #0f172a;">{{ item.student.name }}</div>
+                            <div style="font-size: 0.8rem; color: #64748b;">{{ item.student.enrollment }}</div>
+                        </td>
+                        <td style="padding: 14px 16px; color: #475569;">
+                            {{ item.student.branch_name }} <span style="font-size: 0.8rem; color: #64748b;">({{ item.student.section }})</span>
+                        </td>
+                        <td style="padding: 14px 16px; text-align: center; font-weight: 700; color: #475569;">
+                            {{ item.student.semester }}
+                        </td>
+                        <td style="padding: 14px 16px; text-align: center; font-weight: 800; color: #4f46e5;">
+                            {{ item.sgpa }}
+                        </td>
+                        <td style="padding: 14px 16px; text-align: center;">
+                            {% if item.backlogs_count == 0 %}
+                            <span style="color: #166534; font-weight: 700; font-size: 0.85rem;">0 Backlogs</span>
+                            {% else %}
+                            <span style="color: #dc2626; font-weight: 800; font-size: 0.85rem;">{{ item.backlogs_count }} Failed</span>
+                            {% endif %}
+                        </td>
+                        <td style="padding: 14px 16px; text-align: center; font-weight: 800; color: #0284c7;">
+                            {{ item.next_semester }}
+                        </td>
+                        <td style="padding: 14px 16px; text-align: center;">
+                            <span style="background: {% if item.status == 'Promoted' %}#dcfce7{% elif item.status == 'Promoted with Backlogs' %}#fef3c7{% else %}#fee2e2{% endif %}; color: {% if item.status == 'Promoted' %}#166534{% elif item.status == 'Promoted with Backlogs' %}#92400e{% else %}#991b1b{% endif %}; padding: 4px 10px; border-radius: 8px; font-size: 0.8rem; font-weight: 800;">
+                                {{ item.status|upper }}
+                            </span>
+                        </td>
+                        <td style="padding: 14px 16px; text-align: center;">
+                            <button type="submit" name="single_promote_id" value="{{ item.student.id }}" onclick="document.getElementById('action_type').value='promote_single';" style="background: #4f46e5; color: white; border: none; padding: 6px 12px; border-radius: 8px; font-weight: 700; font-size: 0.8rem; cursor: pointer;">
+                                Promote
+                            </button>
+                        </td>
+                    </tr>
+                    {% else %}
+                    <tr>
+                        <td colspan="9" style="padding: 24px; text-align: center; color: #94a3b8; font-style: italic;">
+                            No student records found matching the selected filter criteria.
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+    <input type="hidden" name="action_type" id="action_type" value="">
+</form>
+
+<script>
+function toggleSelectAll(master) {
+    const checkboxes = document.querySelectorAll('.student-checkbox');
+    checkboxes.forEach(cb => cb.checked = master.checked);
+}
+</script>
+{% endblock %}
