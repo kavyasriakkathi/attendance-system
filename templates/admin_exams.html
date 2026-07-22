@@ -1,0 +1,140 @@
+{% extends "layout.html" %}
+
+{% block content %}
+<div class="dashboard-header" style="margin-bottom: 25px;">
+    <div>
+        <h1 style="font-size: 1.8rem; font-weight: 700; color: #1e293b; margin: 0;">
+            <i class="fa-solid fa-pen-to-square" style="color: #6366f1; margin-right: 8px;"></i> Examination Management
+        </h1>
+        <p style="color: #64748b; margin: 4px 0 0 0; font-size: 0.95rem;">Create and manage internal, semester, and lab examinations.</p>
+    </div>
+</div>
+
+<div class="metrics-grid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; margin-bottom: 25px;">
+    <div class="metric-card" style="background: linear-gradient(135deg, #6366f1 0%, #4f46e5 100%); color: white; padding: 20px; border-radius: 12px; box-shadow: 0 4px 15px rgba(99, 102, 241, 0.2);">
+        <div style="font-size: 0.85rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; opacity: 0.9;">Total Exams Created</div>
+        <div style="font-size: 2.2rem; font-weight: 800; margin-top: 6px;">{{ exams|length }}</div>
+    </div>
+    <div class="metric-card" style="background: linear-gradient(135deg, #0ea5e9 0%, #0284c7 100%); color: white; padding: 20px; border-radius: 12px; box-shadow: 0 4px 15px rgba(14, 165, 233, 0.2);">
+        <div style="font-size: 0.85rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; opacity: 0.9;">Active Branches</div>
+        <div style="font-size: 2.2rem; font-weight: 800; margin-top: 6px;">{{ branches|length }}</div>
+    </div>
+</div>
+
+<div style="display: grid; grid-template-columns: 1fr 2fr; gap: 24px; align-items: start;">
+    <!-- Create Exam Card -->
+    <div class="card" style="background: white; padding: 24px; border-radius: 16px; box-shadow: 0 4px 20px rgba(0,0,0,0.05); border: 1px solid #e2e8f0;">
+        <h2 style="font-size: 1.25rem; font-weight: 700; color: #0f172a; margin-bottom: 18px; display: flex; align-items: center; gap: 8px;">
+            <i class="fa-solid fa-circle-plus" style="color: #4f46e5;"></i> Create New Exam
+        </h2>
+        
+        <form method="POST" action="{{ url_for('admin_exams') }}">
+            <input type="hidden" name="action" value="create">
+            
+            <div style="margin-bottom: 16px;">
+                <label style="display: block; font-size: 0.875rem; font-weight: 600; color: #334155; margin-bottom: 6px;">Exam Type / Name</label>
+                <select name="exam_name" required style="width: 100%; padding: 10px 14px; border-radius: 8px; border: 1px solid #cbd5e1; font-size: 0.95rem; background: #f8fafc;">
+                    <option value="Internal Exam 1">Internal Exam 1</option>
+                    <option value="Internal Exam 2">Internal Exam 2</option>
+                    <option value="Semester End Exam">Semester End Exam</option>
+                    <option value="Lab Exams">Lab Exams</option>
+                </select>
+            </div>
+
+            <div style="margin-bottom: 16px;">
+                <label style="display: block; font-size: 0.875rem; font-weight: 600; color: #334155; margin-bottom: 6px;">Academic Year</label>
+                <input type="text" name="academic_year" placeholder="e.g. 2025-2026" required value="2025-2026" style="width: 100%; padding: 10px 14px; border-radius: 8px; border: 1px solid #cbd5e1; font-size: 0.95rem; background: #f8fafc;">
+            </div>
+
+            <div style="margin-bottom: 16px;">
+                <label style="display: block; font-size: 0.875rem; font-weight: 600; color: #334155; margin-bottom: 6px;">Department / Branch</label>
+                <select name="branch_id" required style="width: 100%; padding: 10px 14px; border-radius: 8px; border: 1px solid #cbd5e1; font-size: 0.95rem; background: #f8fafc;">
+                    {% for b in branches %}
+                    <option value="{{ b.id }}">{{ b.name }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 20px;">
+                <div>
+                    <label style="display: block; font-size: 0.875rem; font-weight: 600; color: #334155; margin-bottom: 6px;">Semester</label>
+                    <select name="semester" required style="width: 100%; padding: 10px 14px; border-radius: 8px; border: 1px solid #cbd5e1; font-size: 0.95rem; background: #f8fafc;">
+                        <option value="1">Semester 1</option>
+                        <option value="2">Semester 2</option>
+                        <option value="3">Semester 3</option>
+                        <option value="4">Semester 4</option>
+                        <option value="5">Semester 5</option>
+                        <option value="6">Semester 6</option>
+                        <option value="7">Semester 7</option>
+                        <option value="8">Semester 8</option>
+                    </select>
+                </div>
+                <div>
+                    <label style="display: block; font-size: 0.875rem; font-weight: 600; color: #334155; margin-bottom: 6px;">Section</label>
+                    <select name="section" required style="width: 100%; padding: 10px 14px; border-radius: 8px; border: 1px solid #cbd5e1; font-size: 0.95rem; background: #f8fafc;">
+                        <option value="A">Section A</option>
+                        <option value="B">Section B</option>
+                        <option value="C">Section C</option>
+                        <option value="D">Section D</option>
+                    </select>
+                </div>
+            </div>
+
+            <button type="submit" style="width: 100%; padding: 12px; background: #4f46e5; color: white; font-weight: 600; border: none; border-radius: 8px; cursor: pointer; transition: background 0.2s;">
+                <i class="fa-solid fa-plus"></i> Create Examination
+            </button>
+        </form>
+    </div>
+
+    <!-- Scheduled Exams List -->
+    <div class="card" style="background: white; padding: 24px; border-radius: 16px; box-shadow: 0 4px 20px rgba(0,0,0,0.05); border: 1px solid #e2e8f0;">
+        <h2 style="font-size: 1.25rem; font-weight: 700; color: #0f172a; margin-bottom: 18px; display: flex; align-items: center; gap: 8px;">
+            <i class="fa-solid fa-list-check" style="color: #0284c7;"></i> Scheduled Examinations
+        </h2>
+
+        {% if exams %}
+        <div style="overflow-x: auto;">
+            <table style="width: 100%; border-collapse: collapse; text-align: left; font-size: 0.9rem;">
+                <thead>
+                    <tr style="background: #f1f5f9; border-bottom: 2px solid #e2e8f0; color: #475569;">
+                        <th style="padding: 12px;">Exam Name</th>
+                        <th style="padding: 12px;">Branch</th>
+                        <th style="padding: 12px;">Sem / Sec</th>
+                        <th style="padding: 12px;">Year</th>
+                        <th style="padding: 12px; text-align: center;">Action</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for exam in exams %}
+                    <tr style="border-bottom: 1px solid #e2e8f0;">
+                        <td style="padding: 12px; font-weight: 600; color: #1e293b;">
+                            <span class="badge" style="background: #e0e7ff; color: #4338ca; padding: 4px 8px; border-radius: 6px; font-size: 0.8rem;">
+                                {{ exam.exam_name }}
+                            </span>
+                        </td>
+                        <td style="padding: 12px; color: #334155;">{{ exam.branch_name }}</td>
+                        <td style="padding: 12px; color: #334155;">Sem {{ exam.semester }} - Sec {{ exam.section }}</td>
+                        <td style="padding: 12px; color: #64748b;">{{ exam.academic_year }}</td>
+                        <td style="padding: 12px; text-align: center;">
+                            <form method="POST" action="{{ url_for('admin_exams') }}" onsubmit="return confirm('Are you sure you want to delete this exam? All associated marks will be removed.');" style="display: inline;">
+                                <input type="hidden" name="action" value="delete">
+                                <input type="hidden" name="exam_id" value="{{ exam.id }}">
+                                <button type="submit" style="background: #fee2e2; color: #dc2626; border: none; padding: 6px 12px; border-radius: 6px; cursor: pointer; font-size: 0.8rem; font-weight: 600;">
+                                    <i class="fa-solid fa-trash-can"></i> Delete
+                                </button>
+                            </form>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% else %}
+        <div style="text-align: center; padding: 40px; color: #94a3b8;">
+            <i class="fa-solid fa-folder-open" style="font-size: 2.5rem; margin-bottom: 10px; color: #cbd5e1;"></i>
+            <p style="margin: 0;">No exams created yet. Use the form on the left to schedule an examination.</p>
+        </div>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}

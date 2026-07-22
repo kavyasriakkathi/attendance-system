@@ -1975,6 +1975,7 @@ def init_db(db=None):
     _ensure_subject_alias_table(db)
     _ensure_timetable_entry_text_columns(db)
     _ensure_attendance_schema(db)
+    _ensure_results_schema(db)
 
     # ✅ Admin check
     admin = db.execute(
@@ -5003,6 +5004,95 @@ def _ensure_attendance_schema(db):
         print("[schema] attendance fallback column initialization skipped")
 
 
+def _ensure_results_schema(db):
+    try:
+        is_pg = str(app.config.get("DATABASE", "")).startswith("postgres")
+        if is_pg:
+            db.execute("""
+            CREATE TABLE IF NOT EXISTS exams (
+                id SERIAL PRIMARY KEY,
+                exam_name TEXT NOT NULL,
+                academic_year TEXT NOT NULL,
+                semester TEXT NOT NULL,
+                branch_id INTEGER NOT NULL REFERENCES branches(id) ON DELETE CASCADE,
+                section TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS marks (
+                id SERIAL PRIMARY KEY,
+                student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+                subject_id INTEGER NOT NULL REFERENCES subjects(id) ON DELETE CASCADE,
+                exam_id INTEGER NOT NULL REFERENCES exams(id) ON DELETE CASCADE,
+                marks_obtained REAL NOT NULL,
+                max_marks REAL NOT NULL DEFAULT 100,
+                entered_by_teacher INTEGER NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(student_id, subject_id, exam_id)
+            );
+            """)
+        else:
+            db.executescript("""
+            CREATE TABLE IF NOT EXISTS exams (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                exam_name TEXT NOT NULL,
+                academic_year TEXT NOT NULL,
+                semester TEXT NOT NULL,
+                branch_id INTEGER NOT NULL,
+                section TEXT NOT NULL,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(branch_id) REFERENCES branches(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS marks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                student_id INTEGER NOT NULL,
+                subject_id INTEGER NOT NULL,
+                exam_id INTEGER NOT NULL,
+                marks_obtained REAL NOT NULL,
+                max_marks REAL NOT NULL DEFAULT 100,
+                entered_by_teacher INTEGER NOT NULL,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(student_id) REFERENCES students(id) ON DELETE CASCADE,
+                FOREIGN KEY(subject_id) REFERENCES subjects(id) ON DELETE CASCADE,
+                FOREIGN KEY(exam_id) REFERENCES exams(id) ON DELETE CASCADE,
+                UNIQUE(student_id, subject_id, exam_id)
+            );
+            """)
+        try:
+            db.commit()
+        except Exception:
+            pass
+    except Exception as e:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        print(f"[_ensure_results_schema ERROR]: {repr(e)}")
+
+
+def calculate_grade(marks_obtained, max_marks=100):
+    try:
+        m = float(marks_obtained)
+        mx = float(max_marks) if max_marks and float(max_marks) > 0 else 100.0
+        pct = round((m / mx) * 100.0, 1)
+    except (ValueError, TypeError, ZeroDivisionError):
+        pct = 0.0
+
+    if pct >= 90:
+        return {"grade": "A+", "gp": 10, "status": "Pass", "pct": pct}
+    elif pct >= 80:
+        return {"grade": "A", "gp": 9, "status": "Pass", "pct": pct}
+    elif pct >= 70:
+        return {"grade": "B", "gp": 8, "status": "Pass", "pct": pct}
+    elif pct >= 60:
+        return {"grade": "C", "gp": 7, "status": "Pass", "pct": pct}
+    elif pct >= 50:
+        return {"grade": "D", "gp": 6, "status": "Pass", "pct": pct}
+    else:
+        return {"grade": "Fail", "gp": 0, "status": "Fail", "pct": pct}
+
+
 def _resolve_attendance_periods(db, branch_id="", subject_id="", selected_date=None, section="", time_override=""):
     selected_date_obj = selected_date or date.today()
     if isinstance(selected_date_obj, str):
@@ -7743,6 +7833,412 @@ def session_mark_attendance_ui(session_id):
     except Exception as e:
         print(f"Error loading marking UI: {e}")
         flash("Internal error loading marking UI.", "error")
+        return redirect(url_for("dashboard"))
+    finally:
+        if db:
+            try: db.close()
+            except: pass
+
+
+# ---------------------------------------------------------------------------
+# RESULTS MANAGEMENT & PERFORMANCE ANALYTICS MODULE
+# ---------------------------------------------------------------------------
+
+@app.route("/admin/exams", methods=["GET", "POST"])
+def admin_exams():
+    if session.get("role") != "admin":
+        flash("Admin login required.", "error")
+        return redirect(url_for("admin_login"))
+    db = None
+    try:
+        db = get_db()
+        placeholder = get_placeholder()
+        _ensure_results_schema(db)
+
+        if request.method == "POST":
+            action = (request.form.get("action") or "").strip()
+            if action == "create":
+                exam_name = (request.form.get("exam_name") or "").strip()
+                academic_year = (request.form.get("academic_year") or "").strip()
+                semester = (request.form.get("semester") or "").strip()
+                branch_id = _coerce_int(request.form.get("branch_id"))
+                section = (request.form.get("section") or "A").strip()
+
+                if not exam_name or not academic_year or not semester or not branch_id:
+                    flash("Exam name, academic year, semester, and branch are required.", "error")
+                else:
+                    db.execute(
+                        f"INSERT INTO exams (exam_name, academic_year, semester, branch_id, section) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})",
+                        (exam_name, academic_year, semester, branch_id, section),
+                    )
+                    db.commit()
+                    flash("Examination created successfully.", "success")
+            elif action == "delete":
+                exam_id = _coerce_int(request.form.get("exam_id"))
+                if exam_id:
+                    db.execute(f"DELETE FROM marks WHERE exam_id = {placeholder}", (exam_id,))
+                    db.execute(f"DELETE FROM exams WHERE id = {placeholder}", (exam_id,))
+                    db.commit()
+                    flash("Examination deleted successfully.", "success")
+
+        branches = db.execute("SELECT id, name FROM branches ORDER BY name").fetchall()
+        exams = db.execute(
+            f"SELECT e.*, b.name AS branch_name FROM exams e JOIN branches b ON e.branch_id = b.id ORDER BY e.id DESC"
+        ).fetchall()
+
+        return render_template("admin_exams.html", branches=branches, exams=exams)
+    except Exception as e:
+        if db:
+            try: db.rollback()
+            except: pass
+        print(f"[admin_exams ERROR]: {repr(e)}")
+        flash("Database error loading exams management.", "error")
+        return redirect(url_for("dashboard"))
+    finally:
+        if db:
+            try: db.close()
+            except: pass
+
+
+@app.route("/teacher/enter-marks", methods=["GET", "POST"])
+def teacher_enter_marks():
+    if session.get("role") != "teacher":
+        flash("Teacher login required.", "error")
+        return redirect(url_for("teacher_login"))
+    db = None
+    try:
+        db = get_db()
+        placeholder = get_placeholder()
+        _ensure_results_schema(db)
+
+        # Retrieve current teacher context
+        teacher_user = session.get("username")
+        teacher_row = db.execute(f"SELECT id FROM users WHERE username = {placeholder}", (teacher_user,)).fetchone()
+        teacher_id = row_get(teacher_row, "id") if teacher_row else 0
+
+        # Subjects list
+        assigned_subjects = db.execute("SELECT id, name FROM subjects ORDER BY name").fetchall()
+
+        branches = db.execute("SELECT id, name FROM branches ORDER BY name").fetchall()
+        exams = db.execute(
+            "SELECT e.*, b.name AS branch_name FROM exams e JOIN branches b ON e.branch_id = b.id ORDER BY e.id DESC"
+        ).fetchall()
+
+        selected_subject_id = request.args.get("subject_id") or request.form.get("subject_id") or ""
+        selected_exam_id = request.args.get("exam_id") or request.form.get("exam_id") or ""
+        selected_branch_id = request.args.get("branch_id") or request.form.get("branch_id") or (str(branches[0]["id"]) if branches else "1")
+        selected_section = request.args.get("section") or request.form.get("section") or "A"
+
+        if request.method == "POST":
+            sub_id = _coerce_int(selected_subject_id)
+            ex_id = _coerce_int(selected_exam_id)
+            global_max_marks = float(request.form.get("max_marks", 100) or 100)
+            student_ids = request.form.getlist("student_id[]")
+            marks_list = request.form.getlist("marks_obtained[]")
+
+            if not sub_id or not ex_id:
+                flash("Subject and Examination are required.", "error")
+            else:
+                for idx, st_id_str in enumerate(student_ids):
+                    st_id = _coerce_int(st_id_str)
+                    raw_val = marks_list[idx] if idx < len(marks_list) else ""
+                    if st_id and raw_val != "":
+                        try:
+                            val = float(raw_val)
+                            if val < 0 or val > global_max_marks:
+                                flash(f"Marks for student ID {st_id} ({val}) exceed maximum allowed ({global_max_marks}).", "error")
+                                continue
+
+                            existing_mark = db.execute(
+                                f"SELECT id FROM marks WHERE student_id = {placeholder} AND subject_id = {placeholder} AND exam_id = {placeholder}",
+                                (st_id, sub_id, ex_id),
+                            ).fetchone()
+
+                            if existing_mark:
+                                db.execute(
+                                    f"UPDATE marks SET marks_obtained = {placeholder}, max_marks = {placeholder}, entered_by_teacher = {placeholder}, created_at = CURRENT_TIMESTAMP WHERE id = {placeholder}",
+                                    (val, global_max_marks, teacher_id, row_get(existing_mark, "id")),
+                                )
+                            else:
+                                db.execute(
+                                    f"INSERT INTO marks (student_id, subject_id, exam_id, marks_obtained, max_marks, entered_by_teacher) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})",
+                                    (st_id, sub_id, ex_id, val, global_max_marks, teacher_id),
+                                )
+                        except ValueError:
+                            pass
+                db.commit()
+                flash("Student examination marks saved successfully.", "success")
+
+        students = []
+        if selected_subject_id and selected_exam_id:
+            b_id = _coerce_int(selected_branch_id)
+            students_raw = db.execute(
+                f"SELECT id, name, enrollment FROM students WHERE branch_id = {placeholder} ORDER BY enrollment, name",
+                (b_id,),
+            ).fetchall()
+
+            for st in students_raw:
+                st_dict = dict(st)
+                mark_row = db.execute(
+                    f"SELECT marks_obtained, max_marks FROM marks WHERE student_id = {placeholder} AND subject_id = {placeholder} AND exam_id = {placeholder}",
+                    (row_get(st, "id"), _coerce_int(selected_subject_id), _coerce_int(selected_exam_id)),
+                ).fetchone()
+                if mark_row:
+                    st_dict["marks_obtained"] = row_get(mark_row, "marks_obtained")
+                    st_dict["max_marks"] = row_get(mark_row, "max_marks")
+                else:
+                    st_dict["marks_obtained"] = None
+                    st_dict["max_marks"] = 100
+                students.append(st_dict)
+
+        return render_template(
+            "teacher_enter_marks.html",
+            assigned_subjects=assigned_subjects,
+            branches=branches,
+            exams=exams,
+            students=students,
+            selected_subject_id=str(selected_subject_id),
+            selected_exam_id=str(selected_exam_id),
+            selected_branch_id=str(selected_branch_id),
+            selected_section=selected_section,
+            default_max_marks=100,
+        )
+    except Exception as e:
+        if db:
+            try: db.rollback()
+            except: pass
+        print(f"[teacher_enter_marks ERROR]: {repr(e)}")
+        flash("Database error in marks entry.", "error")
+        return redirect(url_for("teacher_dashboard"))
+    finally:
+        if db:
+            try: db.close()
+            except: pass
+
+
+@app.route("/student/results", methods=["GET"])
+def student_results():
+    if session.get("role") != "student":
+        flash("Please log in with a student account to view results.", "error")
+        return redirect(url_for("student_login"))
+
+    db = None
+    try:
+        db = get_db()
+        placeholder = get_placeholder()
+        _ensure_results_schema(db)
+
+        student_id = session.get("student_id")
+        username = session.get("username")
+
+        student = None
+        if student_id:
+            student = db.execute(
+                f"SELECT s.*, b.name AS branch_name FROM students s JOIN branches b ON s.branch_id = b.id WHERE s.id = {placeholder}",
+                (student_id,),
+            ).fetchone()
+        if not student and username:
+            student = db.execute(
+                f"SELECT s.*, b.name AS branch_name FROM students s JOIN branches b ON s.branch_id = b.id WHERE s.enrollment = {placeholder}",
+                (username,),
+            ).fetchone()
+
+        if not student:
+            flash("Student profile not found.", "error")
+            return redirect(url_for("student_dashboard"))
+
+        st_id = row_get(student, "id")
+        b_id = row_get(student, "branch_id")
+
+        exams = db.execute(
+            f"SELECT e.*, b.name AS branch_name FROM exams e JOIN branches b ON e.branch_id = b.id WHERE e.branch_id = {placeholder} ORDER BY e.id DESC",
+            (b_id,),
+        ).fetchall()
+        if not exams:
+            exams = db.execute("SELECT e.*, b.name AS branch_name FROM exams e JOIN branches b ON e.branch_id = b.id ORDER BY e.id DESC").fetchall()
+
+        selected_exam_id = request.args.get("exam_id") or ""
+
+        query = f"SELECT m.*, s.name AS subject_name, e.exam_name, e.academic_year, e.semester FROM marks m JOIN subjects s ON m.subject_id = s.id JOIN exams e ON m.exam_id = e.id WHERE m.student_id = {placeholder} "
+        params = [st_id]
+        if selected_exam_id:
+            query += f"AND m.exam_id = {placeholder} "
+            params.append(_coerce_int(selected_exam_id))
+        query += "ORDER BY e.id DESC, s.name ASC"
+
+        mark_rows = db.execute(query, tuple(params)).fetchall()
+
+        results = []
+        total_obtained = 0.0
+        total_max = 0.0
+        gp_sum = 0.0
+
+        for mr in mark_rows:
+            m_obt = float(row_get(mr, "marks_obtained") or 0)
+            m_max = float(row_get(mr, "max_marks") or 100)
+            g_info = calculate_grade(m_obt, m_max)
+
+            total_obtained += m_obt
+            total_max += m_max
+            gp_sum += g_info["gp"]
+
+            results.append({
+                "exam_name": row_get(mr, "exam_name"),
+                "subject_name": row_get(mr, "subject_name"),
+                "marks_obtained": m_obt,
+                "max_marks": m_max,
+                "pct": g_info["pct"],
+                "grade": g_info["grade"],
+                "status": g_info["status"],
+            })
+
+        count = len(results)
+        overall_pct = round((total_obtained / total_max * 100.0), 1) if total_max > 0 else 0.0
+        sgpa = round((gp_sum / count), 2) if count > 0 else 0.0
+        pass_status = "Pass" if count > 0 and all(r["status"] == "Pass" for r in results) else ("Pass" if count > 0 else "N/A")
+
+        # Attendance calculation
+        att_rows = db.execute(
+            f"SELECT status FROM attendance WHERE student_id = {placeholder}",
+            (st_id,),
+        ).fetchall()
+        att_total = len(att_rows)
+        att_present = len([r for r in att_rows if row_get(r, "status") == "Present"])
+        attendance_pct = round((att_present / att_total * 100.0), 1) if att_total > 0 else 0.0
+
+        # Performance correlation classification
+        if attendance_pct >= 85 and overall_pct >= 80:
+            performance_rating = "Excellent"
+        elif attendance_pct >= 75 and overall_pct >= 65:
+            performance_rating = "Good"
+        elif attendance_pct >= 65 and overall_pct >= 50:
+            performance_rating = "Average"
+        else:
+            performance_rating = "Needs Improvement"
+
+        return render_template(
+            "student_results.html",
+            student=student,
+            exams=exams,
+            results=results,
+            selected_exam_id=selected_exam_id,
+            total_obtained=total_obtained,
+            total_max=total_max,
+            overall_pct=overall_pct,
+            sgpa=sgpa,
+            pass_status=pass_status,
+            attendance_pct=attendance_pct,
+            performance_rating=performance_rating,
+        )
+    except Exception as e:
+        print(f"[student_results ERROR]: {repr(e)}")
+        flash("Database error loading student results.", "error")
+        return redirect(url_for("student_dashboard"))
+    finally:
+        if db:
+            try: db.close()
+            except: pass
+
+
+@app.route("/admin/results", methods=["GET"])
+def admin_results():
+    if session.get("role") != "admin":
+        flash("Admin login required.", "error")
+        return redirect(url_for("admin_login"))
+    db = None
+    try:
+        db = get_db()
+        placeholder = get_placeholder()
+        _ensure_results_schema(db)
+
+        branches = db.execute("SELECT id, name FROM branches ORDER BY name").fetchall()
+        exams = db.execute("SELECT e.*, b.name AS branch_name FROM exams e JOIN branches b ON e.branch_id = b.id ORDER BY e.id DESC").fetchall()
+        subjects = db.execute("SELECT id, name FROM subjects ORDER BY name").fetchall()
+
+        selected_branch_id = request.args.get("branch_id") or ""
+        selected_exam_id = request.args.get("exam_id") or ""
+        selected_subject_id = request.args.get("subject_id") or ""
+        selected_semester = request.args.get("semester") or ""
+
+        query = (
+            f"SELECT m.*, st.name AS student_name, st.enrollment, s.name AS subject_name, "
+            f"e.exam_name, e.semester, b.name AS branch_name "
+            f"FROM marks m "
+            f"JOIN students st ON m.student_id = st.id "
+            f"JOIN subjects s ON m.subject_id = s.id "
+            f"JOIN exams e ON m.exam_id = e.id "
+            f"JOIN branches b ON e.branch_id = b.id "
+            f"WHERE 1=1 "
+        )
+        params = []
+
+        if selected_branch_id:
+            query += f"AND e.branch_id = {placeholder} "
+            params.append(_coerce_int(selected_branch_id))
+        if selected_exam_id:
+            query += f"AND m.exam_id = {placeholder} "
+            params.append(_coerce_int(selected_exam_id))
+        if selected_subject_id:
+            query += f"AND m.subject_id = {placeholder} "
+            params.append(_coerce_int(selected_subject_id))
+        if selected_semester:
+            query += f"AND e.semester = {placeholder} "
+            params.append(selected_semester)
+
+        query += "ORDER BY e.id DESC, st.enrollment ASC"
+
+        mark_rows = db.execute(query, tuple(params)).fetchall()
+
+        results = []
+        pct_list = []
+        pass_count = 0
+
+        for mr in mark_rows:
+            m_obt = float(row_get(mr, "marks_obtained") or 0)
+            m_max = float(row_get(mr, "max_marks") or 100)
+            g_info = calculate_grade(m_obt, m_max)
+
+            pct_list.append(g_info["pct"])
+            if g_info["status"] == "Pass":
+                pass_count += 1
+
+            results.append({
+                "enrollment": row_get(mr, "enrollment"),
+                "student_name": row_get(mr, "student_name"),
+                "branch_name": row_get(mr, "branch_name"),
+                "exam_name": row_get(mr, "exam_name"),
+                "subject_name": row_get(mr, "subject_name"),
+                "marks_obtained": m_obt,
+                "max_marks": m_max,
+                "pct": g_info["pct"],
+                "grade": g_info["grade"],
+                "status": g_info["status"],
+            })
+
+        total_cnt = len(pct_list)
+        class_average = round(sum(pct_list) / total_cnt, 1) if total_cnt > 0 else 0.0
+        highest_marks = max([r["marks_obtained"] for r in results]) if results else 0.0
+        lowest_marks = min([r["marks_obtained"] for r in results]) if results else 0.0
+        pass_percentage = round((pass_count / total_cnt * 100.0), 1) if total_cnt > 0 else 0.0
+
+        return render_template(
+            "admin_results.html",
+            branches=branches,
+            exams=exams,
+            subjects=subjects,
+            results=results,
+            selected_branch_id=selected_branch_id,
+            selected_exam_id=selected_exam_id,
+            selected_subject_id=selected_subject_id,
+            selected_semester=selected_semester,
+            class_average=class_average,
+            highest_marks=highest_marks,
+            lowest_marks=lowest_marks,
+            pass_percentage=pass_percentage,
+        )
+    except Exception as e:
+        print(f"[admin_results ERROR]: {repr(e)}")
+        flash("Database error loading results analytics.", "error")
         return redirect(url_for("dashboard"))
     finally:
         if db:

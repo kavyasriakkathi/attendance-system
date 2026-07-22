@@ -22,6 +22,9 @@
         <nav>
             {% if session.role == 'student' %}
             <a class="nav-link" href="{{ url_for('student_dashboard') }}"><i class="fa-solid fa-user-graduate"></i> Dashboard</a>
+            {% if has_endpoint('student_results') %}
+            <a class="nav-link" href="{{ url_for('student_results') }}"><i class="fa-solid fa-square-poll-vertical"></i> My Results</a>
+            {% endif %}
             <a class="logout" href="{{ url_for('logout') }}"><i class="fa-solid fa-right-from-bracket"></i></a>
             {% elif session.role == 'admin' %}
             <a class="nav-link" href="{{ url_for('dashboard') }}"><i class="fa-solid fa-chart-line"></i> Dashboard</a>
@@ -33,6 +36,12 @@
             <a class="nav-link" href="{{ url_for('subjects') }}"><i class="fa-solid fa-book-open"></i> Subjects</a>
             {% if has_endpoint('manage_teachers') %}
             <a class="nav-link" href="{{ url_for('manage_teachers') }}"><i class="fa-solid fa-user-tie"></i> Teachers</a>
+            {% endif %}
+            {% if has_endpoint('admin_exams') %}
+            <a class="nav-link" href="{{ url_for('admin_exams') }}"><i class="fa-solid fa-pen-to-square"></i> Exams</a>
+            {% endif %}
+            {% if has_endpoint('admin_results') %}
+            <a class="nav-link" href="{{ url_for('admin_results') }}"><i class="fa-solid fa-chart-bar"></i> Results</a>
             {% endif %}
             {% if has_endpoint('admin_academic') %}
             <a class="nav-link" href="{{ url_for('admin_academic') }}"><i class="fa-solid fa-graduation-cap"></i> Academic</a>
@@ -46,6 +55,9 @@
             {% elif session.role == 'teacher' %}
             {% if has_endpoint('teacher_dashboard') %}
             <a class="nav-link" href="{{ url_for('teacher_dashboard') }}"><i class="fa-solid fa-gauge"></i> Dashboard</a>
+            {% endif %}
+            {% if has_endpoint('teacher_enter_marks') %}
+            <a class="nav-link" href="{{ url_for('teacher_enter_marks') }}"><i class="fa-solid fa-pen-field"></i> Enter Marks</a>
             {% endif %}
             {% if has_endpoint('timetable_home') %}
             <a class="nav-link" href="{{ url_for('timetable_home') }}"><i class="fa-solid fa-calendar-days"></i> Timetable</a>

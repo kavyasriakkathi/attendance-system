@@ -1,0 +1,142 @@
+{% extends "layout.html" %}
+
+{% block content %}
+<div class="dashboard-header" style="margin-bottom: 25px;">
+    <div>
+        <h1 style="font-size: 1.8rem; font-weight: 700; color: #1e293b; margin: 0;">
+            <i class="fa-solid fa-chart-bar" style="color: #4f46e5; margin-right: 8px;"></i> Results & Performance Analytics Dashboard
+        </h1>
+        <p style="color: #64748b; margin: 4px 0 0 0; font-size: 0.95rem;">Filter and analyze student examination outcomes across branches and semesters.</p>
+    </div>
+</div>
+
+<!-- Filters Bar -->
+<div class="card" style="background: white; padding: 24px; border-radius: 16px; box-shadow: 0 4px 20px rgba(0,0,0,0.05); border: 1px solid #e2e8f0; margin-bottom: 25px;">
+    <form method="GET" action="{{ url_for('admin_results') }}" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 14px; align-items: end;">
+        <div>
+            <label style="display: block; font-size: 0.85rem; font-weight: 600; color: #334155; margin-bottom: 6px;">Branch</label>
+            <select name="branch_id" style="width: 100%; padding: 8px 12px; border-radius: 8px; border: 1px solid #cbd5e1; font-size: 0.9rem; background: #f8fafc;">
+                <option value="">All Branches</option>
+                {% for b in branches %}
+                <option value="{{ b.id }}" {% if selected_branch_id == b.id|string %}selected{% endif %}>{{ b.name }}</option>
+                {% endfor %}
+            </select>
+        </div>
+
+        <div>
+            <label style="display: block; font-size: 0.85rem; font-weight: 600; color: #334155; margin-bottom: 6px;">Exam</label>
+            <select name="exam_id" style="width: 100%; padding: 8px 12px; border-radius: 8px; border: 1px solid #cbd5e1; font-size: 0.9rem; background: #f8fafc;">
+                <option value="">All Exams</option>
+                {% for ex in exams %}
+                <option value="{{ ex.id }}" {% if selected_exam_id == ex.id|string %}selected{% endif %}>{{ ex.exam_name }} ({{ ex.branch_name }})</option>
+                {% endfor %}
+            </select>
+        </div>
+
+        <div>
+            <label style="display: block; font-size: 0.85rem; font-weight: 600; color: #334155; margin-bottom: 6px;">Subject</label>
+            <select name="subject_id" style="width: 100%; padding: 8px 12px; border-radius: 8px; border: 1px solid #cbd5e1; font-size: 0.9rem; background: #f8fafc;">
+                <option value="">All Subjects</option>
+                {% for s in subjects %}
+                <option value="{{ s.id }}" {% if selected_subject_id == s.id|string %}selected{% endif %}>{{ s.name }}</option>
+                {% endfor %}
+            </select>
+        </div>
+
+        <div>
+            <label style="display: block; font-size: 0.85rem; font-weight: 600; color: #334155; margin-bottom: 6px;">Semester</label>
+            <select name="semester" style="width: 100%; padding: 8px 12px; border-radius: 8px; border: 1px solid #cbd5e1; font-size: 0.9rem; background: #f8fafc;">
+                <option value="">All Semesters</option>
+                <option value="1" {% if selected_semester == '1' %}selected{% endif %}>Sem 1</option>
+                <option value="2" {% if selected_semester == '2' %}selected{% endif %}>Sem 2</option>
+                <option value="3" {% if selected_semester == '3' %}selected{% endif %}>Sem 3</option>
+                <option value="4" {% if selected_semester == '4' %}selected{% endif %}>Sem 4</option>
+            </select>
+        </div>
+
+        <div>
+            <button type="submit" style="width: 100%; padding: 9px 16px; background: #4f46e5; color: white; font-weight: 600; border: none; border-radius: 8px; cursor: pointer;">
+                <i class="fa-solid fa-filter"></i> Apply Filters
+            </button>
+        </div>
+    </form>
+</div>
+
+<!-- Class Analytics Summary -->
+<div class="metrics-grid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 25px;">
+    <div class="metric-card" style="background: white; border: 1px solid #e2e8f0; padding: 20px; border-radius: 14px; box-shadow: 0 4px 15px rgba(0,0,0,0.03);">
+        <div style="font-size: 0.8rem; font-weight: 700; color: #64748b; text-transform: uppercase;">Class Average</div>
+        <div style="font-size: 2rem; font-weight: 800; color: #4f46e5; margin-top: 4px;">{{ class_average }}%</div>
+    </div>
+
+    <div class="metric-card" style="background: white; border: 1px solid #e2e8f0; padding: 20px; border-radius: 14px; box-shadow: 0 4px 15px rgba(0,0,0,0.03);">
+        <div style="font-size: 0.8rem; font-weight: 700; color: #64748b; text-transform: uppercase;">Highest Marks</div>
+        <div style="font-size: 2rem; font-weight: 800; color: #10b981; margin-top: 4px;">{{ highest_marks }}</div>
+    </div>
+
+    <div class="metric-card" style="background: white; border: 1px solid #e2e8f0; padding: 20px; border-radius: 14px; box-shadow: 0 4px 15px rgba(0,0,0,0.03);">
+        <div style="font-size: 0.8rem; font-weight: 700; color: #64748b; text-transform: uppercase;">Lowest Marks</div>
+        <div style="font-size: 2rem; font-weight: 800; color: #ef4444; margin-top: 4px;">{{ lowest_marks }}</div>
+    </div>
+
+    <div class="metric-card" style="background: white; border: 1px solid #e2e8f0; padding: 20px; border-radius: 14px; box-shadow: 0 4px 15px rgba(0,0,0,0.03);">
+        <div style="font-size: 0.8rem; font-weight: 700; color: #64748b; text-transform: uppercase;">Pass Percentage</div>
+        <div style="font-size: 2rem; font-weight: 800; color: #0284c7; margin-top: 4px;">{{ pass_percentage }}%</div>
+    </div>
+</div>
+
+<!-- Detailed Marks List -->
+<div class="card" style="background: white; padding: 24px; border-radius: 16px; box-shadow: 0 4px 20px rgba(0,0,0,0.05); border: 1px solid #e2e8f0;">
+    <h2 style="font-size: 1.25rem; font-weight: 700; color: #0f172a; margin-bottom: 18px; display: flex; align-items: center; gap: 8px;">
+        <i class="fa-solid fa-graduation-cap" style="color: #0284c7;"></i> Student Results Records ({{ results|length }} Records)
+    </h2>
+
+    {% if results %}
+    <div style="overflow-x: auto;">
+        <table style="width: 100%; border-collapse: collapse; text-align: left; font-size: 0.9rem;">
+            <thead>
+                <tr style="background: #f1f5f9; border-bottom: 2px solid #e2e8f0; color: #475569;">
+                    <th style="padding: 12px;">Roll Number</th>
+                    <th style="padding: 12px;">Student Name</th>
+                    <th style="padding: 12px;">Branch</th>
+                    <th style="padding: 12px;">Exam</th>
+                    <th style="padding: 12px;">Subject</th>
+                    <th style="padding: 12px; text-align: center;">Score</th>
+                    <th style="padding: 12px; text-align: center;">Grade</th>
+                    <th style="padding: 12px; text-align: center;">Status</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for r in results %}
+                <tr style="border-bottom: 1px solid #e2e8f0;">
+                    <td style="padding: 12px; font-weight: 600; color: #334155;">{{ r.enrollment }}</td>
+                    <td style="padding: 12px; font-weight: 700; color: #0f172a;">{{ r.student_name }}</td>
+                    <td style="padding: 12px; color: #64748b;">{{ r.branch_name }}</td>
+                    <td style="padding: 12px; color: #64748b;">{{ r.exam_name }}</td>
+                    <td style="padding: 12px; font-weight: 600; color: #334155;">{{ r.subject_name }}</td>
+                    <td style="padding: 12px; text-align: center; font-weight: 800; color: #1e293b;">
+                        {{ r.marks_obtained }} / {{ r.max_marks }}
+                    </td>
+                    <td style="padding: 12px; text-align: center; font-weight: 800; color: #0284c7;">
+                        {{ r.grade }}
+                    </td>
+                    <td style="padding: 12px; text-align: center;">
+                        {% if r.status == 'Pass' %}
+                        <span style="background: #dcfce7; color: #15803d; font-weight: 700; padding: 4px 10px; border-radius: 6px; font-size: 0.8rem;">Pass</span>
+                        {% else %}
+                        <span style="background: #fee2e2; color: #b91c1c; font-weight: 700; padding: 4px 10px; border-radius: 6px; font-size: 0.8rem;">Fail</span>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <div style="text-align: center; padding: 40px; color: #94a3b8;">
+        <i class="fa-solid fa-folder-open" style="font-size: 2.5rem; margin-bottom: 10px; color: #cbd5e1;"></i>
+        <p style="margin: 0;">No result entries found matching the selected filters.</p>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}
