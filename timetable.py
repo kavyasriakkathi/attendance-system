@@ -14,6 +14,7 @@ import zipfile
 import xml.etree.ElementTree as ET
 
 from flask import request, redirect, url_for, render_template, flash, jsonify, session, render_template_string
+from werkzeug.security import generate_password_hash
 
 # Parsers are optional imports - provide helpful messages if missing
 try:
@@ -74,40 +75,45 @@ def _append_skipped_sample(skipped_rows: List[Dict], skipped_rows_omitted: int, 
 
 def _is_postgres_db(db) -> bool:
     try:
-        # The app wraps psycopg2 connections in a helper class named _PostgresDB.
-        # Fallback: check for a psycopg2 connection module on an underlying conn.
         name = type(db).__name__
         if name == "_PostgresDB":
             return True
-        # Some call sites may pass a raw psycopg2 connection or cursor-like object
         if hasattr(db, "_conn"):
-            mod = type(db._conn).__module__
-            return "psycopg2" in mod
+            mod = type(getattr(db, "_conn")).__module__
+            if "psycopg2" in mod:
+                return True
+        mod = type(db).__module__
+        if "psycopg2" in mod:
+            return True
         return False
     except Exception:
         return False
 
 
 def _db_execute(db, query, params=()):
-    """Execute a query using the DB connection.
+    """Execute a query using the DB connection or cursor.
 
     - Prefer PostgreSQL-style `%s` placeholders in code.
     - If running against SQLite, convert `%s` -> `?` so queries remain compatible.
     - If the module uses `?` placeholders, convert them to `%s` for Postgres.
-    This lets callers write `%s` (Postgres-first) but still run on SQLite in dev.
     """
     try:
         is_pg = _is_postgres_db(db)
         if is_pg:
-            # Convert legacy sqlite placeholders to %s
             if "?" in query:
                 query = query.replace("?", "%s")
         else:
-            # SQLite: convert %s to ?
             if "%s" in query:
-                # Replace all %s with ? (positional)
                 query = query.replace("%s", "?")
-        return db.execute(query, params)
+
+        if hasattr(db, "execute") and callable(getattr(db, "execute")):
+            return db.execute(query, params)
+        elif hasattr(db, "cursor") and callable(getattr(db, "cursor")):
+            cur = db.cursor()
+            cur.execute(query, params)
+            return cur
+        else:
+            raise AttributeError(f"{type(db).__name__} object has no attribute execute or cursor")
     except Exception:
         raise
 
@@ -4092,6 +4098,288 @@ def get_current_slot(db, branch: str, section: str, now: Optional[datetime] = No
     return None
 
 
+def _ensure_column(db, table_name: str, column_name: str, column_definition: str):
+    try:
+        is_pg = _is_postgres_db(db)
+        if is_pg:
+            rows = _db_execute(
+                db,
+                "SELECT column_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = %s",
+                (table_name,),
+            ).fetchall()
+            cols = {r[0] if not hasattr(r, "keys") else r["column_name"] for r in rows}
+        else:
+            rows = _db_execute(db, f"PRAGMA table_info({table_name})").fetchall()
+            cols = {r[1] if not hasattr(r, "keys") else r["name"] for r in rows}
+        if cols and column_name not in cols:
+            _db_execute(db, f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}")
+            try:
+                db.commit()
+            except Exception:
+                pass
+    except Exception as e:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        logger.warning(f"Failed to ensure column {table_name}.{column_name}: {e}")
+
+
+def derive_subject_code(s_name: str) -> str:
+    s_clean = _clean_text(s_name)
+    if not s_clean:
+        return ""
+    tokens = [t for t in re.split(r"[^A-Za-z0-9]+", s_clean) if t and t.lower() not in ("and", "of", "the", "lab", "practical")]
+    if len(tokens) >= 2:
+        return "".join([t[0].upper() for t in tokens])
+    elif tokens:
+        return tokens[0].upper()[:6]
+    return s_clean.upper()[:6]
+
+
+def derive_teacher_username(t_name: str) -> str:
+    clean_t = _clean_text(t_name)
+    clean_base = re.sub(r"^(mr|ms|mrs|dr|prof)\.?\s+", "", clean_t, flags=re.I)
+    sanitized = re.sub(r"[^a-zA-Z0-9]+", "_", clean_base).strip("_").lower()
+    if not sanitized:
+        sanitized = "teacher"
+    return sanitized
+
+
+def auto_setup_academic_from_slots(db, slots: List[Dict]) -> Dict[str, int]:
+    """Single-Source Academic Setup from Timetable Slots:
+    1. Ensures Branch records exist in `branches`.
+    2. Automatically creates missing Subject records in `subjects` with codes and branch IDs.
+    3. Automatically creates missing Teacher user accounts in `teachers` with default passwords ("1234").
+    4. Automatically maps `Teacher -> Subject -> Branch -> Section -> Semester` in `teacher_subjects`, `teacher_branches`, and `teacher_subject_assignments`.
+    """
+    is_pg = _is_postgres_db(db)
+
+    _ensure_column(db, "subjects", "code", "TEXT")
+    _ensure_column(db, "subjects", "branch_id", "INTEGER")
+    _ensure_column(db, "teachers", "username", "TEXT")
+    _ensure_column(db, "teachers", "password", "TEXT")
+    _ensure_column(db, "teachers", "password_hash", "TEXT")
+    _ensure_column(db, "teachers", "status", "TEXT")
+    _ensure_column(db, "teachers", "branch_id", "INTEGER")
+    _ensure_column(db, "teachers", "subject_id", "INTEGER")
+
+    summary = {
+        "branches_created": 0,
+        "subjects_created": 0,
+        "subjects_mapped": 0,
+        "teachers_created": 0,
+        "teachers_mapped": 0,
+        "assignments_created": 0,
+    }
+
+    branch_cache: Dict[str, int] = {}
+    subject_cache: Dict[tuple, int] = {}
+    teacher_cache: Dict[str, int] = {}
+
+    def get_or_create_branch(b_name: str) -> Optional[int]:
+        clean_b = _clean_text(b_name)
+        if not clean_b:
+            return None
+        norm_b = clean_b.upper()
+        if norm_b in branch_cache:
+            return branch_cache[norm_b]
+
+        row = _db_execute(db, "SELECT id FROM branches WHERE UPPER(TRIM(name)) = UPPER(TRIM(%s)) LIMIT 1", (clean_b,)).fetchone()
+        if row:
+            bid = row[0] if not hasattr(row, "keys") else row["id"]
+            branch_cache[norm_b] = int(bid)
+            return int(bid)
+
+        try:
+            _db_execute(db, "INSERT INTO branches (name) VALUES (%s)", (clean_b,))
+            try:
+                db.commit()
+            except Exception:
+                pass
+            r2 = _db_execute(db, "SELECT id FROM branches WHERE UPPER(TRIM(name)) = UPPER(TRIM(%s)) LIMIT 1", (clean_b,)).fetchone()
+            if r2:
+                bid = r2[0] if not hasattr(r2, "keys") else r2["id"]
+                branch_cache[norm_b] = int(bid)
+                summary["branches_created"] += 1
+                return int(bid)
+        except Exception as e:
+            logger.exception("Failed to auto-create branch %s: %s", clean_b, e)
+            try: db.rollback()
+            except Exception: pass
+        return None
+
+    def get_or_create_subject(s_name: str, b_id: Optional[int], s_code: Optional[str] = None) -> Optional[int]:
+        clean_s = _clean_text(s_name)
+        if not clean_s:
+            return None
+        key = (clean_s.lower(), b_id or 0)
+        if key in subject_cache:
+            return subject_cache[key]
+
+        code_val = s_code or derive_subject_code(clean_s)
+        try:
+            existing = _db_execute(db, "SELECT id, name, code FROM subjects").fetchall()
+        except Exception:
+            existing = []
+
+        for r in existing:
+            sid = r[0] if not hasattr(r, "keys") else r["id"]
+            sname = r[1] if not hasattr(r, "keys") else r["name"]
+            scode = r[2] if not hasattr(r, "keys") and len(r) > 2 else (r["code"] if "code" in r.keys() else None)
+            if _normalize_subject_name(clean_s) == _normalize_subject_name(sname) or (scode and scode.upper() == code_val.upper()):
+                subject_cache[key] = int(sid)
+                summary["subjects_mapped"] += 1
+                if not scode and code_val:
+                    try:
+                        _db_execute(db, "UPDATE subjects SET code = %s WHERE id = %s", (code_val, int(sid)))
+                        db.commit()
+                    except Exception:
+                        pass
+                return int(sid)
+
+        try:
+            display_name = clean_s.title()
+            _db_execute(db, "INSERT INTO subjects (name, code, branch_id) VALUES (%s, %s, %s)", (display_name, code_val, b_id))
+            try:
+                db.commit()
+            except Exception:
+                pass
+            r2 = _db_execute(db, "SELECT id FROM subjects WHERE LOWER(TRIM(name)) = LOWER(TRIM(%s)) ORDER BY id DESC LIMIT 1", (display_name,)).fetchone()
+            if r2:
+                sid = r2[0] if not hasattr(r2, "keys") else r2["id"]
+                subject_cache[key] = int(sid)
+                summary["subjects_created"] += 1
+                return int(sid)
+        except Exception as e:
+            logger.exception("Failed auto-creating subject %s: %s", clean_s, e)
+            try: db.rollback()
+            except Exception: pass
+        return None
+
+    def get_or_create_teacher(t_name: str, default_branch_id: Optional[int] = None, default_subject_id: Optional[int] = None) -> Optional[int]:
+        clean_t = _clean_text(t_name)
+        if not clean_t:
+            return None
+        norm_t = clean_t.lower()
+        if norm_t in teacher_cache:
+            return teacher_cache[norm_t]
+
+        try:
+            existing = _db_execute(db, "SELECT id, name, username FROM teachers").fetchall()
+        except Exception:
+            existing = []
+
+        for r in existing:
+            tid = r[0] if not hasattr(r, "keys") else r["id"]
+            tname = r[1] if not hasattr(r, "keys") else r["name"]
+            if _normalize_teacher_name(clean_t) == _normalize_teacher_name(tname) or clean_t.lower() == str(tname).lower():
+                teacher_cache[norm_t] = int(tid)
+                summary["teachers_mapped"] += 1
+                return int(tid)
+
+        try:
+            uname_base = derive_teacher_username(clean_t)
+            uname_final = uname_base
+            idx = 1
+            while True:
+                r_chk = _db_execute(db, "SELECT id FROM teachers WHERE username = %s LIMIT 1", (uname_final,)).fetchone()
+                if not r_chk:
+                    break
+                uname_final = f"{uname_base}_{idx}"
+                idx += 1
+
+            pwd_hash = generate_password_hash("1234")
+            display_name = clean_t
+            _db_execute(
+                db,
+                "INSERT INTO teachers (name, username, password, password_hash, status, branch_id, subject_id) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                (display_name, uname_final, "1234", pwd_hash, "active", default_branch_id, default_subject_id),
+            )
+            try:
+                db.commit()
+            except Exception:
+                pass
+            r2 = _db_execute(db, "SELECT id FROM teachers WHERE username = %s LIMIT 1", (uname_final,)).fetchone()
+            if r2:
+                tid = r2[0] if not hasattr(r2, "keys") else r2["id"]
+                teacher_cache[norm_t] = int(tid)
+                summary["teachers_created"] += 1
+                return int(tid)
+        except Exception as e:
+            logger.exception("Failed auto-creating teacher %s: %s", clean_t, e)
+            try: db.rollback()
+            except Exception: pass
+        return None
+
+    def add_teacher_assignments(t_id: int, s_id: Optional[int], b_id: Optional[int], sec_str: str, sem_str: str):
+        if not t_id:
+            return
+        if s_id:
+            try:
+                if is_pg:
+                    _db_execute(db, "INSERT INTO teacher_subjects (teacher_id, subject_id) VALUES (%s, %s) ON CONFLICT DO NOTHING", (t_id, s_id))
+                else:
+                    _db_execute(db, "INSERT OR IGNORE INTO teacher_subjects (teacher_id, subject_id) VALUES (%s, %s)", (t_id, s_id))
+            except Exception:
+                pass
+        if b_id:
+            try:
+                if is_pg:
+                    _db_execute(db, "INSERT INTO teacher_branches (teacher_id, branch_id) VALUES (%s, %s) ON CONFLICT DO NOTHING", (t_id, b_id))
+                else:
+                    _db_execute(db, "INSERT OR IGNORE INTO teacher_branches (teacher_id, branch_id) VALUES (%s, %s)", (t_id, b_id))
+            except Exception:
+                pass
+
+        if s_id and b_id:
+            sec_clean = _clean_text(sec_str)
+            sem_clean = str(sem_str or "").strip()
+            if sem_clean and not sem_clean.startswith("Semester"):
+                sem_clean = f"Semester {sem_clean}"
+            try:
+                dup = _db_execute(
+                    db,
+                    "SELECT id FROM teacher_subject_assignments WHERE teacher_id = %s AND subject_id = %s AND branch_id = %s AND COALESCE(section, '') = COALESCE(%s, '') AND COALESCE(semester, '') = COALESCE(%s, '') LIMIT 1",
+                    (t_id, s_id, b_id, sec_clean, sem_clean),
+                ).fetchone()
+                if not dup:
+                    _db_execute(
+                        db,
+                        "INSERT INTO teacher_subject_assignments (teacher_id, subject_id, branch_id, section, semester, academic_year) VALUES (%s, %s, %s, %s, %s, %s)",
+                        (t_id, s_id, b_id, sec_clean, sem_clean, "2025-2026"),
+                    )
+                    summary["assignments_created"] += 1
+            except Exception as e:
+                logger.exception("Failed creating teacher_subject_assignment: %s", e)
+
+    for slot in slots:
+        b_name = slot.get("branch")
+        s_name = slot.get("subject_name")
+        f_name = slot.get("faculty_name")
+        sec_name = slot.get("section")
+        sem_val = slot.get("semester")
+
+        b_id = get_or_create_branch(b_name)
+        s_code = slot.get("sub_code") or slot.get("subject_code")
+        s_id = get_or_create_subject(s_name, b_id, s_code)
+        t_id = get_or_create_teacher(f_name, default_branch_id=b_id, default_subject_id=s_id)
+
+        if t_id:
+            add_teacher_assignments(t_id, s_id, b_id, sec_name, sem_val)
+
+        slot["branch_id"] = b_id
+        slot["subject_id"] = s_id
+        slot["teacher_id"] = t_id
+
+    try:
+        db.commit()
+    except Exception as e:
+        logger.exception("Final DB commit after auto academic setup failed: %s", e)
+
+    return summary
+
+
 # --- Routes registration ---------------------------------------------------
 
 def register_routes(app, db_getter=None):
@@ -4191,9 +4479,12 @@ def register_routes(app, db_getter=None):
             return redirect(url_for("dashboard"))
         db = get_db()
         ensure_timetable_tables(db)
+        staged_path = os.path.join(os.path.dirname(__file__), "uploads", "staged_timetable.json")
+
         if request.method == "POST":
-            # Support delete action
-            if request.form.get("action") == "delete_timetable":
+            action = request.form.get("action")
+
+            if action == "delete_timetable":
                 try:
                     db = get_db()
                     _db_execute(db, "DELETE FROM timetable_slots")
@@ -4202,229 +4493,185 @@ def register_routes(app, db_getter=None):
                         db.commit()
                     except Exception:
                         pass
+                    if os.path.exists(staged_path):
+                        try: os.remove(staged_path)
+                        except Exception: pass
                     flash("Timetable deleted successfully.", "success")
                 except Exception:
                     logger.exception("Failed to delete timetable data")
                     flash("Failed to delete timetable.", "error")
                 return redirect(url_for("timetable_manage"))
 
+            elif action == "cancel_import":
+                if os.path.exists(staged_path):
+                    try:
+                        os.remove(staged_path)
+                    except Exception:
+                        pass
+                flash("Timetable import cancelled.", "info")
+                return redirect(url_for("timetable_manage"))
+
+            elif action == "confirm_import":
+                if not os.path.exists(staged_path):
+                    flash("No pending timetable upload found to confirm. Please upload a file first.", "error")
+                    return redirect(url_for("timetable_manage"))
+
+                try:
+                    with open(staged_path, "r", encoding="utf-8") as f:
+                        staged_data = json.load(f)
+                    slots = staged_data.get("slots", [])
+                    filename = staged_data.get("filename", "upload")
+
+                    if not slots:
+                        flash("Staged timetable has no valid slots.", "error")
+                        return redirect(url_for("timetable_manage"))
+
+                    # 1. Automatic Academic Setup (branches, subjects, teachers, assignments)
+                    summary = auto_setup_academic_from_slots(db, slots)
+
+                    # 2. Import timetable entries into DB
+                    import_info = import_slots_streaming(db, slots)
+
+                    # Clean staged file
+                    try:
+                        os.remove(staged_path)
+                    except Exception:
+                        pass
+
+                    db.commit()
+
+                    success_msg = (
+                        f"Timetable import & academic setup completed! Created {summary['subjects_created']} subjects, "
+                        f"mapped {summary['subjects_mapped']} subjects, created {summary['teachers_created']} teacher accounts, "
+                        f"and created {summary['assignments_created']} class assignments."
+                    )
+                    session["timetable_manage_banner"] = success_msg
+                    session["timetable_last_imported_file"] = filename
+                    session["timetable_refresh_normalized"] = "1"
+                    flash(success_msg, "success")
+                except Exception as e:
+                    logger.exception("Confirm import failed: %s", e)
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
+                    flash(f"Failed to confirm timetable import: {e}", "error")
+                return redirect(url_for("timetable_manage"))
+
             file = request.files.get("timetable_file")
             if not file:
                 flash("Please upload a file.", "error")
                 return redirect(url_for("timetable_manage"))
-            
+
             filename = file.filename or "upload"
             safe_path = os.path.join(os.path.dirname(__file__), "uploads")
             os.makedirs(safe_path, exist_ok=True)
             dest = os.path.join(safe_path, filename)
-            
-            # Validate file before saving
+
             try:
                 file.save(dest)
                 if not os.path.exists(dest) or os.path.getsize(dest) == 0:
-                    logger.error("Uploaded file validation failed: path=%s size=%d", dest, os.path.getsize(dest) if os.path.exists(dest) else 0)
                     flash("Error: Uploaded file is empty or corrupted.", "error")
                     return redirect(url_for("timetable_manage"))
-                logger.info("Timetable file uploaded successfully: path=%s size=%d bytes filename=%s", dest, os.path.getsize(dest), filename)
             except Exception as e:
-                logger.exception("File save or validation failed: %s", e)
-                flash("Error: Unable to save the uploaded file. Please try again.", "error")
+                logger.exception("File save failed: %s", e)
+                flash("Error: Unable to save uploaded file.", "error")
                 return redirect(url_for("timetable_manage"))
-            # Parse file
+
             ext = os.path.splitext(filename)[1].lower()
             try:
                 slots_iter = None
-                pdf_stats = None
                 if ext in (".docx",) and docx is not None:
                     summary = scan_docx_structure(dest, max_tables=None)
-                    section_names = summary.get("section_names") or []
                     direct_tables = int(summary.get("direct_timetable_tables", 0) or 0)
-                    legacy_timetable_tables = int(summary.get("timetable_tables", 0) or 0)
-                    if direct_tables == 0 and legacy_timetable_tables == 0:
-                        flash("No timetable tables were detected in this DOCX.", "error")
+                    legacy_tables = int(summary.get("timetable_tables", 0) or 0)
+                    if direct_tables == 0 and legacy_tables == 0:
+                        flash("No timetable tables detected in DOCX.", "error")
                         return redirect(url_for("timetable_manage"))
-                    if section_names:
-                        flash(f"Detected section: {section_names[0]}", "info")
-                        logger.info("timetable import detected section=%s tables=%s", section_names[0], summary.get("table_count"))
-                    if direct_tables > 0:
-                        slots_iter = iter_docx_section_slots(
-                            dest,
-                            single_section_only=False,
-                            max_tables=None,
-                        )
-                    else:
-                        if summary.get("faculty_tables", 0) == 0:
-                            flash("Faculty mapping table not detected. Ensure the DOCX includes the faculty table.", "error")
-                            return redirect(url_for("timetable_manage"))
-                        slots_iter = iter_docx_section_slots(
-                            dest,
-                            single_section_only=False,
-                            max_tables=None,
-                        )
+                    slots_iter = iter_docx_section_slots(dest, single_section_only=False, max_tables=None)
                 elif ext in (".pdf",) and pdfplumber is not None:
                     pdf_stats = {}
                     slots_iter = parse_pdf_to_slots(dest, stats=pdf_stats)
                 else:
-                    flash("Unsupported file type or missing parser dependencies.", "error")
+                    flash("Unsupported file format or missing parser dependencies.", "error")
                     return redirect(url_for("timetable_manage"))
 
-                # Validate slots_iter before import
                 if slots_iter is None:
-                    logger.error("slots_iter is None after parsing file=%s ext=%s", filename, ext)
-                    flash("Error: Unable to parse file contents. The file format may be corrupted or unsupported.", "error")
+                    flash("Error: Unable to parse file contents.", "error")
                     return redirect(url_for("timetable_manage"))
-                
-                logger.info("Beginning timetable import from file=%s ext=%s", filename, ext)
-                import_info = import_slots_streaming(db, slots_iter)
-                logger.info("Timetable import completed successfully")
-                inserted_info = import_info.get("raw_insert", {})
-                normalized_info = import_info.get("normalized_insert", {})
-                i_c = inserted_info.get("counters", {}) if isinstance(inserted_info, dict) else {}
-                logger.info(
-                    "timetable import summary parsed=%s inserted=%s skipped=%s",
-                    i_c.get("processed", 0),
-                    i_c.get("inserted", 0),
-                    i_c.get("skipped_total", 0),
-                )
-                if ext == ".pdf":
-                    detected_sections = [section for section in (pdf_stats.get("detected_sections") or []) if section]
-                    if detected_sections:
-                        if len(detected_sections) == 1:
-                            flash(f"Detected section: {detected_sections[0]}", "info")
-                        else:
-                            preview_sections = ", ".join(detected_sections[:6])
-                            suffix = "..." if len(detected_sections) > 6 else ""
-                            flash(f"Detected sections: {preview_sections}{suffix}", "info")
-                        logger.info("timetable import detected sections=%s source=pdf", detected_sections)
-                if int(i_c.get("processed", 0) or 0) == 0:
-                    logger.warning("Timetable import parsed zero rows from file=%s ext=%s", filename, ext)
-                    if ext == ".pdf":
-                        if pdf_stats and pdf_stats.get("validation_errors"):
-                            detail = "; ".join(pdf_stats.get("validation_errors")[:3])
-                            raise TimetablePDFValidationError(detail)
-                        else:
-                            raise TimetablePDFValidationError(
-                                "No timetable rows were parsed from the PDF. Ensure the PDF contains a timetable grid with a Day column, time slots, and a faculty mapping table below it."
-                            )
-                    else:
-                        raise TimetablePDFValidationError(
-                            "No timetable rows were parsed from the uploaded file. Check that the DOCX contains a readable table with branch, section, day, time, and subject columns."
-                        )
 
-                # Persist a temporary preview of skipped rows for admin review
-                preview = {
-                    "raw_insert": inserted_info,
-                    "normalized_insert": normalized_info,
-                    "batch_commits": import_info.get("batch_commits", 0),
-                    "elapsed_seconds": import_info.get("elapsed_seconds", 0),
-                    "preview_path": import_info.get("preview_path"),
-                    "preview_written": import_info.get("preview_written", 0),
-                }
-                if pdf_stats:
-                    preview["pdf_stats"] = pdf_stats
-                try:
-                    preview_path = os.path.join(os.path.dirname(__file__), "uploads", "last_import_debug.json")
-                    with open(preview_path, "w", encoding="utf-8") as f:
-                        import json
-                        json.dump(preview, f, indent=2, default=str)
-                except Exception:
-                    logger.exception("Failed to write import debug preview")
-
-                n_c = normalized_info.get("counters", {}) if isinstance(normalized_info, dict) else {}
-                success_count = int(n_c.get("inserted", 0) or 0)
-                if success_count <= 0:
-                    success_count = int(i_c.get("inserted", 0) or 0)
-                valid_rows = int((pdf_stats or {}).get("valid_rows", 0) or i_c.get("processed", 0) or 0)
-                skipped_rows = int((pdf_stats or {}).get("skipped_rows", 0) or i_c.get("skipped_total", 0) or 0)
-                inserted_rows = int(n_c.get("inserted", 0) or i_c.get("inserted", 0) or 0)
-                session["timetable_manage_banner"] = f"{success_count} timetable rows imported successfully"
-                session["timetable_last_imported_file"] = filename
-                session["timetable_refresh_normalized"] = "1"
-                logger.info(
-                    "timetable import diagnostics raw_inserted=%s raw_skipped=%s normalized_inserted=%s normalized_skipped=%s normalized_skip_reasons=%s",
-                    i_c.get("inserted", 0),
-                    i_c.get("skipped_total", 0),
-                    n_c.get("inserted", 0),
-                    n_c.get("skipped_total", 0),
-                    n_c.get("skip_reasons", {}),
-                )
-                logger.info(
-                    "timetable import final counts valid_rows=%s skipped_rows=%s inserted_rows=%s",
-                    valid_rows,
-                    skipped_rows,
-                    inserted_rows,
-                )
-                if inserted_rows <= 0:
-                    raise TimetablePDFValidationError(
-                        "The timetable parser produced rows, but none were inserted into timetable_entries. Check branch/section normalization, subject mapping, and timetable row validation."
-                    )
-                
-                # Ensure final commit after successful import
-                try:
-                    db.commit()
-                    logger.info("Final transaction commit successful after timetable import")
-                except Exception as commit_err:
-                    logger.exception("Final transaction commit failed: %s", commit_err)
-                    try:
-                        db.rollback()
-                    except:
-                        pass
-                    flash("Error: Failed to finalize database changes. Please try again.", "error")
+                slots = list(slots_iter)
+                if not slots:
+                    flash("No timetable slots were parsed from the file.", "error")
                     return redirect(url_for("timetable_manage"))
-            except TimetablePDFValidationError as e:
-                logger.warning("PDF validation failed: %s", str(e))
-                flash(str(e), "error")
-                try:
-                    db.rollback()
-                except Exception:
-                    pass
-                if pdf_stats:
-                    try:
-                        preview_path = os.path.join(os.path.dirname(__file__), "uploads", "last_import_debug.json")
-                        with open(preview_path, "w", encoding="utf-8") as f:
-                            import json
-                            json.dump({"pdf_stats": pdf_stats}, f, indent=2, default=str)
-                    except Exception:
-                        logger.exception("Failed to write PDF validation preview")
+
+                # Save staged slots for preview before import
+                with open(staged_path, "w", encoding="utf-8") as f:
+                    json.dump({"filename": filename, "slots": slots}, f, indent=2, default=str)
+
+                flash("Timetable file parsed successfully! Review the extracted academic setup below and click 'Confirm Import' to apply.", "info")
+                return redirect(url_for("timetable_manage"))
             except Exception as e:
-                logger.exception("Failed to import timetable: exception_type=%s message=%s", type(e).__name__, str(e))
-                try:
-                    db.rollback()
-                    logger.info("Database rolled back due to import failure")
-                except Exception as rollback_err:
-                    logger.exception("Rollback also failed: %s", rollback_err)
-                
-                # Provide user-friendly error message based on exception type
-                error_msg = str(e).lower()
-                if "constraint" in error_msg or "foreign" in error_msg:
-                    flash("Error: Database constraint violation. Some entries may have invalid branch/subject/teacher references. Check that all required data exists.", "error")
-                elif "branch" in error_msg:
-                    flash("Error: Unable to resolve branch data. Ensure branch records exist in the system.", "error")
-                elif "subject" in error_msg or "teacher" in error_msg:
-                    flash("Error: Unable to map subjects or teachers. Create missing records first.", "error")
-                elif "duplicate" in error_msg:
-                    flash("Error: Duplicate timetable entries detected. Clear the timetable first before re-importing.", "error")
-                elif "null" in error_msg or "none" in error_msg:
-                    flash("Error: Invalid or missing data in the timetable file. Check the file format and ensure all required columns are present.", "error")
-                elif "permission" in error_msg or "access" in error_msg:
-                    flash("Error: Permission denied or file access issue. Please try again.", "error")
-                else:
-                    flash(f"Import failed: {str(e)[:100]}. Check server logs for details.", "error")
-                
-                # Always log detailed error information for debugging
-                logger.error("Detailed import error: exception_type=%s full_message=%s", type(e).__name__, str(e))
-                flash(f"Failed to import timetable: {e}", "error")
-            return redirect(url_for("timetable_manage"))
+                logger.exception("Failed parsing timetable file: %s", e)
+                flash(f"Failed to parse file: {e}", "error")
+                return redirect(url_for("timetable_manage"))
 
-        # GET: show simple management UI
-        # Prefer showing normalized `timetable_entries` first; fall back to
-        # legacy `timetable_slots` only when no normalized entries are present.
+        # GET: show management UI & pending preview if exists
         success_banner = session.pop("timetable_manage_banner", None)
         last_imported_file = session.get("timetable_last_imported_file")
         if session.pop("timetable_refresh_normalized", None):
             logger.info("Refreshing normalized timetable rows for manage view")
             refresh_stats = _refresh_timetable_entry_ids(db)
-            logger.info("Refreshed timetable entries subject/teacher IDs: %s", refresh_stats)
+
+        # Check pending preview
+        preview_mode = False
+        preview_rows = []
+        unique_subjects = []
+        unique_teachers = []
+        unique_sections = []
+        if os.path.exists(staged_path):
+            try:
+                with open(staged_path, "r", encoding="utf-8") as f:
+                    staged_data = json.load(f)
+                staged_slots = staged_data.get("slots", [])
+                if staged_slots:
+                    preview_mode = True
+                    subj_map = {}
+                    teach_map = {}
+                    sec_map = {}
+                    for s in staged_slots:
+                        sub = _clean_text(s.get("subject_name"))
+                        fac = _clean_text(s.get("faculty_name"))
+                        sec = _clean_text(s.get("section"))
+                        sem = str(s.get("semester") or "").strip()
+                        br = _clean_text(s.get("branch"))
+                        day = _clean_text(s.get("day"))
+                        t_start = _clean_text(s.get("start_time"))
+                        t_end = _clean_text(s.get("end_time"))
+
+                        if sub and sub not in subj_map:
+                            subj_map[sub] = {"name": sub, "branch": br, "code": derive_subject_code(sub)}
+                        if fac and fac not in teach_map:
+                            teach_map[fac] = {"name": fac, "username": derive_teacher_username(fac)}
+                        sec_key = f"{br}|{sec}|{sem}"
+                        if sec_key not in sec_map:
+                            sec_map[sec_key] = {"branch": br, "section": sec, "semester": sem}
+
+                        preview_rows.append({
+                            "subject_name": sub,
+                            "faculty_name": fac,
+                            "section": sec,
+                            "semester": sem,
+                            "branch": br,
+                            "day": day,
+                            "start_time": t_start,
+                            "end_time": t_end,
+                        })
+                    unique_subjects = list(subj_map.values())
+                    unique_teachers = list(teach_map.values())
+                    unique_sections = list(sec_map.values())
+            except Exception as e:
+                logger.exception("Failed to load staged preview: %s", e)
         rows = []
         rows_source = "raw"
         try:
@@ -4620,6 +4867,11 @@ def register_routes(app, db_getter=None):
             page=page,
             page_size=page_size,
             q=q,
+            preview_mode=preview_mode,
+            preview_rows=preview_rows,
+            unique_subjects=unique_subjects,
+            unique_teachers=unique_teachers,
+            unique_sections=unique_sections,
         )
 
     @app.route("/timetable/active")

@@ -41,6 +41,80 @@
         </div>
     </div>
 
+    {% if preview_mode %}
+    <div class="card" style="background: rgba(15, 23, 42, 0.7); border: 2px solid #3b82f6; border-radius: 12px; padding: 20px; margin-bottom: 24px;">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+            <div>
+                <h2 style="margin: 0; font-size: 1.3rem; color: #fff;"><i class="fa-solid fa-eye" style="color: #3b82f6; margin-right: 8px;"></i> Timetable Setup Preview</h2>
+                <p style="margin: 4px 0 0 0; color: var(--text-secondary); font-size: 0.9rem;">Review extracted subjects, faculty assignments, and section setups before committing to the database.</p>
+            </div>
+            <div style="display: flex; gap: 10px;">
+                <form method="post" style="margin: 0;">
+                    <input type="hidden" name="action" value="confirm_import">
+                    <button type="submit" class="button" style="background: #10b981; color: white; font-weight: bold; padding: 10px 20px;">
+                        <i class="fa-solid fa-check-circle"></i> Confirm Import
+                    </button>
+                </form>
+                <form method="post" style="margin: 0;">
+                    <input type="hidden" name="action" value="cancel_import">
+                    <button type="submit" class="button manage-danger" style="padding: 10px 20px;">
+                        <i class="fa-solid fa-times-circle"></i> Cancel
+                    </button>
+                </form>
+            </div>
+        </div>
+
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; margin-bottom: 20px;">
+            <div style="background: rgba(0,0,0,0.3); padding: 14px; border-radius: 8px; border-left: 4px solid #3b82f6;">
+                <span style="font-size: 0.8rem; color: var(--text-secondary); text-transform: uppercase;">Extracted Subjects</span>
+                <strong style="display: block; font-size: 1.4rem; color: #fff;">{{ unique_subjects|length }}</strong>
+            </div>
+            <div style="background: rgba(0,0,0,0.3); padding: 14px; border-radius: 8px; border-left: 4px solid #8b5cf6;">
+                <span style="font-size: 0.8rem; color: var(--text-secondary); text-transform: uppercase;">Faculty to Auto-Assign</span>
+                <strong style="display: block; font-size: 1.4rem; color: #fff;">{{ unique_teachers|length }}</strong>
+            </div>
+            <div style="background: rgba(0,0,0,0.3); padding: 14px; border-radius: 8px; border-left: 4px solid #ec4899;">
+                <span style="font-size: 0.8rem; color: var(--text-secondary); text-transform: uppercase;">Sections / Semesters</span>
+                <strong style="display: block; font-size: 1.4rem; color: #fff;">{{ unique_sections|length }}</strong>
+            </div>
+            <div style="background: rgba(0,0,0,0.3); padding: 14px; border-radius: 8px; border-left: 4px solid #10b981;">
+                <span style="font-size: 0.8rem; color: var(--text-secondary); text-transform: uppercase;">Total Slots Parsed</span>
+                <strong style="display: block; font-size: 1.4rem; color: #fff;">{{ preview_rows|length }}</strong>
+            </div>
+        </div>
+
+        <h3 style="font-size: 1rem; color: #fff; margin-bottom: 10px;">Extracted Academic Setup Preview:</h3>
+        <div style="max-height: 250px; overflow-y: auto; border: 1px solid rgba(255,255,255,0.1); border-radius: 6px;">
+            <table class="data-table" style="width: 100%; margin: 0; font-size: 0.85rem;">
+                <thead>
+                    <tr>
+                        <th>Subject</th>
+                        <th>Code</th>
+                        <th>Faculty</th>
+                        <th>Branch</th>
+                        <th>Section</th>
+                        <th>Semester</th>
+                        <th>Day / Time</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for row in preview_rows[:50] %}
+                    <tr>
+                        <td><strong>{{ row.subject_name }}</strong></td>
+                        <td><span class="badge">{{ row.subject_name[:4]|upper }}</span></td>
+                        <td>{{ row.faculty_name or 'Unassigned' }}</td>
+                        <td>{{ row.branch }}</td>
+                        <td>{{ row.section }}</td>
+                        <td>Sem {{ row.semester }}</td>
+                        <td>{{ row.day }} {{ row.start_time }}-{{ row.end_time }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+    {% endif %}
+
     <div class="manage-note">
         DOCX uploads work best one section at a time. PDF uploads may include multiple sections in one file, and the importer will split them automatically.
     </div>
