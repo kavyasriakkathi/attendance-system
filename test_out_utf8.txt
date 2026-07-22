@@ -1,0 +1,237 @@
+﻿.venv\Scripts\python.exe : test_add_edit_delete_branch_flow (__main__.BranchFlowTest.test_add_edit_delete_branch_flow) 
+... FAIL
+At line:1 char:1
++ .venv\Scripts\python.exe test_branches_flow.py -v > test_out.txt 2>&1
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (test_add_edit_d..._flow) ... FAIL:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+
+======================================================================
+FAIL: test_add_edit_delete_branch_flow (__main__.BranchFlowTest.test_add_edit_delete_branch_flow)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\kavya\OneDrive\Desktop\project 1\test_branches_flow.py", line 87, in test_add_edit_delete_branch_flow
+    self.assertIn(self.section_a_name, add_body)
+    ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: 'COPILOT_BRANCH_42de47c1-A' not found in '<!DOCTYPE html>\n<html lang="en">\n<head>\n    <meta 
+charset="UTF-8" />\n    <meta name="viewport" content="width=device-width, initial-scale=1.0" />\n    <title>Institute 
+Attendance</title>\n    <link rel="preconnect" href="https://fonts.googleapis.com">\n    <link rel="preconnect" 
+href="https://fonts.gstatic.com" crossorigin>\n    <link 
+href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">\n   
+ <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.2/css/all.min.css" />\n    
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>\n    <link rel="stylesheet" href="/static/style.css" 
+/>\n    \n</head>\n<body>\n    <header>\n        <div class="brand">\n            <img src="/static/logo.jpg" 
+alt="Logo" style="height: 44px; border-radius: 8px;">\n            Siddhartha Institute of Technology&Sciences\n       
+ </div>\n        \n        <nav>\n            \n            <a class="nav-link" href="/dashboard"><i class="fa-solid 
+fa-chart-line"></i> Dashboard</a>\n            \n            <a class="nav-link" href="/timetable"><i class="fa-solid 
+fa-calendar-days"></i> Timetable</a>\n            \n            <a class="nav-link" href="/students"><i 
+class="fa-solid fa-users"></i> Students</a>\n            <a class="nav-link" href="/branches"><i class="fa-solid 
+fa-building"></i> Depts</a>\n            <a class="nav-link" href="/subjects"><i class="fa-solid fa-book-open"></i> 
+Subjects</a>\n            \n            <a class="nav-link" href="/admin/teachers"><i class="fa-solid 
+fa-user-tie"></i> Teachers</a>\n            \n            \n            <a class="nav-link" href="/admin/academic"><i 
+class="fa-solid fa-graduation-cap"></i> Academic</a>\n            \n            <a class="nav-link" 
+href="/attendance"><i class="fa-solid fa-calendar-check"></i> Attendance</a>\n            <a class="nav-link" 
+href="/department-dashboard"><i class="fa-solid fa-chart-pie"></i> Summary</a>\n            <a class="nav-link" 
+href="/reports"><i class="fa-solid fa-file-invoice"></i> Reports</a>\n            <a class="nav-link" 
+href="/upload_students"><i class="fa-solid fa-file-arrow-up"></i> Upload Students</a>\n            <a class="nav-link" 
+href="/settings"><i class="fa-solid fa-gear"></i> Settings</a>\n            <a class="logout" href="/logout"><i 
+class="fa-solid fa-right-from-bracket"></i></a>\n            \n        </nav>\n        \n    </header>\n    \n    <nav 
+class="mobile-bottom-nav" aria-label="Mobile navigation">\n        \n        <a class="nav-link" href="/dashboard"><i 
+class="fa-solid fa-house"></i><span>Home</span></a>\n        \n        <a class="nav-link" href="/timetable"><i 
+class="fa-solid fa-calendar-days"></i><span>Timetable</span></a>\n        \n        <a class="nav-link" 
+href="/attendance"><i class="fa-solid fa-calendar-check"></i><span>Attend</span></a>\n        <a class="nav-link" 
+href="/department-dashboard"><i class="fa-solid fa-chart-pie"></i><span>Summary</span></a>\n        <a 
+class="nav-link" href="/logout"><i class="fa-solid fa-right-from-bracket"></i><span>Logout</span></a>\n        \n    
+</nav>\n    \n    <main>\n        \n            \n                <div class="flash-container">\n                    
+\n                        <div class="flash success">Branch added successfully.</div>\n                    \n          
+      </div>\n            \n        \n        \n<div class="card" style="max-width: 1100px; margin: 0 auto 18px;">\n   
+ <h1 style="margin-top: 0;">Branches / Sections</h1>\n    <p style="color: var(--text-secondary); margin-bottom: 
+18px;">\n        Manage branch-section names directly, such as CSM-A, CSM-B, and CSE-A.\n    </p>\n    <form 
+method="post" class="form-row" id="branchForm" style="align-items: end; gap: 14px;">\n        <input type="hidden" 
+name="action" id="branch_action" value="add" />\n        <input type="hidden" name="branch_id" id="branch_id" value="" 
+/>\n        <div>\n            <label>Branch / Section Name</label>\n            <input type="text" name="name" 
+id="branch_name" placeholder="CSM-A" required />\n        </div>\n        <div>\n            <label>Location</label>\n 
+           <input type="text" name="location" id="branch_location" />\n        </div>\n        <div>\n            
+<label>Sections to Create</label>\n            <input type="text" name="sections" id="branch_sections" 
+placeholder="Comma-separated, e.g. A,B,C" />\n            <small style="display:block; margin-top:6px; color: 
+var(--text-secondary);">Used only when adding new branches.</small>\n        </div>\n        <div style="display:flex; 
+gap:10px; align-items:flex-end;">\n            <button type="submit" id="branch_submit_btn">Add Branch</button>\n      
+      <button type="button" id="branch_cancel_btn" onclick="resetBranchForm()" style="display:none; 
+background:#6b7280;">Cancel Edit</button>\n        </div>\n    </form>\n</div>\n<div class="card" style="max-width: 
+1100px; margin: 0 auto;">\n    <div class="table-responsive">\n    <table>\n        <thead>\n            <tr>\n        
+        <th>Branch / Section</th>\n                <th>Location</th>\n                <th>Actions</th>\n            
+</tr>\n        </thead>\n        <tbody>\n            \n            <tr>\n                <td>CIVIL</td>\n             
+   <td>Auto-imported timetable branch</td>\n                <td style="white-space:nowrap;">\n                    
+<button type="button" onclick=\'fillBranchForm(13, "CIVIL", "Auto-imported timetable branch")\' 
+style="background:#f59e0b; margin-right:8px;">Edit</button>\n                    <form method="post" 
+style="display:inline;" onsubmit=\'return confirmDeleteBranch("CIVIL");\'>\n                        <input 
+type="hidden" name="action" value="delete" />\n                        <input type="hidden" name="branch_id" 
+value="13" />\n                        <button type="submit" style="background:#dc2626;">Delete</button>\n             
+       </form>\n                </td>\n            </tr>\n            \n            <tr>\n                
+<td>COPILOT_BRANCH_42de47c1</td>\n                <td>Loc-e6abd3</td>\n                <td 
+style="white-space:nowrap;">\n                    <button type="button" onclick=\'fillBranchForm(17, 
+"COPILOT_BRANCH_42de47c1", "Loc-e6abd3")\' style="background:#f59e0b; margin-right:8px;">Edit</button>\n               
+     <form method="post" style="display:inline;" onsubmit=\'return 
+confirmDeleteBranch("COPILOT_BRANCH_42de47c1");\'>\n                        <input type="hidden" name="action" 
+value="delete" />\n                        <input type="hidden" name="branch_id" value="17" />\n                       
+ <button type="submit" style="background:#dc2626;">Delete</button>\n                    </form>\n                
+</td>\n            </tr>\n            \n            <tr>\n                <td>COPILOT_BRANCH_d3169ca1</td>\n           
+     <td>Loc-b5e29d</td>\n                <td style="white-space:nowrap;">\n                    <button type="button" 
+onclick=\'fillBranchForm(16, "COPILOT_BRANCH_d3169ca1", "Loc-b5e29d")\' style="background:#f59e0b; 
+margin-right:8px;">Edit</button>\n                    <form method="post" style="display:inline;" onsubmit=\'return 
+confirmDeleteBranch("COPILOT_BRANCH_d3169ca1");\'>\n                        <input type="hidden" name="action" 
+value="delete" />\n                        <input type="hidden" name="branch_id" value="16" />\n                       
+ <button type="submit" style="background:#dc2626;">Delete</button>\n                    </form>\n                
+</td>\n            </tr>\n            \n            <tr>\n                <td>COPILOT_BRANCH_e2f21380</td>\n           
+     <td>Loc-25cdf4</td>\n                <td style="white-space:nowrap;">\n                    <button type="button" 
+onclick=\'fillBranchForm(15, "COPILOT_BRANCH_e2f21380", "Loc-25cdf4")\' style="background:#f59e0b; 
+margin-right:8px;">Edit</button>\n                    <form method="post" style="display:inline;" onsubmit=\'return 
+confirmDeleteBranch("COPILOT_BRANCH_e2f21380");\'>\n                        <input type="hidden" name="action" 
+value="delete" />\n                        <input type="hidden" name="branch_id" value="15" />\n                       
+ <button type="submit" style="background:#dc2626;">Delete</button>\n                    </form>\n                
+</td>\n            </tr>\n            \n            <tr>\n                <td>CSD</td>\n                <td>FLOOR 
+2</td>\n                <td style="white-space:nowrap;">\n                    <button type="button" 
+onclick=\'fillBranchForm(2, "CSD", "FLOOR 2")\' style="background:#f59e0b; margin-right:8px;">Edit</button>\n          
+          <form method="post" style="display:inline;" onsubmit=\'return confirmDeleteBranch("CSD");\'>\n               
+         <input type="hidden" name="action" value="delete" />\n                        <input type="hidden" 
+name="branch_id" value="2" />\n                        <button type="submit" 
+style="background:#dc2626;">Delete</button>\n                    </form>\n                </td>\n            </tr>\n   
+         \n            <tr>\n                <td>CSE</td>\n                <td>FLOOR 2</td>\n                <td 
+style="white-space:nowrap;">\n                    <button type="button" onclick=\'fillBranchForm(6, "CSE", "FLOOR 
+2")\' style="background:#f59e0b; margin-right:8px;">Edit</button>\n                    <form method="post" 
+style="display:inline;" onsubmit=\'return confirmDeleteBranch("CSE");\'>\n                        <input type="hidden" 
+name="action" value="delete" />\n                        <input type="hidden" name="branch_id" value="6" />\n          
+              <button type="submit" style="background:#dc2626;">Delete</button>\n                    </form>\n         
+       </td>\n            </tr>\n            \n            <tr>\n                <td>CSE-A</td>\n                
+<td>-</td>\n                <td style="white-space:nowrap;">\n                    <button type="button" 
+onclick=\'fillBranchForm(8, "CSE-A", "")\' style="background:#f59e0b; margin-right:8px;">Edit</button>\n               
+     <form method="post" style="display:inline;" onsubmit=\'return confirmDeleteBranch("CSE-A");\'>\n                  
+      <input type="hidden" name="action" value="delete" />\n                        <input type="hidden" 
+name="branch_id" value="8" />\n                        <button type="submit" 
+style="background:#dc2626;">Delete</button>\n                    </form>\n                </td>\n            </tr>\n   
+         \n            <tr>\n                <td>CSE-B</td>\n                <td>-</td>\n                <td 
+style="white-space:nowrap;">\n                    <button type="button" onclick=\'fillBranchForm(9, "CSE-B", "")\' 
+style="background:#f59e0b; margin-right:8px;">Edit</button>\n                    <form method="post" 
+style="display:inline;" onsubmit=\'return confirmDeleteBranch("CSE-B");\'>\n                        <input 
+type="hidden" name="action" value="delete" />\n                        <input type="hidden" name="branch_id" value="9" 
+/>\n                        <button type="submit" style="background:#dc2626;">Delete</button>\n                    
+</form>\n                </td>\n            </tr>\n            \n            <tr>\n                <td>CSM</td>\n      
+          <td>FLOOR 1</td>\n                <td style="white-space:nowrap;">\n                    <button 
+type="button" onclick=\'fillBranchForm(1, "CSM", "FLOOR 1")\' style="background:#f59e0b; 
+margin-right:8px;">Edit</button>\n                    <form method="post" style="display:inline;" onsubmit=\'return 
+confirmDeleteBranch("CSM");\'>\n                        <input type="hidden" name="action" value="delete" />\n         
+               <input type="hidden" name="branch_id" value="1" />\n                        <button type="submit" 
+style="background:#dc2626;">Delete</button>\n                    </form>\n                </td>\n            </tr>\n   
+         \n            <tr>\n                <td>CSW</td>\n                <td>FLOOR 2</td>\n                <td 
+style="white-space:nowrap;">\n                    <button type="button" onclick=\'fillBranchForm(5, "CSW", "FLOOR 
+2")\' style="background:#f59e0b; margin-right:8px;">Edit</button>\n                    <form method="post" 
+style="display:inline;" onsubmit=\'return confirmDeleteBranch("CSW");\'>\n                        <input type="hidden" 
+name="action" value="delete" />\n                        <input type="hidden" name="branch_id" value="5" />\n          
+              <button type="submit" style="background:#dc2626;">Delete</button>\n                    </form>\n         
+       </td>\n            </tr>\n            \n            <tr>\n                <td>ECE</td>\n                
+<td>FLOOR 1</td>\n                <td style="white-space:nowrap;">\n                    <button type="button" 
+onclick=\'fillBranchForm(7, "ECE", "FLOOR 1")\' style="background:#f59e0b; margin-right:8px;">Edit</button>\n          
+          <form method="post" style="display:inline;" onsubmit=\'return confirmDeleteBranch("ECE");\'>\n               
+         <input type="hidden" name="action" value="delete" />\n                        <input type="hidden" 
+name="branch_id" value="7" />\n                        <button type="submit" 
+style="background:#dc2626;">Delete</button>\n                    </form>\n                </td>\n            </tr>\n   
+         \n            <tr>\n                <td>EEE</td>\n                <td>Auto-imported timetable branch</td>\n   
+             <td style="white-space:nowrap;">\n                    <button type="button" onclick=\'fillBranchForm(12, 
+"EEE", "Auto-imported timetable branch")\' style="background:#f59e0b; margin-right:8px;">Edit</button>\n               
+     <form method="post" style="display:inline;" onsubmit=\'return confirmDeleteBranch("EEE");\'>\n                    
+    <input type="hidden" name="action" value="delete" />\n                        <input type="hidden" 
+name="branch_id" value="12" />\n                        <button type="submit" 
+style="background:#dc2626;">Delete</button>\n                    </form>\n                </td>\n            </tr>\n   
+         \n            <tr>\n                <td>IOT</td>\n                <td>FLOOR 1</td>\n                <td 
+style="white-space:nowrap;">\n                    <button type="button" onclick=\'fillBranchForm(3, "IOT", "FLOOR 
+1")\' style="background:#f59e0b; margin-right:8px;">Edit</button>\n                    <form method="post" 
+style="display:inline;" onsubmit=\'return confirmDeleteBranch("IOT");\'>\n                        <input type="hidden" 
+name="action" value="delete" />\n                        <input type="hidden" name="branch_id" value="3" />\n          
+              <button type="submit" style="background:#dc2626;">Delete</button>\n                    </form>\n         
+       </td>\n            </tr>\n            \n            <tr>\n                <td>MECH</td>\n                
+<td>Auto-imported timetable branch</td>\n                <td style="white-space:nowrap;">\n                    <button 
+type="button" onclick=\'fillBranchForm(14, "MECH", "Auto-imported timetable branch")\' style="background:#f59e0b; 
+margin-right:8px;">Edit</button>\n                    <form method="post" style="display:inline;" onsubmit=\'return 
+confirmDeleteBranch("MECH");\'>\n                        <input type="hidden" name="action" value="delete" />\n        
+                <input type="hidden" name="branch_id" value="14" />\n                        <button type="submit" 
+style="background:#dc2626;">Delete</button>\n                    </form>\n                </td>\n            </tr>\n   
+         \n            <tr>\n                <td>MECHANICAL</td>\n                <td>GROUND FLOOR</td>\n              
+  <td style="white-space:nowrap;">\n                    <button type="button" onclick=\'fillBranchForm(4, 
+"MECHANICAL", "GROUND FLOOR")\' style="background:#f59e0b; margin-right:8px;">Edit</button>\n                    <form 
+method="post" style="display:inline;" onsubmit=\'return confirmDeleteBranch("MECHANICAL");\'>\n                        
+<input type="hidden" name="action" value="delete" />\n                        <input type="hidden" name="branch_id" 
+value="4" />\n                        <button type="submit" style="background:#dc2626;">Delete</button>\n              
+      </form>\n                </td>\n            </tr>\n            \n            <tr>\n                
+<td>PRINCIPAL</td>\n                <td>Auto-imported timetable branch</td>\n                <td 
+style="white-space:nowrap;">\n                    <button type="button" onclick=\'fillBranchForm(11, "PRINCIPAL", 
+"Auto-imported timetable branch")\' style="background:#f59e0b; margin-right:8px;">Edit</button>\n                    
+<form method="post" style="display:inline;" onsubmit=\'return confirmDeleteBranch("PRINCIPAL");\'>\n                   
+     <input type="hidden" name="action" value="delete" />\n                        <input type="hidden" 
+name="branch_id" value="11" />\n                        <button type="submit" 
+style="background:#dc2626;">Delete</button>\n                    </form>\n                </td>\n            </tr>\n   
+         \n            <tr>\n                <td>TestBranch</td>\n                <td>Room 1</td>\n                <td 
+style="white-space:nowrap;">\n                    <button type="button" onclick=\'fillBranchForm(10, "TestBranch", 
+"Room 1")\' style="background:#f59e0b; margin-right:8px;">Edit</button>\n                    <form method="post" 
+style="display:inline;" onsubmit=\'return confirmDeleteBranch("TestBranch");\'>\n                        <input 
+type="hidden" name="action" value="delete" />\n                        <input type="hidden" name="branch_id" 
+value="10" />\n                        <button type="submit" style="background:#dc2626;">Delete</button>\n             
+       </form>\n                </td>\n            </tr>\n            \n        </tbody>\n    </table>\n    
+</div>\n</div>\n<script>\nfunction fillBranchForm(branchId, name, location) {\n    
+document.getElementById(\'branch_action\').value = \'edit\';\n    document.getElementById(\'branch_id\').value = 
+branchId;\n    document.getElementById(\'branch_name\').value = name;\n    
+document.getElementById(\'branch_location\').value = location;\n    document.getElementById(\'branch_sections\').value 
+= \'\';\n    document.getElementById(\'branch_submit_btn\').textContent = \'Save Changes\';\n    
+document.getElementById(\'branch_cancel_btn\').style.display = \'inline-block\';\n    
+document.getElementById(\'branchForm\').scrollIntoView({ behavior: \'smooth\', block: \'start\' });\n}\n\nfunction 
+resetBranchForm() {\n    document.getElementById(\'branch_action\').value = \'add\';\n    
+document.getElementById(\'branch_id\').value = \'\';\n    document.getElementById(\'branch_name\').value = \'\';\n    
+document.getElementById(\'branch_location\').value = \'\';\n    document.getElementById(\'branch_sections\').value = 
+\'\';\n    document.getElementById(\'branch_submit_btn\').textContent = \'Add Branch\';\n    
+document.getElementById(\'branch_cancel_btn\').style.display = \'none\';\n    
+document.getElementById(\'branch_sections\').placeholder = \'Comma-separated, e.g. A,B,C\';\n}\n\nfunction 
+confirmDeleteBranch(name) {\n    return confirm(`Delete branch ${name}? This cannot be undone.`);\n}\n</script>\n\n    
+</main>\n\n    <script>\n        (function () {\n            const navs = 
+Array.from(document.querySelectorAll(\'header nav, .mobile-bottom-nav\'));\n            const nav = navs[0];\n         
+   if (!nav) return;\n\n            const links = navs.flatMap((node) => 
+Array.from(node.querySelectorAll(\'a.nav-link\')));\n            if (!links.length) return;\n\n            const 
+currentPath = window.location.pathname || \'/\';\n\n            const normalizePath = (path) => {\n                if 
+(!path) return \'/\';\n                const trimmed = path.trim();\n                if (trimmed.length > 1 && 
+trimmed.endsWith(\'/\')) return trimmed.slice(0, -1);\n                return trimmed;\n            };\n\n            
+const isPrefixMatch = (candidate, full) => {\n                const c = normalizePath(candidate);\n                
+const f = normalizePath(full);\n                if (c === \'/\') return f === \'/\';\n                return f === c 
+|| f.startsWith(c + \'/\');\n            };\n\n            const pickActiveLink = () => {\n                let best = 
+null;\n                for (const a of links) {\n                    let path;\n                    try {\n            
+            path = new URL(a.href, window.location.href).pathname;\n                    } catch {\n                    
+    continue;\n                    }\n\n                    if (!isPrefixMatch(path, currentPath)) continue;\n         
+           if (!best) {\n                        best = a;\n                        continue;\n                    }\n 
+                   const bestPath = new URL(best.href, window.location.href).pathname;\n                    if 
+(normalizePath(path).length > normalizePath(bestPath).length) {\n                        best = a;\n                   
+ }\n                }\n                return best;\n            };\n\n            const setActive = () => {\n         
+       links.forEach((a) => a.classList.remove(\'is-active\'));\n                const active = pickActiveLink();\n    
+            if (active) active.classList.add(\'is-active\');\n            };\n\n            // Persist a short click 
+effect across navigation.\n            links.forEach((a) => {\n                a.addEventListener(\'click\', () => {\n 
+                   try {\n                        const hrefPath = new URL(a.href, window.location.href).pathname;\n   
+                     sessionStorage.setItem(\'navClickedPath\', normalizePath(hrefPath));\n                    } catch 
+{\n                        // ignore\n                    }\n                });\n            });\n\n            
+setActive();\n\n            try {\n                const clickedPath = sessionStorage.getItem(\'navClickedPath\');\n   
+             if (clickedPath) {\n                    sessionStorage.removeItem(\'navClickedPath\');\n                  
+  const target = links.find((a) => {\n                        try {\n                            return 
+normalizePath(new URL(a.href, window.location.href).pathname) === clickedPath;\n                        } catch {\n    
+                        return false;\n                        }\n                    });\n                    if 
+(target) {\n                        target.classList.add(\'just-clicked\');\n                        
+window.setTimeout(() => target.classList.remove(\'just-clicked\'), 500);\n                    }\n                }\n   
+         } catch {\n                // ignore\n            }\n        })();\n    </script>\n</body>\n</html>'
+
+----------------------------------------------------------------------
+Ran 1 test in 0.407s
+
+FAILED (failures=1)
+App directory: C:\Users\kavya\OneDrive\Desktop\project 1
+Using database path: C:\Users\kavya\OneDrive\Desktop\project 1\attendance.db
+Current working directory: C:\Users\kavya\OneDrive\Desktop\project 1
+Database path: C:\Users\kavya\OneDrive\Desktop\project 1\attendance.db
+Database file exists: True
+Database file size: 495616 bytes
+Database initialized successfully
+Timetable routes registered

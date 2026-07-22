@@ -42,6 +42,10 @@ MIGRATE_TABLES = [
     "students",
     "users",
     "subjects",
+    "teachers",
+    "teacher_branches",
+    "teacher_subjects",
+    "teacher_subject_assignments",
     "attendance",
     "timetable_entries",
     "settings",
@@ -196,6 +200,21 @@ CREATE_STATEMENTS = [
         UNIQUE(teacher_id, subject_id)
     );
     """,
+    """
+    CREATE TABLE IF NOT EXISTS teacher_subject_assignments (
+        id SERIAL PRIMARY KEY,
+        teacher_id INTEGER NOT NULL,
+        subject_id INTEGER NOT NULL,
+        branch_id INTEGER NOT NULL,
+        section TEXT,
+        semester TEXT,
+        academic_year TEXT
+    );
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_teacher_subject_assignments_teacher
+        ON teacher_subject_assignments (teacher_id);
+    """,
 ]
 
 # Tables that have a SERIAL 'id' column and need their sequence reset
@@ -203,7 +222,7 @@ SERIAL_TABLES = [
     "branches", "students", "users", "subjects", "attendance",
     "timetable_entries", "settings", "subject_aliases",
     "attendance_sessions", "attendance_records",
-    "teachers", "teacher_branches", "teacher_subjects",
+    "teachers", "teacher_branches", "teacher_subjects", "teacher_subject_assignments",
 ]
 
 
@@ -315,6 +334,39 @@ def main():
     # ── 3. Open connections ───────────────────────────────────────────────
     sqlite_conn = sqlite3.connect(sqlite_path)
     sqlite_conn.row_factory = sqlite3.Row
+
+    # Ensure teacher_subject_assignments exists in SQLite
+    sqlite_conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS teacher_subject_assignments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            teacher_id INTEGER NOT NULL,
+            subject_id INTEGER NOT NULL,
+            branch_id INTEGER NOT NULL,
+            section TEXT,
+            semester TEXT,
+            academic_year TEXT
+        )
+        """
+    )
+    sqlite_conn.commit()
+
+    # Populate teacher_subject_assignments from legacy teacher_assignments in SQLite
+    try:
+        tsa_count = sqlite_conn.execute("SELECT COUNT(*) FROM teacher_subject_assignments").fetchone()[0]
+        if tsa_count == 0:
+            ta_exists = sqlite_conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='teacher_assignments'").fetchone()
+            if ta_exists:
+                print("Populating teacher_subject_assignments from legacy teacher_assignments in SQLite...")
+                sqlite_conn.execute(
+                    """
+                    INSERT INTO teacher_subject_assignments (id, teacher_id, subject_id, branch_id, section)
+                    SELECT id, teacher_id, subject_id, branch_id, section FROM teacher_assignments
+                    """
+                )
+                sqlite_conn.commit()
+    except Exception as e:
+        print("Warning populating teacher_subject_assignments in SQLite:", e)
 
     try:
         pg_conn = psycopg2.connect(pg_url, sslmode="require", connect_timeout=15)

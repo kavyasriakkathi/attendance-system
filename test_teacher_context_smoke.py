@@ -57,7 +57,17 @@ class TeacherContextSmokeTest(unittest.TestCase):
         db = get_db()
         try:
             branch = db.execute("SELECT id FROM branches ORDER BY id LIMIT 1").fetchone()
+            if not branch:
+                db.execute("INSERT INTO branches (name, location) VALUES (?,?)", ("CSE", "Main"))
+                db.commit()
+                branch = db.execute("SELECT id FROM branches ORDER BY id LIMIT 1").fetchone()
+
             subject = db.execute("SELECT id, name FROM subjects ORDER BY id LIMIT 1").fetchone()
+            if not subject:
+                db.execute("INSERT INTO subjects (name, branch_id) VALUES (?,?)", ("Mathematics", row_get(branch, "id")))
+                db.commit()
+                subject = db.execute("SELECT id, name FROM subjects ORDER BY id LIMIT 1").fetchone()
+
             if not branch or not subject:
                 raise AssertionError("Branches/subjects did not initialize correctly")
 
