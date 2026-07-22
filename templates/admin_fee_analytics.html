@@ -1,0 +1,155 @@
+{% extends "layout.html" %}
+{% block head %}
+<title>Fee Analytics - ERP Admin</title>
+<style>
+  .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1.25rem; margin-bottom: 2rem; }
+  .stat-card { background: #ffffff; border-radius: 12px; padding: 1.25rem 1.5rem; box-shadow: 0 4px 15px rgba(0, 0, 0, 0.05); border-left: 5px solid #2563eb; }
+  .stat-card.green { border-left-color: #10b981; }
+  .stat-card.amber { border-left-color: #f59e0b; }
+  .stat-card.purple { border-left-color: #8b5cf6; }
+  .stat-val { font-size: 1.75rem; font-weight: 800; color: #1e293b; margin-top: 0.35rem; }
+  .stat-lbl { font-size: 0.85rem; color: #64748b; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600; }
+  .card-box { background: #ffffff; border-radius: 12px; padding: 1.5rem; box-shadow: 0 4px 15px rgba(0, 0, 0, 0.05); margin-bottom: 2rem; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="container-fluid" style="max-width: 1200px; margin: 0 auto; padding: 1.5rem 1rem;">
+  <div style="margin-bottom: 1.5rem;">
+    <a href="{{ url_for('admin_fees') }}" style="color:#2563eb; text-decoration:none; font-weight:600;"><i class="fa-solid fa-arrow-left"></i> Back to Fee Dashboard</a>
+    <h2 style="margin:0.5rem 0 0 0; color:#0f172a; font-weight:800;"><i class="fa-solid fa-chart-pie" style="color:#6366f1;"></i> Advanced Fee Analytics & Reports</h2>
+    <p style="margin:0.25rem 0 0 0; color:#64748b; font-size:0.95rem;">Branch-wise, semester-wise, and category-wise financial insights</p>
+  </div>
+
+  <div class="stat-grid">
+    <div class="stat-card blue">
+      <div class="stat-lbl">Total Fee Assigned</div>
+      <div class="stat-val">₹{{ "{:,.2f}".format(total_assigned) }}</div>
+    </div>
+    <div class="stat-card green">
+      <div class="stat-lbl">Total Collected</div>
+      <div class="stat-val" style="color:#059669;">₹{{ "{:,.2f}".format(total_paid) }}</div>
+    </div>
+    <div class="stat-card amber">
+      <div class="stat-lbl">Total Pending</div>
+      <div class="stat-val" style="color:#d97706;">₹{{ "{:,.2f}".format(total_pending) }}</div>
+    </div>
+    <div class="stat-card purple">
+      <div class="stat-lbl">Collection Efficiency</div>
+      <div class="stat-val">{{ collection_rate }}%</div>
+    </div>
+  </div>
+
+  <div style="display:grid; grid-template-columns: 1fr 1fr; gap:1.5rem;">
+    <!-- Branch-wise collection table -->
+    <div class="card-box">
+      <h3 style="margin-top:0; color:#1e293b; font-size:1.1rem; font-weight:700;"><i class="fa-solid fa-building" style="color:#2563eb;"></i> Branch-Wise Collection</h3>
+      <div style="overflow-x:auto; margin-top:1rem;">
+        <table style="width:100%; border-collapse:collapse; text-align:left; font-size:0.88rem;">
+          <thead>
+            <tr style="background:#f8fafc; border-bottom:2px solid #e2e8f0; color:#475569;">
+              <th style="padding:0.6rem;">Branch</th>
+              <th style="padding:0.6rem;">Collected (₹)</th>
+              <th style="padding:0.6rem;">Transactions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for b in branch_rows %}
+            <tr style="border-bottom:1px solid #f1f5f9;">
+              <td style="padding:0.6rem; font-weight:600;">{{ b.branch_name or 'Unassigned' }}</td>
+              <td style="padding:0.6rem; font-weight:700; color:#059669;">₹{{ "{:,.2f}".format(b.collected) }}</td>
+              <td style="padding:0.6rem;">{{ b.payment_count }}</td>
+            </tr>
+            {% else %}
+            <tr><td colspan="3" style="padding:1rem; text-align:center; color:#94a3b8;">No data available.</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Category-wise collection -->
+    <div class="card-box">
+      <h3 style="margin-top:0; color:#1e293b; font-size:1.1rem; font-weight:700;"><i class="fa-solid fa-layer-group" style="color:#6366f1;"></i> Category-Wise Breakdown</h3>
+      <div style="overflow-x:auto; margin-top:1rem;">
+        <table style="width:100%; border-collapse:collapse; text-align:left; font-size:0.88rem;">
+          <thead>
+            <tr style="background:#f8fafc; border-bottom:2px solid #e2e8f0; color:#475569;">
+              <th style="padding:0.6rem;">Category</th>
+              <th style="padding:0.6rem;">Collected (₹)</th>
+              <th style="padding:0.6rem;">Assignments</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for c in category_rows %}
+            <tr style="border-bottom:1px solid #f1f5f9;">
+              <td style="padding:0.6rem; font-weight:600;">{{ c.category }}</td>
+              <td style="padding:0.6rem; font-weight:700; color:#059669;">₹{{ "{:,.2f}".format(c.collected) }}</td>
+              <td style="padding:0.6rem;">{{ c.assignments }}</td>
+            </tr>
+            {% else %}
+            <tr><td colspan="3" style="padding:1rem; text-align:center; color:#94a3b8;">No data available.</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div style="display:grid; grid-template-columns: 1fr 1fr; gap:1.5rem;">
+    <!-- Semester-wise collection -->
+    <div class="card-box">
+      <h3 style="margin-top:0; color:#1e293b; font-size:1.1rem; font-weight:700;"><i class="fa-solid fa-graduation-cap" style="color:#10b981;"></i> Semester-Wise Collection</h3>
+      <div style="overflow-x:auto; margin-top:1rem;">
+        <table style="width:100%; border-collapse:collapse; text-align:left; font-size:0.88rem;">
+          <thead>
+            <tr style="background:#f8fafc; border-bottom:2px solid #e2e8f0; color:#475569;">
+              <th style="padding:0.6rem;">Semester</th>
+              <th style="padding:0.6rem;">Collected (₹)</th>
+              <th style="padding:0.6rem;">Students</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for s in semester_rows %}
+            <tr style="border-bottom:1px solid #f1f5f9;">
+              <td style="padding:0.6rem; font-weight:600;">{{ s.semester or 'All Semesters' }}</td>
+              <td style="padding:0.6rem; font-weight:700; color:#059669;">₹{{ "{:,.2f}".format(s.collected) }}</td>
+              <td style="padding:0.6rem;">{{ s.student_count }}</td>
+            </tr>
+            {% else %}
+            <tr><td colspan="3" style="padding:1rem; text-align:center; color:#94a3b8;">No data available.</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Monthly trend -->
+    <div class="card-box">
+      <h3 style="margin-top:0; color:#1e293b; font-size:1.1rem; font-weight:700;"><i class="fa-solid fa-calendar-days" style="color:#f59e0b;"></i> Monthly Collection Trend</h3>
+      <div style="overflow-x:auto; margin-top:1rem;">
+        <table style="width:100%; border-collapse:collapse; text-align:left; font-size:0.88rem;">
+          <thead>
+            <tr style="background:#f8fafc; border-bottom:2px solid #e2e8f0; color:#475569;">
+              <th style="padding:0.6rem;">Month</th>
+              <th style="padding:0.6rem;">Total (₹)</th>
+              <th style="padding:0.6rem;">Transactions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for m in monthly_rows %}
+            <tr style="border-bottom:1px solid #f1f5f9;">
+              <td style="padding:0.6rem; font-weight:600;">{{ m.month }}</td>
+              <td style="padding:0.6rem; font-weight:700; color:#059669;">₹{{ "{:,.2f}".format(m.monthly_total) }}</td>
+              <td style="padding:0.6rem;">{{ m.tx_count }}</td>
+            </tr>
+            {% else %}
+            <tr><td colspan="3" style="padding:1rem; text-align:center; color:#94a3b8;">No data available.</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

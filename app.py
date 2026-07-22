@@ -2000,6 +2000,17 @@ def init_db(db=None):
             ("teacher1", generate_password_hash("1234"), "teacher"),
         )
 
+    # ✅ Accountant check
+    accountant = db.execute(
+        f"SELECT id FROM users WHERE username = {placeholder}", ("accountant",)
+    ).fetchone()
+
+    if not accountant:
+        db.execute(
+            f"INSERT INTO users (username, password, role) VALUES ({placeholder}, {placeholder}, {placeholder})",
+            ("accountant", generate_password_hash("accountant123"), "accountant"),
+        )
+
     # ✅ Default low attendance threshold setting
     if not db.execute(f"SELECT id FROM settings WHERE key = {placeholder}", ("low_attendance_threshold",)).fetchone():
         db.execute(
@@ -2096,6 +2107,9 @@ def login():
                 session["user_id"] = row_get(user, "id")
                 session["username"] = row_get(user, "username")
                 session["role"] = row_get(user, "role")
+                # Redirect accountant to dedicated portal
+                if row_get(user, "role") == "accountant":
+                    return redirect(url_for("accountant_dashboard"))
                 return redirect(url_for("dashboard"))
 
             flash("Invalid username or password.", "error")
@@ -9863,7 +9877,11 @@ def admin_promotions():
 # ==========================================
 
 def _ensure_fee_schema(db):
-    """Ensure Fee Management system tables exist safely across SQLite and PostgreSQL."""
+    """Ensure Fee Management system tables exist safely across SQLite and PostgreSQL.
+
+    Safe to call on every request — uses IF NOT EXISTS guards.
+    No data is ever deleted.  New columns are added via ALTER TABLE when missing.
+    """
     is_pg = str(app.config.get("DATABASE", "")).startswith("postgres")
     try:
         if is_pg:
@@ -9890,6 +9908,7 @@ def _ensure_fee_schema(db):
                 discount_amount REAL DEFAULT 0,
                 due_date TEXT,
                 status TEXT DEFAULT 'Unpaid',
+                section TEXT,
                 assigned_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 CONSTRAINT uq_student_fee UNIQUE (student_id, fee_structure_id)
             );
@@ -9907,6 +9926,20 @@ def _ensure_fee_schema(db):
                 notes TEXT,
                 recorded_by TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+            db.execute("""
+            CREATE TABLE IF NOT EXISTS fee_installments (
+                id SERIAL PRIMARY KEY,
+                assignment_id INTEGER NOT NULL REFERENCES student_fee_assignments(id) ON DELETE CASCADE,
+                installment_number INTEGER NOT NULL,
+                installment_amount REAL NOT NULL,
+                due_date TEXT NOT NULL,
+                status TEXT DEFAULT 'Pending',
+                paid_date TEXT,
+                payment_id INTEGER,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE (assignment_id, installment_number)
             );
             """)
         else:
@@ -9933,6 +9966,7 @@ def _ensure_fee_schema(db):
                 discount_amount REAL DEFAULT 0,
                 due_date TEXT,
                 status TEXT DEFAULT 'Unpaid',
+                section TEXT,
                 assigned_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE (student_id, fee_structure_id),
                 FOREIGN KEY (student_id) REFERENCES students(id),
@@ -9956,12 +9990,63 @@ def _ensure_fee_schema(db):
                 FOREIGN KEY (student_id) REFERENCES students(id)
             );
             """)
+            db.execute("""
+            CREATE TABLE IF NOT EXISTS fee_installments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                assignment_id INTEGER NOT NULL,
+                installment_number INTEGER NOT NULL,
+                installment_amount REAL NOT NULL,
+                due_date TEXT NOT NULL,
+                status TEXT DEFAULT 'Pending',
+                paid_date TEXT,
+                payment_id INTEGER,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE (assignment_id, installment_number),
+                FOREIGN KEY (assignment_id) REFERENCES student_fee_assignments(id)
+            );
+            """)
+        try:
+            db.commit()
+        except Exception:
+            pass
+        # --- Safe column migrations (no data loss) ---
+        _fee_safe_migrations(db)
+    except Exception as e:
+        print(f"[_ensure_fee_schema WARNING]: {repr(e)}")
+
+
+def _fee_safe_migrations(db):
+    """Apply safe column-level migrations for the fee tables."""
+    is_pg = str(app.config.get("DATABASE", "")).startswith("postgres")
+    try:
+        if is_pg:
+            # Add 'section' to student_fee_assignments if missing
+            db.execute("""
+                DO $$ BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name='student_fee_assignments' AND column_name='section'
+                    ) THEN
+                        ALTER TABLE student_fee_assignments ADD COLUMN section TEXT;
+                    END IF;
+                END $$;
+            """)
+        else:
+            # SQLite: check PRAGMA
+            try:
+                cols = {row[1].lower() for row in db.execute("PRAGMA table_info(student_fee_assignments)").fetchall()}
+                if "section" not in cols:
+                    db.execute("ALTER TABLE student_fee_assignments ADD COLUMN section TEXT")
+            except Exception:
+                pass
         try:
             db.commit()
         except Exception:
             pass
     except Exception as e:
-        print(f"[_ensure_fee_schema WARNING]: {repr(e)}")
+        print(f"[_fee_safe_migrations WARNING]: {repr(e)}")
+
+
 
 
 def _recalculate_assignment_status(db, assignment_id):
@@ -10626,6 +10711,529 @@ def fee_receipt(payment_id):
         if db:
             try: db.close()
             except: pass
+
+
+# ==========================================
+# ACCOUNTANT PORTAL ROUTES
+# ==========================================
+
+def _accountant_required(f):
+    """Decorator: only allow admin or accountant roles."""
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        role = session.get("role")
+        if role not in ("admin", "accountant"):
+            flash("Accountant or Admin login required.", "danger")
+            return redirect(url_for("login"))
+        return f(*args, **kwargs)
+    return decorated
+
+
+@app.route("/accountant/dashboard", methods=["GET"])
+def accountant_dashboard():
+    role = session.get("role")
+    if role not in ("admin", "accountant"):
+        flash("Accountant login required.", "danger")
+        return redirect(url_for("login"))
+
+    db = get_db()
+    _ensure_fee_schema(db)
+    placeholder = get_placeholder()
+
+    try:
+        today_str = date.today().isoformat()
+        today_row = db.execute(
+            f"SELECT COALESCE(SUM(amount_paid),0) AS today_total, COUNT(*) AS today_count FROM fee_payments WHERE payment_date = {placeholder}",
+            (today_str,)
+        ).fetchone()
+        today_total = float(row_get(today_row, "today_total") or 0.0)
+        today_count = int(row_get(today_row, "today_count") or 0)
+
+        overall = db.execute(
+            "SELECT COALESCE(SUM(amount_paid),0) AS grand_total FROM fee_payments"
+        ).fetchone()
+        grand_total = float(row_get(overall, "grand_total") or 0.0)
+
+        pending_count = db.execute(
+            "SELECT COUNT(*) AS cnt FROM student_fee_assignments WHERE status != 'Paid'"
+        ).fetchone()
+        pending_assignments = int(row_get(pending_count, "cnt") or 0)
+
+        recent_payments = db.execute("""
+        SELECT fp.id, fp.receipt_number, fp.amount_paid, fp.payment_date, fp.payment_mode,
+               fp.transaction_id, s.name AS student_name, s.enrollment, fs.fee_name
+        FROM fee_payments fp
+        JOIN students s ON fp.student_id = s.id
+        JOIN student_fee_assignments sfa ON fp.assignment_id = sfa.id
+        JOIN fee_structures fs ON sfa.fee_structure_id = fs.id
+        ORDER BY fp.id DESC LIMIT 15
+        """).fetchall()
+
+        mode_rows = db.execute("""
+        SELECT payment_mode, COALESCE(SUM(amount_paid),0) AS mode_total, COUNT(*) AS mode_count
+        FROM fee_payments GROUP BY payment_mode ORDER BY mode_total DESC
+        """).fetchall()
+
+        return render_template(
+            "accountant_dashboard.html",
+            today_total=today_total,
+            today_count=today_count,
+            grand_total=grand_total,
+            pending_assignments=pending_assignments,
+            recent_payments=recent_payments,
+            mode_rows=mode_rows,
+            today_date=today_str,
+        )
+    except Exception as e:
+        print(f"[accountant_dashboard ERROR]: {repr(e)}")
+        flash(f"Error loading accountant dashboard: {str(e)}", "error")
+        return redirect(url_for("login"))
+    finally:
+        if db:
+            try: db.close()
+            except: pass
+
+
+@app.route("/accountant/record-payment", methods=["GET", "POST"])
+@_accountant_required
+def accountant_record_payment():
+    db = get_db()
+    _ensure_fee_schema(db)
+    placeholder = get_placeholder()
+
+    if request.method == "POST":
+        assignment_id = _coerce_int(request.form.get("assignment_id"))
+        amount_paid = float(request.form.get("amount_paid") or 0.0)
+        payment_date = request.form.get("payment_date", date.today().isoformat()).strip()
+        payment_mode = request.form.get("payment_mode", "Cash").strip()
+        transaction_id = request.form.get("transaction_id", "").strip()
+        notes = request.form.get("notes", "").strip()
+
+        if not assignment_id or amount_paid <= 0:
+            flash("Invalid fee assignment or payment amount.", "error")
+            return redirect(url_for("accountant_record_payment"))
+
+        asg = db.execute(
+            f"SELECT student_id FROM student_fee_assignments WHERE id = {placeholder}",
+            (assignment_id,)
+        ).fetchone()
+        if not asg:
+            flash("Fee assignment not found.", "error")
+            return redirect(url_for("accountant_record_payment"))
+
+        student_id = row_get(asg, "student_id")
+        if not transaction_id:
+            transaction_id = f"TXN-{int(time.time())}-{assignment_id}"
+
+        receipt_number = f"REC-{date.today().strftime('%Y%m%d')}-{int(time.time()) % 100000:05d}"
+        recorded_by = session.get("username", "accountant")
+
+        try:
+            cur = db.execute(
+                f"INSERT INTO fee_payments (assignment_id, student_id, amount_paid, payment_date, payment_mode, transaction_id, receipt_number, notes, recorded_by) VALUES ({placeholder},{placeholder},{placeholder},{placeholder},{placeholder},{placeholder},{placeholder},{placeholder},{placeholder})",
+                (assignment_id, student_id, amount_paid, payment_date, payment_mode, transaction_id, receipt_number, notes, recorded_by)
+            )
+            if hasattr(cur, "lastrowid") and cur.lastrowid:
+                payment_id = cur.lastrowid
+            else:
+                pr = db.execute(f"SELECT id FROM fee_payments WHERE receipt_number = {placeholder}", (receipt_number,)).fetchone()
+                payment_id = row_get(pr, "id")
+
+            _recalculate_assignment_status(db, assignment_id)
+            db.commit()
+            flash(f"Payment of ₹{amount_paid:,.2f} recorded! Receipt: {receipt_number}", "success")
+            return redirect(url_for("fee_receipt", payment_id=payment_id))
+        except Exception as e:
+            print(f"[accountant_record_payment POST ERROR]: {repr(e)}")
+            flash(f"Error recording payment: {str(e)}", "error")
+            return redirect(url_for("accountant_record_payment"))
+        finally:
+            if db:
+                try: db.close()
+                except: pass
+
+    selected_assignment_id = _coerce_int(request.args.get("assignment_id"))
+    search_q = request.args.get("q", "").strip()
+    try:
+        sql = """
+        SELECT sfa.id AS assignment_id, s.name AS student_name, s.enrollment, fs.fee_name, fs.category,
+               sfa.custom_amount, sfa.discount_amount, fs.amount AS default_amount, sfa.status,
+               b.name AS branch_name, fs.academic_year, fs.semester
+        FROM student_fee_assignments sfa
+        JOIN students s ON sfa.student_id = s.id
+        JOIN fee_structures fs ON sfa.fee_structure_id = fs.id
+        LEFT JOIN branches b ON s.branch_id = b.id
+        WHERE sfa.status != 'Paid'
+        """
+        params = []
+        if search_q:
+            sql += f" AND (LOWER(s.name) LIKE {placeholder} OR LOWER(s.enrollment) LIKE {placeholder})"
+            params.extend([f"%{search_q.lower()}%", f"%{search_q.lower()}%"])
+        sql += " ORDER BY s.name ASC"
+        assignments = db.execute(sql, tuple(params)).fetchall()
+
+        return render_template(
+            "accountant_record_payment.html",
+            assignments=assignments,
+            selected_assignment_id=selected_assignment_id,
+            today_date=date.today().isoformat(),
+            search_q=search_q,
+        )
+    except Exception as e:
+        print(f"[accountant_record_payment GET ERROR]: {repr(e)}")
+        flash("Error loading payment form.", "error")
+        return redirect(url_for("accountant_dashboard"))
+    finally:
+        if db:
+            try: db.close()
+            except: pass
+
+
+@app.route("/accountant/reports", methods=["GET"])
+@_accountant_required
+def accountant_reports():
+    db = get_db()
+    _ensure_fee_schema(db)
+    placeholder = get_placeholder()
+
+    date_from = request.args.get("date_from", "").strip()
+    date_to = request.args.get("date_to", "").strip()
+    selected_mode = request.args.get("payment_mode", "").strip()
+    selected_branch_id = _coerce_int(request.args.get("branch_id"))
+
+    try:
+        sql = """
+        SELECT fp.id, fp.receipt_number, fp.amount_paid, fp.payment_date, fp.payment_mode,
+               fp.transaction_id, fp.recorded_by, fp.notes,
+               s.name AS student_name, s.enrollment,
+               b.name AS branch_name, fs.fee_name, fs.category
+        FROM fee_payments fp
+        JOIN students s ON fp.student_id = s.id
+        LEFT JOIN branches b ON s.branch_id = b.id
+        JOIN student_fee_assignments sfa ON fp.assignment_id = sfa.id
+        JOIN fee_structures fs ON sfa.fee_structure_id = fs.id
+        WHERE 1=1
+        """
+        params = []
+        if date_from:
+            sql += f" AND fp.payment_date >= {placeholder}"
+            params.append(date_from)
+        if date_to:
+            sql += f" AND fp.payment_date <= {placeholder}"
+            params.append(date_to)
+        if selected_mode:
+            sql += f" AND fp.payment_mode = {placeholder}"
+            params.append(selected_mode)
+        if selected_branch_id:
+            sql += f" AND s.branch_id = {placeholder}"
+            params.append(selected_branch_id)
+        sql += " ORDER BY fp.payment_date DESC, fp.id DESC"
+        payments = db.execute(sql, tuple(params)).fetchall()
+
+        total_collected = sum(float(row_get(p, "amount_paid") or 0.0) for p in payments)
+
+        mode_breakdown = {}
+        for p in payments:
+            m = row_get(p, "payment_mode") or "Other"
+            mode_breakdown[m] = mode_breakdown.get(m, 0.0) + float(row_get(p, "amount_paid") or 0.0)
+
+        branches = db.execute("SELECT id, name FROM branches ORDER BY name ASC").fetchall()
+
+        return render_template(
+            "accountant_reports.html",
+            payments=payments,
+            total_collected=total_collected,
+            mode_breakdown=mode_breakdown,
+            branches=branches,
+            date_from=date_from,
+            date_to=date_to,
+            selected_mode=selected_mode,
+            selected_branch_id=selected_branch_id,
+        )
+    except Exception as e:
+        print(f"[accountant_reports ERROR]: {repr(e)}")
+        flash("Error generating reports.", "error")
+        return redirect(url_for("accountant_dashboard"))
+    finally:
+        if db:
+            try: db.close()
+            except: pass
+
+
+# ==========================================
+# INSTALLMENT MANAGEMENT ROUTES
+# ==========================================
+
+@app.route("/admin/fees/installments/<int:assignment_id>", methods=["GET", "POST"])
+def admin_fee_installments(assignment_id):
+    role = session.get("role")
+    if role not in ("admin", "accountant"):
+        flash("Admin login required.", "danger")
+        return redirect(url_for("login"))
+
+    db = get_db()
+    _ensure_fee_schema(db)
+    placeholder = get_placeholder()
+
+    try:
+        asg = db.execute(f"""
+        SELECT sfa.*, s.name AS student_name, s.enrollment,
+               fs.fee_name, fs.amount AS default_amount, fs.academic_year, fs.semester
+        FROM student_fee_assignments sfa
+        JOIN students s ON sfa.student_id = s.id
+        JOIN fee_structures fs ON sfa.fee_structure_id = fs.id
+        WHERE sfa.id = {placeholder}
+        """, (assignment_id,)).fetchone()
+
+        if not asg:
+            flash("Fee assignment not found.", "error")
+            return redirect(url_for("admin_fees"))
+
+        if request.method == "POST":
+            action = request.form.get("action", "add")
+
+            if action == "generate":
+                num_installments = _coerce_int(request.form.get("num_installments")) or 2
+                start_date_str = request.form.get("start_date", date.today().isoformat()).strip()
+                interval_days = _coerce_int(request.form.get("interval_days")) or 30
+
+                custom_amt = row_get(asg, "custom_amount")
+                def_amt = float(row_get(asg, "default_amount") or 0.0)
+                disc = float(row_get(asg, "discount_amount") or 0.0)
+                gross = float(custom_amt) if custom_amt is not None else def_amt
+                net = max(0.0, gross - disc)
+
+                installment_amount = round(net / num_installments, 2)
+                start_date = datetime.strptime(start_date_str, "%Y-%m-%d").date()
+
+                db.execute(f"DELETE FROM fee_installments WHERE assignment_id = {placeholder}", (assignment_id,))
+
+                for i in range(1, num_installments + 1):
+                    due = start_date + timedelta(days=interval_days * (i - 1))
+                    inst_amt = installment_amount if i < num_installments else round(net - installment_amount * (num_installments - 1), 2)
+                    try:
+                        db.execute(
+                            f"INSERT INTO fee_installments (assignment_id, installment_number, installment_amount, due_date, status) VALUES ({placeholder},{placeholder},{placeholder},{placeholder},'Pending')",
+                            (assignment_id, i, inst_amt, due.isoformat())
+                        )
+                    except Exception:
+                        pass
+                db.commit()
+                flash(f"{num_installments} installments generated successfully!", "success")
+
+            elif action == "add":
+                inst_num = _coerce_int(request.form.get("installment_number"))
+                inst_amt = float(request.form.get("installment_amount") or 0.0)
+                due_date_str = request.form.get("due_date", "").strip()
+                if inst_num and inst_amt > 0 and due_date_str:
+                    try:
+                        db.execute(
+                            f"INSERT INTO fee_installments (assignment_id, installment_number, installment_amount, due_date) VALUES ({placeholder},{placeholder},{placeholder},{placeholder})",
+                            (assignment_id, inst_num, inst_amt, due_date_str)
+                        )
+                        db.commit()
+                        flash("Installment added.", "success")
+                    except Exception as e:
+                        flash(f"Error adding installment: {str(e)}", "error")
+
+            elif action == "mark_paid":
+                inst_id = _coerce_int(request.form.get("installment_id"))
+                if inst_id:
+                    db.execute(
+                        f"UPDATE fee_installments SET status='Paid', paid_date={placeholder} WHERE id={placeholder}",
+                        (date.today().isoformat(), inst_id)
+                    )
+                    db.commit()
+                    flash("Installment marked as paid.", "success")
+
+            elif action == "delete":
+                inst_id = _coerce_int(request.form.get("installment_id"))
+                if inst_id:
+                    db.execute(f"DELETE FROM fee_installments WHERE id = {placeholder}", (inst_id,))
+                    db.commit()
+                    flash("Installment deleted.", "success")
+
+            if db:
+                try: db.close()
+                except: pass
+            return redirect(url_for("admin_fee_installments", assignment_id=assignment_id))
+
+        installments = db.execute(
+            f"SELECT * FROM fee_installments WHERE assignment_id = {placeholder} ORDER BY installment_number ASC",
+            (assignment_id,)
+        ).fetchall()
+
+        return render_template(
+            "admin_fee_installments.html",
+            asg=asg,
+            installments=installments,
+            assignment_id=assignment_id,
+            today_date=date.today().isoformat(),
+        )
+    except Exception as e:
+        print(f"[admin_fee_installments ERROR]: {repr(e)}")
+        flash(f"Error managing installments: {str(e)}", "error")
+        return redirect(url_for("admin_fees"))
+    finally:
+        if db:
+            try: db.close()
+            except: pass
+
+
+# ==========================================
+# FEE ANALYTICS (ADMIN)
+# ==========================================
+
+@app.route("/admin/fees/analytics", methods=["GET"])
+def admin_fee_analytics():
+    if session.get("role") != "admin":
+        flash("Admin login required.", "danger")
+        return redirect(url_for("login"))
+
+    db = get_db()
+    _ensure_fee_schema(db)
+    placeholder = get_placeholder()
+
+    try:
+        branch_rows = db.execute("""
+        SELECT b.name AS branch_name,
+               COALESCE(SUM(fp.amount_paid), 0) AS collected,
+               COUNT(DISTINCT fp.id) AS payment_count
+        FROM branches b
+        LEFT JOIN students s ON s.branch_id = b.id
+        LEFT JOIN fee_payments fp ON fp.student_id = s.id
+        GROUP BY b.id, b.name
+        ORDER BY collected DESC
+        """).fetchall()
+
+        semester_rows = db.execute("""
+        SELECT fs.semester,
+               COALESCE(SUM(fp.amount_paid), 0) AS collected,
+               COUNT(DISTINCT sfa.student_id) AS student_count
+        FROM fee_structures fs
+        LEFT JOIN student_fee_assignments sfa ON sfa.fee_structure_id = fs.id
+        LEFT JOIN fee_payments fp ON fp.assignment_id = sfa.id
+        GROUP BY fs.semester
+        ORDER BY collected DESC
+        """).fetchall()
+
+        category_rows = db.execute("""
+        SELECT fs.category,
+               COALESCE(SUM(fp.amount_paid), 0) AS collected,
+               COUNT(DISTINCT sfa.id) AS assignments
+        FROM fee_structures fs
+        LEFT JOIN student_fee_assignments sfa ON sfa.fee_structure_id = fs.id
+        LEFT JOIN fee_payments fp ON fp.assignment_id = sfa.id
+        GROUP BY fs.category
+        ORDER BY collected DESC
+        """).fetchall()
+
+        monthly_rows = db.execute("""
+        SELECT SUBSTR(payment_date, 1, 7) AS month,
+               COALESCE(SUM(amount_paid), 0) AS monthly_total,
+               COUNT(*) AS tx_count
+        FROM fee_payments
+        GROUP BY SUBSTR(payment_date, 1, 7)
+        ORDER BY month DESC LIMIT 6
+        """).fetchall()
+
+        status_rows = db.execute("""
+        SELECT status, COUNT(*) AS cnt
+        FROM student_fee_assignments
+        GROUP BY status
+        """).fetchall()
+
+        total_assigned = 0.0
+        asgn_rows = db.execute("""
+        SELECT sfa.custom_amount, sfa.discount_amount, fs.amount AS default_amount
+        FROM student_fee_assignments sfa JOIN fee_structures fs ON sfa.fee_structure_id = fs.id
+        """).fetchall()
+        for r in asgn_rows:
+            ca = row_get(r, "custom_amount")
+            da = float(row_get(r, "default_amount") or 0.0)
+            disc = float(row_get(r, "discount_amount") or 0.0)
+            gross = float(ca) if ca is not None else da
+            total_assigned += max(0.0, gross - disc)
+
+        pay_total = db.execute("SELECT COALESCE(SUM(amount_paid),0) AS t FROM fee_payments").fetchone()
+        total_paid = float(row_get(pay_total, "t") or 0.0)
+        total_pending = max(0.0, total_assigned - total_paid)
+        collection_rate = round(total_paid / total_assigned * 100, 1) if total_assigned > 0 else 0.0
+
+        return render_template(
+            "admin_fee_analytics.html",
+            branch_rows=branch_rows,
+            semester_rows=semester_rows,
+            category_rows=category_rows,
+            monthly_rows=monthly_rows,
+            status_rows=status_rows,
+            total_assigned=total_assigned,
+            total_paid=total_paid,
+            total_pending=total_pending,
+            collection_rate=collection_rate,
+        )
+    except Exception as e:
+        print(f"[admin_fee_analytics ERROR]: {repr(e)}")
+        flash(f"Error loading analytics: {str(e)}", "error")
+        return redirect(url_for("admin_fees"))
+    finally:
+        if db:
+            try: db.close()
+            except: pass
+
+
+# ==========================================
+# API: GET STUDENT FEE ASSIGNMENTS (AJAX)
+# ==========================================
+
+@app.route("/api/student-fee-assignments", methods=["GET"])
+def api_student_fee_assignments():
+    role = session.get("role")
+    if role not in ("admin", "accountant"):
+        return jsonify({"error": "Unauthorized"}), 403
+
+    student_id = _coerce_int(request.args.get("student_id"))
+    if not student_id:
+        return jsonify([])
+
+    db = get_db()
+    _ensure_fee_schema(db)
+    placeholder = get_placeholder()
+
+    try:
+        rows = db.execute(f"""
+        SELECT sfa.id AS assignment_id, fs.fee_name, fs.category,
+               COALESCE(sfa.custom_amount, fs.amount) AS gross_amount,
+               COALESCE(sfa.discount_amount, 0) AS discount,
+               sfa.status
+        FROM student_fee_assignments sfa
+        JOIN fee_structures fs ON sfa.fee_structure_id = fs.id
+        WHERE sfa.student_id = {placeholder} AND sfa.status != 'Paid'
+        ORDER BY sfa.id DESC
+        """, (student_id,)).fetchall()
+
+        result = []
+        for r in rows:
+            gross = float(row_get(r, "gross_amount") or 0.0)
+            disc = float(row_get(r, "discount") or 0.0)
+            net = max(0.0, gross - disc)
+            result.append({
+                "assignment_id": row_get(r, "assignment_id"),
+                "fee_name": row_get(r, "fee_name"),
+                "category": row_get(r, "category"),
+                "net_amount": net,
+                "status": row_get(r, "status"),
+            })
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    finally:
+        if db:
+            try: db.close()
+            except: pass
+
+
+
 
 
 if __name__ == "__main__":

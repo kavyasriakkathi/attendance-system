@@ -109,6 +109,17 @@
             <a class="nav-link" href="{{ url_for('parent_notifications') }}"><i class="fa-solid fa-bell"></i> Alerts</a>
             {% endif %}
             <a class="logout" href="{{ url_for('logout') }}"><i class="fa-solid fa-right-from-bracket"></i></a>
+            {% elif session.role == 'accountant' %}
+            {% if has_endpoint('accountant_dashboard') %}
+            <a class="nav-link" href="{{ url_for('accountant_dashboard') }}"><i class="fa-solid fa-calculator"></i> Dashboard</a>
+            {% endif %}
+            {% if has_endpoint('accountant_record_payment') %}
+            <a class="nav-link" href="{{ url_for('accountant_record_payment') }}"><i class="fa-solid fa-hand-holding-dollar"></i> Collect Fee</a>
+            {% endif %}
+            {% if has_endpoint('accountant_reports') %}
+            <a class="nav-link" href="{{ url_for('accountant_reports') }}"><i class="fa-solid fa-file-invoice-dollar"></i> Reports</a>
+            {% endif %}
+            <a class="logout" href="{{ url_for('logout') }}"><i class="fa-solid fa-right-from-bracket"></i></a>
             {% else %}
             <a class="logout" href="{{ url_for('logout') }}"><i class="fa-solid fa-right-from-bracket"></i></a>
             {% endif %}

@@ -152,3 +152,85 @@ def test_parent_fee_access(client):
     res = client.get('/parent/fees')
     assert res.status_code == 200
     assert b'Library Fee' in res.data
+
+
+def test_accountant_role_flow(client):
+    """Verify accountant user can access dashboard, collect payment, and view reports."""
+    db = app_module.get_db()
+    try:
+        db.execute("INSERT INTO fee_structures (id, fee_name, category, amount, academic_year, due_date) VALUES (4, 'Transport Fee', 'Transport', 12000, '2025-2026', '2026-12-31')")
+        db.execute("INSERT INTO student_fee_assignments (id, student_id, fee_structure_id, discount_amount, status) VALUES (40, 500, 4, 0, 'Unpaid')")
+        db.commit()
+    finally:
+        db.close()
+
+    with client.session_transaction() as sess:
+        sess['user_id'] = 800
+        sess['username'] = 'accountant'
+        sess['role'] = 'accountant'
+
+    # 1. Dashboard
+    res_dash = client.get('/accountant/dashboard')
+    assert res_dash.status_code == 200
+    assert b'Accountant Desk' in res_dash.data
+
+    # 2. Record payment via Accountant route
+    res_pay = client.post('/accountant/record-payment', data={
+        'assignment_id': 40,
+        'amount_paid': '6000.00',
+        'payment_date': '2026-07-22',
+        'payment_mode': 'UPI',
+        'transaction_id': 'UPI-TEST-999',
+        'notes': 'Accountant collected half'
+    }, follow_redirects=True)
+    assert res_pay.status_code == 200
+
+    # 3. View accountant reports
+    res_rep = client.get('/accountant/reports')
+    assert res_rep.status_code == 200
+    assert b'UPI-TEST-999' in res_rep.data
+
+
+def test_installment_generation_and_management(client):
+    """Verify generation of installments for a student fee assignment."""
+    db = app_module.get_db()
+    try:
+        db.execute("INSERT INTO fee_structures (id, fee_name, category, amount, academic_year, due_date) VALUES (5, 'Annual Fee 2026', 'Tuition', 60000, '2025-2026', '2026-12-31')")
+        db.execute("INSERT INTO student_fee_assignments (id, student_id, fee_structure_id, discount_amount, status) VALUES (50, 500, 5, 0, 'Unpaid')")
+        db.commit()
+    finally:
+        db.close()
+
+    with client.session_transaction() as sess:
+        sess['user_id'] = 1
+        sess['username'] = 'admin'
+        sess['role'] = 'admin'
+
+    # Generate 3 installments
+    res_gen = client.post('/admin/fees/installments/50', data={
+        'action': 'generate',
+        'num_installments': '3',
+        'start_date': '2026-08-01',
+        'interval_days': '30'
+    }, follow_redirects=True)
+    assert res_gen.status_code == 200
+
+    db = app_module.get_db()
+    try:
+        insts = db.execute("SELECT * FROM fee_installments WHERE assignment_id = 50 ORDER BY installment_number").fetchall()
+        assert len(insts) == 3
+        assert app_module.row_get(insts[0], 'installment_amount') == 20000.0
+    finally:
+        db.close()
+
+
+def test_admin_fee_analytics_access(client):
+    """Verify admin can access fee analytics page."""
+    with client.session_transaction() as sess:
+        sess['user_id'] = 1
+        sess['username'] = 'admin'
+        sess['role'] = 'admin'
+
+    res = client.get('/admin/fees/analytics')
+    assert res.status_code == 200
+    assert b'Advanced Fee Analytics' in res.data
