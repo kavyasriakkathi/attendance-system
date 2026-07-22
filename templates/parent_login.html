@@ -1,0 +1,47 @@
+{% extends "layout.html" %}
+
+{% block content %}
+<div style="max-width: 480px; margin: 40px auto; padding: 0 15px;">
+    <div class="card" style="background: white; border-radius: 20px; padding: 36px 30px; box-shadow: 0 10px 30px rgba(0,0,0,0.08); border: 1px solid #e2e8f0; text-align: center;">
+        <div style="width: 70px; height: 70px; border-radius: 50%; background: linear-gradient(135deg, #0284c7, #4f46e5); color: white; display: flex; align-items: center; justify-content: center; font-size: 2rem; margin: 0 auto 16px auto; box-shadow: 0 6px 16px rgba(2, 132, 199, 0.3);">
+            <i class="fa-solid fa-user-shield"></i>
+        </div>
+        
+        <h2 style="font-size: 1.7rem; font-weight: 800; color: #0f172a; margin-bottom: 6px;">Parent Portal Login</h2>
+        <p style="color: #64748b; font-size: 0.95rem; margin-bottom: 28px;">
+            Securely monitor your ward's attendance, university exam results, SGPA/CGPA, and college announcements.
+        </p>
+
+        <form method="POST" action="{{ url_for('parent_login') }}">
+            <div style="margin-bottom: 20px; text-align: left;">
+                <label style="display: block; font-weight: 700; font-size: 0.85rem; color: #334155; margin-bottom: 6px;">
+                    Parent Username or Student Roll No
+                </label>
+                <div style="position: relative;">
+                    <i class="fa-solid fa-user" style="position: absolute; left: 14px; top: 50%; transform: translateY(-50%); color: #94a3b8;"></i>
+                    <input type="text" name="username" placeholder="e.g. parent_john or 21CSM001" required style="width: 100%; padding: 12px 14px 12px 40px; border-radius: 10px; border: 1px solid #cbd5e1; font-size: 0.95rem; box-sizing: border-box;">
+                </div>
+            </div>
+
+            <div style="margin-bottom: 24px; text-align: left;">
+                <label style="display: block; font-weight: 700; font-size: 0.85rem; color: #334155; margin-bottom: 6px;">
+                    Password
+                </label>
+                <div style="position: relative;">
+                    <i class="fa-solid fa-lock" style="position: absolute; left: 14px; top: 50%; transform: translateY(-50%); color: #94a3b8;"></i>
+                    <input type="password" name="password" placeholder="Enter your password" required style="width: 100%; padding: 12px 14px 12px 40px; border-radius: 10px; border: 1px solid #cbd5e1; font-size: 0.95rem; box-sizing: border-box;">
+                </div>
+            </div>
+
+            <button type="submit" style="width: 100%; padding: 14px; background: linear-gradient(135deg, #0284c7, #4f46e5); color: white; border: none; border-radius: 12px; font-weight: 800; font-size: 1.05rem; cursor: pointer; transition: all 0.2s; box-shadow: 0 4px 14px rgba(79, 70, 229, 0.3);">
+                <i class="fa-solid fa-right-to-bracket" style="margin-right: 8px;"></i> Sign In to Parent Portal
+            </button>
+        </form>
+
+        <div style="margin-top: 24px; border-top: 1px solid #f1f5f9; padding-top: 18px; font-size: 0.9rem; color: #64748b;">
+            Don't have a parent account? 
+            <a href="{{ url_for('parent_register') }}" style="color: #0284c7; font-weight: 700; text-decoration: none;">Register Parent Account</a>
+        </div>
+    </div>
+</div>
+{% endblock %}

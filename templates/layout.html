@@ -77,6 +77,19 @@
             {% if has_endpoint('teacher_select_subject') %}
             <a class="nav-link" href="{{ url_for('teacher_select_subject') }}"><i class="fa-solid fa-book"></i> Subject</a>
             {% endif %}
+            {% elif session.role == 'parent' %}
+            {% if has_endpoint('parent_dashboard') %}
+            <a class="nav-link" href="{{ url_for('parent_dashboard') }}"><i class="fa-solid fa-house-user"></i> Dashboard</a>
+            {% endif %}
+            {% if has_endpoint('parent_attendance') %}
+            <a class="nav-link" href="{{ url_for('parent_attendance') }}"><i class="fa-solid fa-clipboard-user"></i> Attendance</a>
+            {% endif %}
+            {% if has_endpoint('parent_results') %}
+            <a class="nav-link" href="{{ url_for('parent_results') }}"><i class="fa-solid fa-graduation-cap"></i> Results</a>
+            {% endif %}
+            {% if has_endpoint('parent_notifications') %}
+            <a class="nav-link" href="{{ url_for('parent_notifications') }}"><i class="fa-solid fa-bell"></i> Alerts</a>
+            {% endif %}
             <a class="logout" href="{{ url_for('logout') }}"><i class="fa-solid fa-right-from-bracket"></i></a>
             {% else %}
             <a class="logout" href="{{ url_for('logout') }}"><i class="fa-solid fa-right-from-bracket"></i></a>
@@ -111,6 +124,12 @@
         {% if has_endpoint('teacher_attendance_records') %}
         <a class="nav-link" href="{{ url_for('teacher_attendance_records') }}"><i class="fa-solid fa-clipboard-list"></i><span>Records</span></a>
         {% endif %}
+        <a class="nav-link" href="{{ url_for('logout') }}"><i class="fa-solid fa-right-from-bracket"></i><span>Logout</span></a>
+        {% elif session.role == 'parent' %}
+        <a class="nav-link" href="{{ url_for('parent_dashboard') }}"><i class="fa-solid fa-house-user"></i><span>Home</span></a>
+        <a class="nav-link" href="{{ url_for('parent_attendance') }}"><i class="fa-solid fa-clipboard-user"></i><span>Attend</span></a>
+        <a class="nav-link" href="{{ url_for('parent_results') }}"><i class="fa-solid fa-graduation-cap"></i><span>Results</span></a>
+        <a class="nav-link" href="{{ url_for('parent_notifications') }}"><i class="fa-solid fa-bell"></i><span>Alerts</span></a>
         <a class="nav-link" href="{{ url_for('logout') }}"><i class="fa-solid fa-right-from-bracket"></i><span>Logout</span></a>
         {% endif %}
     </nav>

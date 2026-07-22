@@ -8679,5 +8679,486 @@ def admin_results():
             except: pass
 
 
+def _ensure_parent_schema(db):
+    """Ensure parent module tables exist safely across SQLite and PostgreSQL."""
+    placeholder = get_placeholder()
+    is_pg = str(app.config.get("DATABASE", "")).startswith("postgres")
+
+    try:
+        if is_pg:
+            db.execute("""
+            CREATE TABLE IF NOT EXISTS parents (
+                id SERIAL PRIMARY KEY,
+                name TEXT NOT NULL,
+                username TEXT UNIQUE NOT NULL,
+                password TEXT NOT NULL,
+                phone TEXT,
+                email TEXT,
+                student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+            db.execute("""
+            CREATE TABLE IF NOT EXISTS parent_notifications (
+                id SERIAL PRIMARY KEY,
+                parent_id INTEGER,
+                student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+                title TEXT NOT NULL,
+                message TEXT NOT NULL,
+                type TEXT DEFAULT 'general',
+                is_read INTEGER DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+            db.execute("""
+            CREATE TABLE IF NOT EXISTS college_announcements (
+                id SERIAL PRIMARY KEY,
+                title TEXT NOT NULL,
+                content TEXT NOT NULL,
+                target_audience TEXT DEFAULT 'all',
+                created_by TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+        else:
+            db.execute("""
+            CREATE TABLE IF NOT EXISTS parents (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                username TEXT UNIQUE NOT NULL,
+                password TEXT NOT NULL,
+                phone TEXT,
+                email TEXT,
+                student_id INTEGER NOT NULL,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(student_id) REFERENCES students(id)
+            );
+            """)
+            db.execute("""
+            CREATE TABLE IF NOT EXISTS parent_notifications (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                parent_id INTEGER,
+                student_id INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                message TEXT NOT NULL,
+                type TEXT DEFAULT 'general',
+                is_read INTEGER DEFAULT 0,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(student_id) REFERENCES students(id)
+            );
+            """)
+            db.execute("""
+            CREATE TABLE IF NOT EXISTS college_announcements (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                content TEXT NOT NULL,
+                target_audience TEXT DEFAULT 'all',
+                created_by TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+        try:
+            db.commit()
+        except Exception:
+            pass
+    except Exception as e:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        print(f"[_ensure_parent_schema WARNING]: {repr(e)}")
+
+
+def create_parent_notification(db, student_id, title, message, notif_type="general", parent_id=None):
+    """Helper to create notification for linked parent account."""
+    _ensure_parent_schema(db)
+    placeholder = get_placeholder()
+
+    # Avoid inserting identical unread notification
+    existing = db.execute(
+        f"SELECT id FROM parent_notifications WHERE student_id = {placeholder} AND title = {placeholder} AND is_read = 0",
+        (student_id, title),
+    ).fetchone()
+    if existing:
+        return
+
+    db.execute(
+        f"INSERT INTO parent_notifications (parent_id, student_id, title, message, type, is_read) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, 0)",
+        (parent_id, student_id, title, message, notif_type),
+    )
+    try:
+        db.commit()
+    except Exception:
+        pass
+
+
+def generate_parent_alerts_for_student(db, student_id):
+    """Generate automatic parent alerts for attendance shortages and updated results."""
+    context = get_student_academic_profile_context(db, student_id)
+    if not context:
+        return
+
+    student = context["student"]
+    enrollment = student.get("enrollment") or ""
+    overall_att = context["overall_attendance_pct"]
+
+    # 1. Overall Attendance Shortage Alert (< 75%)
+    if overall_att > 0 and overall_att < 75.0:
+        create_parent_notification(
+            db,
+            student_id,
+            "⚠️ Low Attendance Warning",
+            f"Attendance Alert: Overall attendance for {student['name']} ({enrollment}) is {overall_att}%, which is below the required 75% threshold.",
+            notif_type="attendance_shortage",
+        )
+
+    for sub in context.get("shortage_subjects", []):
+        create_parent_notification(
+            db,
+            student_id,
+            f"⚠️ Subject Shortage: {sub['name']}",
+            f"Attendance Alert: {student['name']}'s attendance in {sub['name']} is at {sub['percentage']}%, falling below 75%.",
+            notif_type="attendance_shortage",
+        )
+
+    # 2. Results Notification
+    for sem_key, sem_info in context.get("semesters_data", {}).items():
+        if sem_info.get("has_results"):
+            create_parent_notification(
+                db,
+                student_id,
+                f"🎓 Results Published ({sem_key})",
+                f"Academic Update: University exam results for {sem_key} have been published. SGPA: {sem_info['sgpa']}, Result: {sem_info['status']}.",
+                notif_type="results_published",
+            )
+
+
+def parent_login_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if session.get("role") != "parent" or not session.get("student_id"):
+            flash("Please log in with a parent account to access this page.", "warning")
+            return redirect(url_for("parent_login"))
+        return f(*args, **kwargs)
+    return decorated_function
+
+
+@app.route("/parent/login", methods=["GET", "POST"])
+@app.route("/parent_login", methods=["GET", "POST"])
+def parent_login():
+    if request.method == "POST":
+        login_input = (request.form.get("username", "") or "").strip()
+        password = (request.form.get("password", "") or "").strip()
+
+        if not login_input or not password:
+            flash("Please enter Parent Username / Student Roll No and Password.", "error")
+            return render_template("parent_login.html")
+
+        db = None
+        try:
+            db = get_db()
+            placeholder = get_placeholder()
+            _ensure_parent_schema(db)
+
+            # 1. Search in parents table
+            parent = db.execute(
+                f"SELECT p.*, s.id AS student_id, s.name AS student_name, s.enrollment "
+                f"FROM parents p JOIN students s ON p.student_id = s.id "
+                f"WHERE p.username = {placeholder} OR p.email = {placeholder}",
+                (login_input, login_input),
+            ).fetchone()
+
+            if parent and check_password_hash(row_get(parent, "password"), password):
+                session.clear()
+                session["user_id"] = row_get(parent, "id")
+                session["parent_id"] = row_get(parent, "id")
+                session["username"] = row_get(parent, "username")
+                session["role"] = "parent"
+                session["student_id"] = row_get(parent, "student_id")
+                session["student_name"] = row_get(parent, "student_name")
+                flash(f"Welcome, {row_get(parent, 'name')}!", "success")
+                return redirect(url_for("parent_dashboard"))
+
+            # 2. Search linked student enrollment / parent account in users table
+            student = db.execute(
+                f"SELECT s.id, s.name, s.enrollment FROM students s WHERE s.enrollment = {placeholder}",
+                (login_input,),
+            ).fetchone()
+
+            if student:
+                u_parent = db.execute(
+                    f"SELECT id, username, password FROM users WHERE student_id = {placeholder} AND role = 'parent'",
+                    (row_get(student, "id"),),
+                ).fetchone()
+
+                if u_parent and check_password_hash(row_get(u_parent, "password"), password):
+                    session.clear()
+                    session["user_id"] = row_get(u_parent, "id")
+                    session["parent_id"] = row_get(u_parent, "id")
+                    session["username"] = row_get(u_parent, "username")
+                    session["role"] = "parent"
+                    session["student_id"] = row_get(student, "id")
+                    session["student_name"] = row_get(student, "name")
+                    flash(f"Welcome, Parent of {row_get(student, 'name')}!", "success")
+                    return redirect(url_for("parent_dashboard"))
+
+            flash("Invalid Parent Username / Enrollment or Password.", "error")
+            return render_template("parent_login.html")
+        except Exception as e:
+            print(f"[parent_login ERROR]: {repr(e)}")
+            flash("Error processing parent login.", "error")
+            return render_template("parent_login.html")
+        finally:
+            if db:
+                try: db.close()
+                except: pass
+
+    return render_template("parent_login.html")
+
+
+@app.route("/parent/register", methods=["GET", "POST"])
+@app.route("/parent_register", methods=["GET", "POST"])
+def parent_register():
+    if request.method == "POST":
+        name = (request.form.get("name", "") or "").strip()
+        username = (request.form.get("username", "") or "").strip()
+        password = (request.form.get("password", "") or "").strip()
+        enrollment = (request.form.get("enrollment", "") or "").strip()
+        phone = (request.form.get("phone", "") or "").strip()
+        email = (request.form.get("email", "") or "").strip()
+
+        if not name or not username or not password or not enrollment:
+            flash("Please fill in all required fields (Parent Name, Username, Password, Student Enrollment).", "error")
+            return render_template("parent_register.html")
+
+        db = None
+        try:
+            db = get_db()
+            placeholder = get_placeholder()
+            _ensure_parent_schema(db)
+
+            # Validate Student Enrollment ID
+            student = db.execute(
+                f"SELECT id, name FROM students WHERE UPPER(TRIM(enrollment)) = {placeholder}",
+                (enrollment.upper(),),
+            ).fetchone()
+
+            if not student:
+                flash(f"Student Enrollment ID '{enrollment}' not found in college database. Please verify roll number.", "error")
+                return render_template("parent_register.html")
+
+            student_id = row_get(student, "id")
+
+            # Validate Username Uniqueness
+            existing_user = db.execute(
+                f"SELECT id FROM parents WHERE username = {placeholder}",
+                (username,),
+            ).fetchone()
+
+            if existing_user:
+                flash("Username is already registered. Please choose another username.", "error")
+                return render_template("parent_register.html")
+
+            hashed_pw = generate_password_hash(password)
+            db.execute(
+                f"INSERT INTO parents (name, username, password, phone, email, student_id) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})",
+                (name, username, hashed_pw, phone, email, student_id),
+            )
+            db.commit()
+
+            flash(f"Parent account registered successfully! Linked with student {row_get(student, 'name')}. Please log in.", "success")
+            return redirect(url_for("parent_login"))
+        except Exception as e:
+            if db:
+                try: db.rollback()
+                except: pass
+            print(f"[parent_register ERROR]: {repr(e)}")
+            flash("Error creating parent account.", "error")
+            return render_template("parent_register.html")
+        finally:
+            if db:
+                try: db.close()
+                except: pass
+
+    return render_template("parent_register.html")
+
+
+@app.route("/parent/dashboard", methods=["GET"])
+@app.route("/parent_dashboard", methods=["GET"])
+@parent_login_required
+def parent_dashboard():
+    db = None
+    try:
+        db = get_db()
+        student_id = session.get("student_id")
+        placeholder = get_placeholder()
+
+        # Auto-generate alerts
+        generate_parent_alerts_for_student(db, student_id)
+
+        context = get_student_academic_profile_context(db, student_id)
+        if not context:
+            flash("Linked student record not found.", "error")
+            return redirect(url_for("parent_login"))
+
+        notifications = db.execute(
+            f"SELECT * FROM parent_notifications WHERE student_id = {placeholder} ORDER BY id DESC LIMIT 5",
+            (student_id,),
+        ).fetchall()
+
+        announcements = db.execute(
+            "SELECT * FROM college_announcements WHERE target_audience IN ('all', 'parents') ORDER BY id DESC LIMIT 5"
+        ).fetchall()
+
+        return render_template(
+            "parent_dashboard.html",
+            notifications=notifications,
+            announcements=announcements,
+            **context
+        )
+    except Exception as e:
+        print(f"[parent_dashboard ERROR]: {repr(e)}")
+        flash("Error loading parent dashboard.", "error")
+        return redirect(url_for("parent_login"))
+    finally:
+        if db:
+            try: db.close()
+            except: pass
+
+
+@app.route("/parent/attendance", methods=["GET"])
+@app.route("/parent_attendance", methods=["GET"])
+@parent_login_required
+def parent_attendance():
+    db = None
+    try:
+        db = get_db()
+        student_id = session.get("student_id")
+        context = get_student_academic_profile_context(db, student_id)
+        if not context:
+            flash("Attendance record unavailable.", "error")
+            return redirect(url_for("parent_dashboard"))
+
+        return render_template("parent_attendance.html", **context)
+    except Exception as e:
+        print(f"[parent_attendance ERROR]: {repr(e)}")
+        flash("Error loading parent attendance view.", "error")
+        return redirect(url_for("parent_dashboard"))
+    finally:
+        if db:
+            try: db.close()
+            except: pass
+
+
+@app.route("/parent/results", methods=["GET"])
+@app.route("/parent_results", methods=["GET"])
+@parent_login_required
+def parent_results():
+    db = None
+    try:
+        db = get_db()
+        student_id = session.get("student_id")
+        context = get_student_academic_profile_context(db, student_id)
+        if not context:
+            flash("Results record unavailable.", "error")
+            return redirect(url_for("parent_dashboard"))
+
+        return render_template("parent_results.html", **context)
+    except Exception as e:
+        print(f"[parent_results ERROR]: {repr(e)}")
+        flash("Error loading parent results view.", "error")
+        return redirect(url_for("parent_dashboard"))
+    finally:
+        if db:
+            try: db.close()
+            except: pass
+
+
+@app.route("/parent/notifications", methods=["GET", "POST"])
+@app.route("/parent_notifications", methods=["GET", "POST"])
+@parent_login_required
+def parent_notifications():
+    db = None
+    try:
+        db = get_db()
+        student_id = session.get("student_id")
+        placeholder = get_placeholder()
+        _ensure_parent_schema(db)
+
+        if request.method == "POST":
+            db.execute(
+                f"UPDATE parent_notifications SET is_read = 1 WHERE student_id = {placeholder}",
+                (student_id,),
+            )
+            db.commit()
+            flash("All notifications marked as read.", "success")
+
+        generate_parent_alerts_for_student(db, student_id)
+
+        notifications = db.execute(
+            f"SELECT * FROM parent_notifications WHERE student_id = {placeholder} ORDER BY id DESC",
+            (student_id,),
+        ).fetchall()
+
+        announcements = db.execute(
+            "SELECT * FROM college_announcements WHERE target_audience IN ('all', 'parents') ORDER BY id DESC"
+        ).fetchall()
+
+        return render_template(
+            "parent_notifications.html",
+            notifications=notifications,
+            announcements=announcements,
+            student_name=session.get("student_name", "Student")
+        )
+    except Exception as e:
+        print(f"[parent_notifications ERROR]: {repr(e)}")
+        flash("Error loading notifications.", "error")
+        return redirect(url_for("parent_dashboard"))
+    finally:
+        if db:
+            try: db.close()
+            except: pass
+
+
+@app.route("/admin/announcements", methods=["GET", "POST"])
+@app.route("/admin_announcements", methods=["GET", "POST"])
+def admin_announcements():
+    if session.get("role") != "admin":
+        flash("Admin login required.", "error")
+        return redirect(url_for("login"))
+
+    db = None
+    try:
+        db = get_db()
+        placeholder = get_placeholder()
+        _ensure_parent_schema(db)
+
+        if request.method == "POST":
+            title = (request.form.get("title", "") or "").strip()
+            content = (request.form.get("content", "") or "").strip()
+            target = (request.form.get("target_audience", "") or "all").strip()
+
+            if not title or not content:
+                flash("Please enter title and announcement content.", "error")
+            else:
+                db.execute(
+                    f"INSERT INTO college_announcements (title, content, target_audience, created_by) VALUES ({placeholder}, {placeholder}, {placeholder}, 'Admin')",
+                    (title, content, target),
+                )
+                db.commit()
+                flash("College announcement published successfully to Parent Portal!", "success")
+
+        announcements = db.execute("SELECT * FROM college_announcements ORDER BY id DESC").fetchall()
+        return render_template("admin_announcements.html", announcements=announcements)
+    except Exception as e:
+        print(f"[admin_announcements ERROR]: {repr(e)}")
+        flash("Error publishing announcement.", "error")
+        return redirect(url_for("dashboard"))
+    finally:
+        if db:
+            try: db.close()
+            except: pass
+
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)

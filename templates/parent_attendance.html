@@ -1,0 +1,82 @@
+{% extends "layout.html" %}
+
+{% block content %}
+<div class="dashboard-header" style="margin-bottom: 25px;">
+    <div>
+        <h1 style="font-size: 1.8rem; font-weight: 700; color: #1e293b; margin: 0; display: flex; align-items: center; gap: 10px;">
+            <i class="fa-solid fa-clipboard-user" style="color: #059669;"></i> Attendance Monitoring
+        </h1>
+        <p style="color: #64748b; margin: 4px 0 0 0; font-size: 0.95rem;">
+            Detailed subject-wise attendance analytics and shortage warnings for {{ student.name }} ({{ student.enrollment }}).
+        </p>
+    </div>
+</div>
+
+{% if attendance_shortage_warning %}
+<div class="card" style="background: #fef2f2; border: 1px solid #fca5a5; border-radius: 14px; padding: 18px 24px; margin-bottom: 25px; display: flex; align-items: center; gap: 16px;">
+    <i class="fa-solid fa-triangle-exclamation" style="font-size: 2.2rem; color: #dc2626;"></i>
+    <div>
+        <h3 style="margin: 0 0 4px 0; color: #991b1b; font-size: 1.1rem; font-weight: 800;">
+            ⚠️ ATTENDANCE SHORTAGE WARNING (< 75%)
+        </h3>
+        <p style="margin: 0; color: #7f1d1d; font-size: 0.9rem;">
+            Overall attendance is at <strong>{{ overall_attendance_pct }}%</strong>. The college mandates a minimum of 75% attendance for exam eligibility.
+        </p>
+    </div>
+</div>
+{% endif %}
+
+<div class="card" style="background: white; border-radius: 16px; padding: 24px; box-shadow: 0 4px 20px rgba(0,0,0,0.05); border: 1px solid #e2e8f0;">
+    <h2 style="font-size: 1.25rem; font-weight: 800; color: #0f172a; margin: 0 0 16px 0;">
+        Subject Attendance Breakdown
+    </h2>
+    <div class="table-responsive">
+        <table style="width: 100%; border-collapse: separate; border-spacing: 0; font-size: 0.95rem;">
+            <thead>
+                <tr style="background: #f8fafc; color: #475569; text-align: left;">
+                    <th style="padding: 12px 16px; border-bottom: 2px solid #e2e8f0;">Subject Name</th>
+                    <th style="padding: 12px 16px; border-bottom: 2px solid #e2e8f0; text-align: center;">Classes Conducted</th>
+                    <th style="padding: 12px 16px; border-bottom: 2px solid #e2e8f0; text-align: center;">Present</th>
+                    <th style="padding: 12px 16px; border-bottom: 2px solid #e2e8f0; text-align: center;">Absent</th>
+                    <th style="padding: 12px 16px; border-bottom: 2px solid #e2e8f0; text-align: center;">Attendance %</th>
+                    <th style="padding: 12px 16px; border-bottom: 2px solid #e2e8f0; text-align: center;">Status</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for sub in subject_attendance %}
+                <tr style="border-bottom: 1px solid #f1f5f9;">
+                    <td style="padding: 14px 16px; font-weight: 700; color: #1e293b;">{{ sub.name }}</td>
+                    <td style="padding: 14px 16px; text-align: center; color: #475569;">{{ sub.total }}</td>
+                    <td style="padding: 14px 16px; text-align: center; color: #10b981; font-weight: 700;">{{ sub.present }}</td>
+                    <td style="padding: 14px 16px; text-align: center; color: #ef4444; font-weight: 700;">{{ sub.absent }}</td>
+                    <td style="padding: 14px 16px; text-align: center; font-weight: 800; color: {% if sub.percentage >= 75 %}#059669{% else %}#dc2626{% endif %};">
+                        {{ sub.percentage }}%
+                    </td>
+                    <td style="padding: 14px 16px; text-align: center;">
+                        {% if sub.is_shortage %}
+                        <span style="background: #fee2e2; color: #991b1b; padding: 4px 10px; border-radius: 6px; font-size: 0.8rem; font-weight: 700;">
+                            SHORTAGE (<75%)
+                        </span>
+                        {% elif sub.total > 0 %}
+                        <span style="background: #dcfce7; color: #166534; padding: 4px 10px; border-radius: 6px; font-size: 0.8rem; font-weight: 700;">
+                            GOOD
+                        </span>
+                        {% else %}
+                        <span style="background: #f1f5f9; color: #64748b; padding: 4px 10px; border-radius: 6px; font-size: 0.8rem;">
+                            NO DATA
+                        </span>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% else %}
+                <tr>
+                    <td colspan="6" style="padding: 20px; text-align: center; color: #94a3b8; font-style: italic;">
+                        No subject attendance records registered yet.
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}

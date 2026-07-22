@@ -1,0 +1,184 @@
+{% extends "layout.html" %}
+
+{% block content %}
+<div class="dashboard-header" style="margin-bottom: 25px;">
+    <div>
+        <h1 style="font-size: 1.8rem; font-weight: 700; color: #1e293b; margin: 0; display: flex; align-items: center; gap: 10px;">
+            <i class="fa-solid fa-house-user" style="color: #0284c7;"></i> Parent Dashboard & Ward Monitoring
+        </h1>
+        <p style="color: #64748b; margin: 4px 0 0 0; font-size: 0.95rem;">
+            Real-time academic monitoring, attendance tracking, semester grades, and institutional notifications for your ward.
+        </p>
+    </div>
+</div>
+
+<!-- Linked Student Information Card -->
+<div class="card" style="background: white; padding: 24px; border-radius: 16px; box-shadow: 0 4px 20px rgba(0,0,0,0.05); border: 1px solid #e2e8f0; margin-bottom: 25px; display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 20px;">
+    <div style="display: flex; align-items: center; gap: 18px; flex-wrap: wrap;">
+        <div style="width: 60px; height: 60px; border-radius: 50%; background: linear-gradient(135deg, #0284c7, #4f46e5); color: white; display: flex; align-items: center; justify-content: center; font-size: 1.6rem; font-weight: 800; shadow: 0 4px 12px rgba(2, 132, 199, 0.3);">
+            {{ student.name[0]|upper }}
+        </div>
+        <div>
+            <div style="font-size: 1.5rem; font-weight: 800; color: #0f172a; margin-bottom: 4px;">{{ student.name }}</div>
+            <div style="font-size: 0.9rem; color: #64748b; font-weight: 500; display: flex; gap: 16px; flex-wrap: wrap;">
+                <span><i class="fa-solid fa-id-card" style="color: #0284c7;"></i> Roll No: <strong>{{ student.enrollment }}</strong></span>
+                <span><i class="fa-solid fa-building-columns" style="color: #4f46e5;"></i> Branch: <strong>{{ student.branch_name }}</strong></span>
+                <span><i class="fa-solid fa-layer-group" style="color: #059669;"></i> Section: <strong>{{ student.section }}</strong></span>
+                <span><i class="fa-solid fa-graduation-cap" style="color: #d97706;"></i> Semester: <strong>{{ student.semester }}</strong></span>
+            </div>
+        </div>
+    </div>
+    <div style="display: flex; flex-direction: column; align-items: flex-end; gap: 6px;">
+        <span style="background: #e0f2fe; color: #0369a1; padding: 6px 14px; border-radius: 20px; font-size: 0.85rem; font-weight: 700; display: inline-flex; align-items: center; gap: 6px;">
+            <i class="fa-solid fa-user-check"></i> Linked Ward Record
+        </span>
+        <span style="font-size: 0.85rem; color: #64748b; font-weight: 600;">
+            Status: <strong style="color: #10b981;">{{ overall_promotion_status }}</strong>
+        </span>
+    </div>
+</div>
+
+<!-- Attendance Shortage Warning Banner (If Attendance < 75%) -->
+{% if attendance_shortage_warning %}
+<div class="card" style="background: #fef2f2; border: 1px solid #fca5a5; border-radius: 14px; padding: 18px 24px; margin-bottom: 25px; display: flex; align-items: center; gap: 16px; box-shadow: 0 4px 15px rgba(239, 68, 68, 0.08);">
+    <i class="fa-solid fa-triangle-exclamation" style="font-size: 2.2rem; color: #dc2626;"></i>
+    <div>
+        <h3 style="margin: 0 0 4px 0; color: #991b1b; font-size: 1.1rem; font-weight: 800;">
+            ⚠️ ATTENDANCE SHORTAGE ALERT FOR WARD (< 75%)
+        </h3>
+        <p style="margin: 0; color: #7f1d1d; font-size: 0.9rem;">
+            Your ward's overall or subject-wise attendance is below the college mandatory <strong>75% limit</strong>. Please contact the class coordinator.
+            {% if shortage_subjects %}
+            Shortage subjects: <strong>{% for s in shortage_subjects %}{{ s.name }} ({{ s.percentage }}%){% if not loop.last %}, {% endif %}{% endfor %}</strong>.
+            {% endif %}
+        </p>
+    </div>
+</div>
+{% endif %}
+
+<!-- Key Metrics Dashboard Cards -->
+<div class="metrics-grid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; margin-bottom: 25px;">
+    <!-- Card 1: Attendance Percentage -->
+    <div class="metric-card" style="background: white; border: 1px solid #e2e8f0; padding: 20px; border-radius: 14px; box-shadow: 0 4px 15px rgba(0,0,0,0.03);">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+            <div style="font-size: 0.8rem; font-weight: 700; color: #64748b; text-transform: uppercase;">Attendance Percentage</div>
+            <i class="fa-solid fa-chart-pie" style="color: {% if overall_attendance_pct >= 75 %}#10b981{% else %}#ef4444{% endif %}; font-size: 1.2rem;"></i>
+        </div>
+        <div style="font-size: 1.9rem; font-weight: 800; color: {% if overall_attendance_pct >= 75 %}#059669{% else %}#dc2626{% endif %}; margin-top: 6px;">
+            {{ overall_attendance_pct }}%
+        </div>
+        <div style="font-size: 0.8rem; color: #64748b; margin-top: 4px;">
+            {{ present_count }} Attended / {{ total_classes }} Classes Total
+        </div>
+    </div>
+
+    <!-- Card 2: Cumulative CGPA -->
+    <div class="metric-card" style="background: white; border: 1px solid #e2e8f0; padding: 20px; border-radius: 14px; box-shadow: 0 4px 15px rgba(0,0,0,0.03);">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+            <div style="font-size: 0.8rem; font-weight: 700; color: #64748b; text-transform: uppercase;">Cumulative CGPA</div>
+            <i class="fa-solid fa-award" style="color: #4f46e5; font-size: 1.2rem;"></i>
+        </div>
+        <div style="font-size: 1.9rem; font-weight: 800; color: #4f46e5; margin-top: 6px;">
+            {{ cgpa }} <span style="font-size: 0.9rem; font-weight: 600; color: #94a3b8;">/ 10.0</span>
+        </div>
+        <div style="font-size: 0.8rem; color: #64748b; margin-top: 4px;">
+            Latest SGPA: <strong>{{ latest_sgpa }}</strong>
+        </div>
+    </div>
+
+    <!-- Card 3: Current Semester -->
+    <div class="metric-card" style="background: white; border: 1px solid #e2e8f0; padding: 20px; border-radius: 14px; box-shadow: 0 4px 15px rgba(0,0,0,0.03);">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+            <div style="font-size: 0.8rem; font-weight: 700; color: #64748b; text-transform: uppercase;">Current Semester</div>
+            <i class="fa-solid fa-graduation-cap" style="color: #0284c7; font-size: 1.2rem;"></i>
+        </div>
+        <div style="font-size: 1.6rem; font-weight: 800; color: #0284c7; margin-top: 6px;">
+            {{ student.semester }}
+        </div>
+        <div style="font-size: 0.8rem; color: #64748b; margin-top: 4px;">
+            Section: <strong>{{ student.section }}</strong> | Year: {{ student.academic_year }}
+        </div>
+    </div>
+
+    <!-- Card 4: Performance Rating -->
+    <div class="metric-card" style="background: white; border: 1px solid #e2e8f0; padding: 20px; border-radius: 14px; box-shadow: 0 4px 15px rgba(0,0,0,0.03);">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+            <div style="font-size: 0.8rem; font-weight: 700; color: #64748b; text-transform: uppercase;">Performance Status</div>
+            <i class="fa-solid fa-gauge-high" style="color: #d97706; font-size: 1.2rem;"></i>
+        </div>
+        <div style="margin-top: 10px;">
+            {% if rating_class == 'success' %}
+            <span style="background: #dcfce7; color: #15803d; font-size: 0.9rem; font-weight: 800; padding: 6px 12px; border-radius: 8px; display: inline-block;">🌟 EXCELLENT</span>
+            {% elif rating_class == 'info' %}
+            <span style="background: #dbeafe; color: #1e40af; font-size: 0.9rem; font-weight: 800; padding: 6px 12px; border-radius: 8px; display: inline-block;">👍 GOOD</span>
+            {% elif rating_class == 'warning' %}
+            <span style="background: #fef3c7; color: #b45309; font-size: 0.9rem; font-weight: 800; padding: 6px 12px; border-radius: 8px; display: inline-block;">⚡ AVERAGE</span>
+            {% else %}
+            <span style="background: #fee2e2; color: #b91c1c; font-size: 0.9rem; font-weight: 800; padding: 6px 12px; border-radius: 8px; display: inline-block;">⚠️ ATTENTION</span>
+            {% endif %}
+        </div>
+    </div>
+</div>
+
+<!-- Two-Column Grid: Notifications & Attendance Breakdown -->
+<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 24px; margin-bottom: 25px;">
+    <!-- Recent Alerts & Notifications -->
+    <div class="card" style="background: white; border-radius: 16px; padding: 24px; box-shadow: 0 4px 20px rgba(0,0,0,0.05); border: 1px solid #e2e8f0;">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+            <h2 style="font-size: 1.15rem; font-weight: 800; color: #0f172a; margin: 0; display: flex; align-items: center; gap: 8px;">
+                <i class="fa-solid fa-bell" style="color: #0284c7;"></i> Parent Alerts & Announcements
+            </h2>
+            <a href="{{ url_for('parent_notifications') }}" style="color: #0284c7; font-weight: 700; font-size: 0.85rem; text-decoration: none;">View All</a>
+        </div>
+
+        <div style="display: flex; flex-direction: column; gap: 12px;">
+            {% for notif in notifications %}
+            <div style="background: #f8fafc; padding: 12px 16px; border-radius: 10px; border-left: 4px solid {% if notif.type == 'attendance_shortage' %}#ef4444{% elif notif.type == 'results_published' %}#4f46e5{% else %}#0284c7{% endif %};">
+                <div style="font-weight: 700; font-size: 0.9rem; color: #1e293b;">{{ notif.title }}</div>
+                <div style="font-size: 0.85rem; color: #475569; margin-top: 2px;">{{ notif.message }}</div>
+                <div style="font-size: 0.75rem; color: #94a3b8; margin-top: 4px;">{{ notif.created_at }}</div>
+            </div>
+            {% else %}
+            <div style="text-align: center; color: #94a3b8; font-style: italic; padding: 20px;">
+                No unread alerts for your ward.
+            </div>
+            {% endfor %}
+
+            {% for ann in announcements %}
+            <div style="background: #f0f9ff; padding: 12px 16px; border-radius: 10px; border-left: 4px solid #0284c7;">
+                <div style="font-weight: 700; font-size: 0.9rem; color: #0369a1;">📢 {{ ann.title }}</div>
+                <div style="font-size: 0.85rem; color: #334155; margin-top: 2px;">{{ ann.content }}</div>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+
+    <!-- Subject Attendance Summary -->
+    <div class="card" style="background: white; border-radius: 16px; padding: 24px; box-shadow: 0 4px 20px rgba(0,0,0,0.05); border: 1px solid #e2e8f0;">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+            <h2 style="font-size: 1.15rem; font-weight: 800; color: #0f172a; margin: 0; display: flex; align-items: center; gap: 8px;">
+                <i class="fa-solid fa-list-check" style="color: #059669;"></i> Attendance Summary
+            </h2>
+            <a href="{{ url_for('parent_attendance') }}" style="color: #059669; font-weight: 700; font-size: 0.85rem; text-decoration: none;">Full Details</a>
+        </div>
+
+        <div style="display: flex; flex-direction: column; gap: 10px;">
+            {% for sub in subject_attendance %}
+            <div>
+                <div style="display: flex; justify-content: space-between; font-size: 0.85rem; font-weight: 700; margin-bottom: 4px;">
+                    <span style="color: #334155;">{{ sub.name }}</span>
+                    <span style="color: {% if sub.percentage >= 75 %}#059669{% else %}#dc2626{% endif %};">{{ sub.percentage }}% ({{ sub.present }}/{{ sub.total }})</span>
+                </div>
+                <div style="width: 100%; height: 8px; background: #f1f5f9; border-radius: 4px; overflow: hidden;">
+                    <div style="width: {{ sub.percentage }}%; height: 100%; background: {% if sub.percentage >= 75 %}#10b981{% else %}#ef4444{% endif %};"></div>
+                </div>
+            </div>
+            {% else %}
+            <div style="text-align: center; color: #94a3b8; font-style: italic; padding: 20px;">
+                No subject attendance records available.
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+</div>
+{% endblock %}

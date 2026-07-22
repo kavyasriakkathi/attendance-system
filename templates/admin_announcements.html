@@ -1,0 +1,75 @@
+{% extends "layout.html" %}
+
+{% block content %}
+<div class="dashboard-header" style="margin-bottom: 25px;">
+    <div>
+        <h1 style="font-size: 1.8rem; font-weight: 700; color: #1e293b; margin: 0; display: flex; align-items: center; gap: 10px;">
+            <i class="fa-solid fa-bullhorn" style="color: #4f46e5;"></i> College Announcements & Parent Notifications
+        </h1>
+        <p style="color: #64748b; margin: 4px 0 0 0; font-size: 0.95rem;">
+            Publish official announcements to parents, students, and institutional users.
+        </p>
+    </div>
+</div>
+
+<div class="card" style="background: white; border-radius: 16px; padding: 24px; box-shadow: 0 4px 20px rgba(0,0,0,0.05); border: 1px solid #e2e8f0; margin-bottom: 25px;">
+    <h2 style="font-size: 1.2rem; font-weight: 800; color: #0f172a; margin: 0 0 16px 0;">
+        Publish New Announcement
+    </h2>
+
+    <form method="POST" action="{{ url_for('admin_announcements') }}">
+        <div style="margin-bottom: 16px;">
+            <label style="display: block; font-weight: 700; font-size: 0.85rem; color: #334155; margin-bottom: 6px;">
+                Announcement Title *
+            </label>
+            <input type="text" name="title" placeholder="e.g. Mid-Term Examination Schedule & Parent Teacher Meet" required style="width: 100%; padding: 11px 14px; border-radius: 10px; border: 1px solid #cbd5e1; font-size: 0.95rem; box-sizing: border-box;">
+        </div>
+
+        <div style="margin-bottom: 16px;">
+            <label style="display: block; font-weight: 700; font-size: 0.85rem; color: #334155; margin-bottom: 6px;">
+                Target Audience
+            </label>
+            <select name="target_audience" style="width: 100%; padding: 11px 14px; border-radius: 10px; border: 1px solid #cbd5e1; font-size: 0.95rem; box-sizing: border-box;">
+                <option value="all">All (Parents & Students)</option>
+                <option value="parents">Parents Only</option>
+                <option value="students">Students Only</option>
+            </select>
+        </div>
+
+        <div style="margin-bottom: 20px;">
+            <label style="display: block; font-weight: 700; font-size: 0.85rem; color: #334155; margin-bottom: 6px;">
+                Announcement Content *
+            </label>
+            <textarea name="content" rows="4" placeholder="Enter full announcement message..." required style="width: 100%; padding: 12px 14px; border-radius: 10px; border: 1px solid #cbd5e1; font-size: 0.95rem; box-sizing: border-box; resize: vertical;"></textarea>
+        </div>
+
+        <button type="submit" style="padding: 12px 24px; background: linear-gradient(135deg, #4f46e5, #0284c7); color: white; border: none; border-radius: 10px; font-weight: 800; font-size: 0.95rem; cursor: pointer;">
+            <i class="fa-solid fa-paper-plane" style="margin-right: 6px;"></i> Publish Announcement
+        </button>
+    </form>
+</div>
+
+<!-- Published Announcements List -->
+<div class="card" style="background: white; border-radius: 16px; padding: 24px; box-shadow: 0 4px 20px rgba(0,0,0,0.05); border: 1px solid #e2e8f0;">
+    <h2 style="font-size: 1.2rem; font-weight: 800; color: #0f172a; margin: 0 0 16px 0;">
+        Published Announcements History
+    </h2>
+
+    <div style="display: flex; flex-direction: column; gap: 12px;">
+        {% for ann in announcements %}
+        <div style="background: #f8fafc; padding: 16px; border-radius: 10px; border: 1px solid #e2e8f0;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+                <span style="font-weight: 800; font-size: 1rem; color: #0f172a;">{{ ann.title }}</span>
+                <span style="font-size: 0.8rem; background: #e0e7ff; color: #3730a3; padding: 2px 8px; border-radius: 6px; font-weight: 700;">Audience: {{ ann.target_audience|upper }}</span>
+            </div>
+            <div style="font-size: 0.9rem; color: #334155; margin-top: 4px;">{{ ann.content }}</div>
+            <div style="font-size: 0.75rem; color: #94a3b8; margin-top: 6px;">Published by {{ ann.created_by|default('Admin') }} | {{ ann.created_at }}</div>
+        </div>
+        {% else %}
+        <div style="text-align: center; color: #94a3b8; font-style: italic; padding: 20px;">
+            No announcements published yet.
+        </div>
+        {% endfor %}
+    </div>
+</div>
+{% endblock %}

@@ -1,0 +1,68 @@
+{% extends "layout.html" %}
+
+{% block content %}
+<div class="dashboard-header" style="margin-bottom: 25px;">
+    <div>
+        <h1 style="font-size: 1.8rem; font-weight: 700; color: #1e293b; margin: 0; display: flex; align-items: center; gap: 10px;">
+            <i class="fa-solid fa-bell" style="color: #0284c7;"></i> Parent Notifications & Alerts
+        </h1>
+        <p style="color: #64748b; margin: 4px 0 0 0; font-size: 0.95rem;">
+            Real-time notifications for attendance shortage alerts, exam results published, and official college announcements.
+        </p>
+    </div>
+</div>
+
+<div class="card" style="background: white; border-radius: 16px; padding: 24px; box-shadow: 0 4px 20px rgba(0,0,0,0.05); border: 1px solid #e2e8f0; margin-bottom: 25px;">
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; flex-wrap: wrap; gap: 10px;">
+        <h2 style="font-size: 1.2rem; font-weight: 800; color: #0f172a; margin: 0;">
+            Ward Alerts Feed ({{ student_name }})
+        </h2>
+        <form method="POST" action="{{ url_for('parent_notifications') }}">
+            <button type="submit" style="background: #f1f5f9; color: #475569; border: 1px solid #cbd5e1; padding: 6px 14px; border-radius: 8px; font-size: 0.85rem; font-weight: 700; cursor: pointer;">
+                <i class="fa-solid fa-check-double"></i> Mark All as Read
+            </button>
+        </form>
+    </div>
+
+    <div style="display: flex; flex-direction: column; gap: 14px;">
+        {% for notif in notifications %}
+        <div style="background: {% if notif.is_read %}#f8fafc{% else %}#ffffff{% endif %}; padding: 16px 20px; border-radius: 12px; border: 1px solid {% if notif.is_read %}#e2e8f0{% else %}#bfdbfe{% endif %}; border-left: 5px solid {% if notif.type == 'attendance_shortage' %}#ef4444{% elif notif.type == 'results_published' %}#4f46e5{% else %}#0284c7{% endif %}; box-shadow: 0 2px 8px rgba(0,0,0,0.02);">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+                <span style="font-weight: 800; font-size: 0.95rem; color: #0f172a;">
+                    {% if notif.type == 'attendance_shortage' %}⚠️ {% elif notif.type == 'results_published' %}🎓 {% else %}📢 {% endif %}
+                    {{ notif.title }}
+                </span>
+                <span style="font-size: 0.75rem; color: #94a3b8;">{{ notif.created_at }}</span>
+            </div>
+            <div style="font-size: 0.9rem; color: #334155; line-height: 1.4;">{{ notif.message }}</div>
+        </div>
+        {% else %}
+        <div style="text-align: center; color: #94a3b8; font-style: italic; padding: 30px;">
+            No notifications generated yet.
+        </div>
+        {% endfor %}
+    </div>
+</div>
+
+<!-- Official College Announcements -->
+<div class="card" style="background: white; border-radius: 16px; padding: 24px; box-shadow: 0 4px 20px rgba(0,0,0,0.05); border: 1px solid #e2e8f0;">
+    <h2 style="font-size: 1.2rem; font-weight: 800; color: #0f172a; margin: 0 0 16px 0;">
+        📢 Official College Announcements
+    </h2>
+    <div style="display: flex; flex-direction: column; gap: 14px;">
+        {% for ann in announcements %}
+        <div style="background: #f0f9ff; padding: 16px 20px; border-radius: 12px; border: 1px solid #bae6fd; border-left: 5px solid #0284c7;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                <span style="font-weight: 800; font-size: 1rem; color: #0369a1;">{{ ann.title }}</span>
+                <span style="font-size: 0.75rem; color: #64748b;">By {{ ann.created_by|default('Admin') }} | {{ ann.created_at }}</span>
+            </div>
+            <div style="font-size: 0.9rem; color: #1e293b; line-height: 1.5;">{{ ann.content }}</div>
+        </div>
+        {% else %}
+        <div style="text-align: center; color: #94a3b8; font-style: italic; padding: 20px;">
+            No college announcements published yet.
+        </div>
+        {% endfor %}
+    </div>
+</div>
+{% endblock %}
