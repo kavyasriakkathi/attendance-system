@@ -53,11 +53,17 @@
             <a class="nav-link" href="{{ url_for('department_dashboard') }}"><i class="fa-solid fa-chart-pie"></i> Summary</a>
             <a class="nav-link" href="{{ url_for('attendance_report') }}"><i class="fa-solid fa-file-invoice"></i> Reports</a>
             <a class="nav-link" href="{{ url_for('upload_students') }}"><i class="fa-solid fa-file-arrow-up"></i> Upload Students</a>
+            {% if has_endpoint('admin_workload') %}
+            <a class="nav-link" href="{{ url_for('admin_workload') }}"><i class="fa-solid fa-briefcase"></i> Workload</a>
+            {% endif %}
             <a class="nav-link" href="{{ url_for('settings') }}"><i class="fa-solid fa-gear"></i> Settings</a>
             <a class="logout" href="{{ url_for('logout') }}"><i class="fa-solid fa-right-from-bracket"></i></a>
             {% elif session.role == 'teacher' %}
             {% if has_endpoint('teacher_dashboard') %}
             <a class="nav-link" href="{{ url_for('teacher_dashboard') }}"><i class="fa-solid fa-gauge"></i> Dashboard</a>
+            {% endif %}
+            {% if has_endpoint('teacher_workload') %}
+            <a class="nav-link" href="{{ url_for('teacher_workload') }}"><i class="fa-solid fa-clock"></i> Workload</a>
             {% endif %}
             {% if has_endpoint('teacher_enter_marks') %}
             <a class="nav-link" href="{{ url_for('teacher_enter_marks') }}"><i class="fa-solid fa-pen-field"></i> Enter Marks</a>

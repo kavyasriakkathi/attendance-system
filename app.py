@@ -9160,5 +9160,326 @@ def admin_announcements():
             except: pass
 
 
+def get_teacher_workload_context(db, teacher_id):
+    """Calculate detailed faculty workload metrics from timetable, subject assignments, and attendance."""
+    placeholder = get_placeholder()
+
+    teacher = db.execute(
+        f"SELECT t.*, b.name AS branch_name FROM teachers t LEFT JOIN branches b ON t.branch_id = b.id WHERE t.id = {placeholder}",
+        (teacher_id,),
+    ).fetchone()
+
+    if not teacher:
+        return None
+
+    teacher_name = row_get(teacher, "name") or ""
+    department = row_get(teacher, "department") or row_get(teacher, "branch_name") or "General"
+
+    # Query Timetable Entries / Slots
+    entries = []
+    try:
+        entries = db.execute(
+            f"SELECT te.*, s.name AS subject_name_ref, b.name AS branch_name_ref "
+            f"FROM timetable_entries te "
+            f"LEFT JOIN subjects s ON te.subject_id = s.id "
+            f"LEFT JOIN branches b ON te.branch_id = b.id "
+            f"WHERE te.teacher_id = {placeholder} OR UPPER(TRIM(te.faculty_name)) = {placeholder}",
+            (teacher_id, teacher_name.upper().strip()),
+        ).fetchall()
+    except Exception:
+        entries = []
+
+    if not entries:
+        try:
+            entries = db.execute(
+                f"SELECT ts.*, ts.subject_name AS subject_name_ref, ts.branch AS branch_name_ref "
+                f"FROM timetable_slots ts "
+                f"WHERE UPPER(TRIM(ts.faculty_name)) = {placeholder}",
+                (teacher_name.upper().strip(),),
+            ).fetchall()
+        except Exception:
+            entries = []
+
+    weekly_periods = len(entries)
+    weekly_hours = round(weekly_periods * 1.0, 1)
+    monthly_hours = round(weekly_hours * 4.2, 1)
+
+    days_order = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
+    day_periods = {day: 0 for day in days_order}
+    day_schedule = {day: [] for day in days_order}
+
+    subjects_map = {}
+    sections_set = set()
+
+    for e in entries:
+        day = row_get(e, "day") or "Monday"
+        if day in day_periods:
+            day_periods[day] += 1
+
+        start = row_get(e, "start_time") or ""
+        end = row_get(e, "end_time") or ""
+        sub_name = row_get(e, "subject_name") or row_get(e, "subject_name_ref") or "Subject"
+        sec = row_get(e, "section") or "A"
+        br = row_get(e, "branch_name_ref") or row_get(e, "branch") or ""
+        room = row_get(e, "room") or ""
+
+        if day in day_schedule:
+            day_schedule[day].append({
+                "time": f"{start} - {end}" if start and end else "Scheduled",
+                "subject": sub_name,
+                "section": sec,
+                "branch": br,
+                "room": room,
+            })
+
+        if sec:
+            sections_set.add(f"{br}-{sec}" if br else sec)
+
+        if sub_name not in subjects_map:
+            subjects_map[sub_name] = {
+                "name": sub_name,
+                "periods": 0,
+                "sections": set(),
+            }
+        subjects_map[sub_name]["periods"] += 1
+        if sec:
+            subjects_map[sub_name]["sections"].add(sec)
+
+    subject_distribution = []
+    for sname, sdata in subjects_map.items():
+        pct = round((sdata["periods"] / weekly_periods * 100.0), 1) if weekly_periods > 0 else 0.0
+        subject_distribution.append({
+            "name": sname,
+            "periods": sdata["periods"],
+            "percentage": pct,
+            "sections": list(sdata["sections"]),
+        })
+
+    assigned_subjects = []
+    try:
+        assigned_subjects = db.execute(
+            f"SELECT tsa.*, s.name AS subject_name, b.name AS branch_name "
+            f"FROM teacher_subject_assignments tsa "
+            f"JOIN subjects s ON tsa.subject_id = s.id "
+            f"JOIN branches b ON tsa.branch_id = b.id "
+            f"WHERE tsa.teacher_id = {placeholder}",
+            (teacher_id,),
+        ).fetchall()
+    except Exception:
+        assigned_subjects = []
+
+    conducted_count = 0
+    try:
+        c_row = db.execute(
+            f"SELECT COUNT(*) AS cnt FROM attendance_sessions WHERE teacher_id = {placeholder}",
+            (teacher_id,),
+        ).fetchone()
+        if c_row:
+            conducted_count = row_get(c_row, "cnt") or 0
+    except Exception:
+        try:
+            c_row = db.execute(
+                f"SELECT COUNT(DISTINCT date || subject_name || branch_id) AS cnt FROM attendance WHERE teacher_id = {placeholder}",
+                (teacher_id,),
+            ).fetchone()
+            if c_row:
+                conducted_count = row_get(c_row, "cnt") or 0
+        except Exception:
+            conducted_count = 0
+
+    if weekly_periods > 18:
+        workload_status = "Overloaded"
+        status_badge = "danger"
+        status_color = "#ef4444"
+        recommendation = "Exceeds maximum recommended 18 periods/week threshold. Reassignment suggested."
+    elif weekly_periods < 12:
+        workload_status = "Underutilized"
+        status_badge = "warning"
+        status_color = "#f59e0b"
+        recommendation = "Below standard 12 periods/week threshold. Available for additional subjects."
+    else:
+        workload_status = "Optimal"
+        status_badge = "success"
+        status_color = "#10b981"
+        recommendation = "Workload is within optimal standard limit (12-18 periods/week)."
+
+    return {
+        "teacher": {
+            "id": teacher_id,
+            "name": teacher_name,
+            "email": row_get(teacher, "email") or "",
+            "department": department,
+            "branch_id": row_get(teacher, "branch_id"),
+        },
+        "weekly_periods": weekly_periods,
+        "weekly_hours": weekly_hours,
+        "monthly_hours": monthly_hours,
+        "classes_conducted": conducted_count,
+        "sections_handled_count": len(sections_set),
+        "subjects_handled_count": len(subjects_map) or len(assigned_subjects),
+        "day_periods": day_periods,
+        "day_schedule": day_schedule,
+        "subject_distribution": subject_distribution,
+        "assigned_subjects": assigned_subjects,
+        "workload_status": workload_status,
+        "status_badge": status_badge,
+        "status_color": status_color,
+        "recommendation": recommendation,
+    }
+
+
+def get_admin_workload_analytics(db):
+    """Aggregate college-wide workload analytics for all faculty and departments."""
+    teachers = db.execute("SELECT id, name, department, branch_id FROM teachers ORDER BY name").fetchall()
+
+    teacher_analytics = []
+    department_map = {}
+
+    total_college_periods = 0
+    overloaded_count = 0
+    underutilized_count = 0
+    optimal_count = 0
+
+    for t in teachers:
+        tid = row_get(t, "id")
+        tw = get_teacher_workload_context(db, tid)
+        if not tw:
+            continue
+
+        teacher_analytics.append(tw)
+
+        w_periods = tw["weekly_periods"]
+        total_college_periods += w_periods
+
+        if tw["workload_status"] == "Overloaded":
+            overloaded_count += 1
+        elif tw["workload_status"] == "Underutilized":
+            underutilized_count += 1
+        else:
+            optimal_count += 1
+
+        dept = tw["teacher"]["department"] or "General"
+        if dept not in department_map:
+            department_map[dept] = {
+                "name": dept,
+                "teacher_count": 0,
+                "total_periods": 0,
+                "overloaded": 0,
+                "underutilized": 0,
+            }
+        department_map[dept]["teacher_count"] += 1
+        department_map[dept]["total_periods"] += w_periods
+        if tw["workload_status"] == "Overloaded":
+            department_map[dept]["overloaded"] += 1
+        elif tw["workload_status"] == "Underutilized":
+            department_map[dept]["underutilized"] += 1
+
+    department_analytics = []
+    for dname, ddata in department_map.items():
+        t_cnt = ddata["teacher_count"]
+        avg_p = round(ddata["total_periods"] / t_cnt, 1) if t_cnt > 0 else 0.0
+
+        if avg_p > 18:
+            dept_status = "High Load"
+            dept_badge = "danger"
+        elif avg_p < 12:
+            dept_status = "Low Load"
+            dept_badge = "warning"
+        else:
+            dept_status = "Balanced"
+            dept_badge = "success"
+
+        department_analytics.append({
+            "department": dname,
+            "teacher_count": t_cnt,
+            "total_periods": ddata["total_periods"],
+            "avg_periods": avg_p,
+            "overloaded": ddata["overloaded"],
+            "underutilized": ddata["underutilized"],
+            "status": dept_status,
+            "badge": dept_badge,
+        })
+
+    avg_college_periods = round(total_college_periods / len(teachers), 1) if teachers else 0.0
+
+    overloaded_teachers = [t for t in teacher_analytics if t["workload_status"] == "Overloaded"]
+    underutilized_teachers = [t for t in teacher_analytics if t["workload_status"] == "Underutilized"]
+
+    return {
+        "teacher_analytics": teacher_analytics,
+        "department_analytics": department_analytics,
+        "total_teachers": len(teachers),
+        "total_college_periods": total_college_periods,
+        "avg_college_periods": avg_college_periods,
+        "overloaded_count": overloaded_count,
+        "underutilized_count": underutilized_count,
+        "optimal_count": optimal_count,
+        "overloaded_teachers": overloaded_teachers,
+        "underutilized_teachers": underutilized_teachers,
+    }
+
+
+@app.route("/admin/workload", methods=["GET"])
+@app.route("/admin_workload", methods=["GET"])
+def admin_workload():
+    if session.get("role") != "admin":
+        flash("Admin login required.", "error")
+        return redirect(url_for("login"))
+    db = None
+    try:
+        db = get_db()
+        analytics = get_admin_workload_analytics(db)
+        return render_template("admin_workload.html", **analytics)
+    except Exception as e:
+        print(f"[admin_workload ERROR]: {repr(e)}")
+        flash("Error loading workload analytics.", "error")
+        return redirect(url_for("dashboard"))
+    finally:
+        if db:
+            try: db.close()
+            except: pass
+
+
+@app.route("/teacher/workload", methods=["GET"])
+@app.route("/teacher_workload", methods=["GET"])
+def teacher_workload():
+    if session.get("role") != "teacher":
+        flash("Teacher login required.", "error")
+        return redirect(url_for("teacher_login"))
+
+    db = None
+    try:
+        db = get_db()
+        placeholder = get_placeholder()
+        teacher_id = session.get("teacher_id")
+
+        if not teacher_id and session.get("username"):
+            t_row = db.execute(
+                f"SELECT id FROM teachers WHERE email = {placeholder} OR UPPER(TRIM(name)) = {placeholder}",
+                (session.get("username"), session.get("username").upper().strip()),
+            ).fetchone()
+            if t_row:
+                teacher_id = row_get(t_row, "id")
+
+        if not teacher_id:
+            flash("Teacher record not found.", "error")
+            return redirect(url_for("teacher_dashboard"))
+
+        workload = get_teacher_workload_context(db, teacher_id)
+        if not workload:
+            flash("Teacher workload records unavailable.", "error")
+            return redirect(url_for("teacher_dashboard"))
+
+        return render_template("teacher_workload.html", **workload)
+    except Exception as e:
+        print(f"[teacher_workload ERROR]: {repr(e)}")
+        flash("Error loading teacher workload view.", "error")
+        return redirect(url_for("teacher_dashboard"))
+    finally:
+        if db:
+            try: db.close()
+            except: pass
+
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)

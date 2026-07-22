@@ -1,0 +1,121 @@
+{% extends "layout.html" %}
+
+{% block content %}
+<div class="dashboard-header" style="margin-bottom: 25px;">
+    <div>
+        <h1 style="font-size: 1.8rem; font-weight: 700; color: #1e293b; margin: 0; display: flex; align-items: center; gap: 10px;">
+            <i class="fa-solid fa-clock" style="color: #0284c7;"></i> My Workload & Teaching Hours
+        </h1>
+        <p style="color: #64748b; margin: 4px 0 0 0; font-size: 0.95rem;">
+            Personal workload calculation from weekly timetable, assigned subjects, conducted sessions, and schedule distribution for {{ teacher.name }}.
+        </p>
+    </div>
+</div>
+
+<!-- Header Card -->
+<div class="card" style="background: white; padding: 24px; border-radius: 16px; box-shadow: 0 4px 20px rgba(0,0,0,0.05); border: 1px solid #e2e8f0; margin-bottom: 25px; display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 20px;">
+    <div style="display: flex; align-items: center; gap: 16px;">
+        <div style="width: 56px; height: 56px; border-radius: 50%; background: linear-gradient(135deg, #0284c7, #4f46e5); color: white; display: flex; align-items: center; justify-content: center; font-size: 1.5rem; font-weight: 800;">
+            {{ teacher.name[0]|upper }}
+        </div>
+        <div>
+            <div style="font-size: 1.4rem; font-weight: 800; color: #0f172a;">{{ teacher.name }}</div>
+            <div style="font-size: 0.9rem; color: #64748b; font-weight: 500;">
+                Department: <strong>{{ teacher.department }}</strong> | Email: {{ teacher.email|default('N/A') }}
+            </div>
+        </div>
+    </div>
+    <div>
+        <span style="background: {% if workload_status == 'Overloaded' %}#fee2e2{% elif workload_status == 'Underutilized' %}#fef3c7{% else %}#dcfce7{% endif %}; color: {% if workload_status == 'Overloaded' %}#991b1b{% elif workload_status == 'Underutilized' %}#92400e{% else %}#166534{% endif %}; padding: 8px 16px; border-radius: 12px; font-weight: 800; font-size: 0.95rem;">
+            Status: {{ workload_status|upper }}
+        </span>
+    </div>
+</div>
+
+<!-- Personal Workload Metric Cards -->
+<div class="metrics-grid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 16px; margin-bottom: 25px;">
+    <div class="metric-card" style="background: white; border: 1px solid #e2e8f0; padding: 20px; border-radius: 14px; box-shadow: 0 4px 15px rgba(0,0,0,0.03);">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+            <div style="font-size: 0.8rem; font-weight: 700; color: #64748b; text-transform: uppercase;">Weekly Periods</div>
+            <i class="fa-solid fa-calendar-days" style="color: #0284c7; font-size: 1.2rem;"></i>
+        </div>
+        <div style="font-size: 1.9rem; font-weight: 800; color: #0284c7; margin-top: 6px;">{{ weekly_periods }}</div>
+        <div style="font-size: 0.8rem; color: #64748b; margin-top: 4px;">Scheduled in Timetable</div>
+    </div>
+
+    <div class="metric-card" style="background: white; border: 1px solid #e2e8f0; padding: 20px; border-radius: 14px; box-shadow: 0 4px 15px rgba(0,0,0,0.03);">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+            <div style="font-size: 0.8rem; font-weight: 700; color: #64748b; text-transform: uppercase;">Weekly Hours</div>
+            <i class="fa-solid fa-clock" style="color: #4f46e5; font-size: 1.2rem;"></i>
+        </div>
+        <div style="font-size: 1.9rem; font-weight: 800; color: #4f46e5; margin-top: 6px;">{{ weekly_hours }} <span style="font-size: 0.9rem; color: #64748b; font-weight: 600;">hrs/wk</span></div>
+        <div style="font-size: 0.8rem; color: #64748b; margin-top: 4px;">~{{ monthly_hours }} hrs/month</div>
+    </div>
+
+    <div class="metric-card" style="background: white; border: 1px solid #e2e8f0; padding: 20px; border-radius: 14px; box-shadow: 0 4px 15px rgba(0,0,0,0.03);">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+            <div style="font-size: 0.8rem; font-weight: 700; color: #64748b; text-transform: uppercase;">Classes Handled</div>
+            <i class="fa-solid fa-clipboard-check" style="color: #059669; font-size: 1.2rem;"></i>
+        </div>
+        <div style="font-size: 1.9rem; font-weight: 800; color: #059669; margin-top: 6px;">{{ classes_conducted }}</div>
+        <div style="font-size: 0.8rem; color: #64748b; margin-top: 4px;">Sessions Conducted</div>
+    </div>
+
+    <div class="metric-card" style="background: white; border: 1px solid #e2e8f0; padding: 20px; border-radius: 14px; box-shadow: 0 4px 15px rgba(0,0,0,0.03);">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+            <div style="font-size: 0.8rem; font-weight: 700; color: #64748b; text-transform: uppercase;">Sections Handled</div>
+            <i class="fa-solid fa-layer-group" style="color: #d97706; font-size: 1.2rem;"></i>
+        </div>
+        <div style="font-size: 1.9rem; font-weight: 800; color: #d97706; margin-top: 6px;">{{ sections_handled_count }}</div>
+        <div style="font-size: 0.8rem; color: #64748b; margin-top: 4px;">Across {{ subjects_handled_count }} subjects</div>
+    </div>
+</div>
+
+<!-- Subject Period Distribution -->
+<div class="card" style="background: white; border-radius: 16px; padding: 24px; box-shadow: 0 4px 20px rgba(0,0,0,0.05); border: 1px solid #e2e8f0; margin-bottom: 25px;">
+    <h2 style="font-size: 1.2rem; font-weight: 800; color: #0f172a; margin: 0 0 16px 0;">
+        Subject Workload Distribution
+    </h2>
+    <div style="display: flex; flex-direction: column; gap: 14px;">
+        {% for s in subject_distribution %}
+        <div>
+            <div style="display: flex; justify-content: space-between; font-size: 0.9rem; font-weight: 700; margin-bottom: 4px;">
+                <span style="color: #1e293b;">{{ s.name }} (Sections: {{ s.sections|join(', ') }})</span>
+                <span style="color: #0284c7;">{{ s.periods }} periods/wk ({{ s.percentage }}%)</span>
+            </div>
+            <div style="width: 100%; height: 10px; background: #f1f5f9; border-radius: 5px; overflow: hidden;">
+                <div style="width: {{ s.percentage }}%; height: 100%; background: linear-gradient(90deg, #0284c7, #4f46e5); border-radius: 5px;"></div>
+            </div>
+        </div>
+        {% else %}
+        <div style="text-align: center; color: #94a3b8; font-style: italic; padding: 20px;">
+            No assigned timetable subjects found.
+        </div>
+        {% endfor %}
+    </div>
+</div>
+
+<!-- Weekly Schedule Preview -->
+<div class="card" style="background: white; border-radius: 16px; padding: 24px; box-shadow: 0 4px 20px rgba(0,0,0,0.05); border: 1px solid #e2e8f0;">
+    <h2 style="font-size: 1.2rem; font-weight: 800; color: #0f172a; margin: 0 0 16px 0;">
+        Weekly Timetable Schedule
+    </h2>
+    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 14px;">
+        {% for day, count in day_periods.items() %}
+        <div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 12px; padding: 14px; text-align: center;">
+            <div style="font-weight: 800; font-size: 0.95rem; color: #0f172a;">{{ day }}</div>
+            <div style="font-size: 1.4rem; font-weight: 800; color: #0284c7; margin: 4px 0;">{{ count }}</div>
+            <div style="font-size: 0.75rem; color: #64748b;">Periods</div>
+            <div style="margin-top: 8px; font-size: 0.75rem; color: #475569; text-align: left;">
+                {% for slot in day_schedule[day] %}
+                <div style="background: white; border-radius: 6px; padding: 4px 6px; margin-top: 4px; border: 1px solid #cbd5e1;">
+                    <strong>{{ slot.time }}</strong><br>
+                    {{ slot.subject }} ({{ slot.section }})
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+</div>
+{% endblock %}

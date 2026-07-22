@@ -1,0 +1,210 @@
+{% extends "layout.html" %}
+
+{% block content %}
+<div class="dashboard-header" style="margin-bottom: 25px;">
+    <div>
+        <h1 style="font-size: 1.8rem; font-weight: 700; color: #1e293b; margin: 0; display: flex; align-items: center; gap: 10px;">
+            <i class="fa-solid fa-briefcase" style="color: #4f46e5;"></i> Faculty Workload Management & Analytics
+        </h1>
+        <p style="color: #64748b; margin: 4px 0 0 0; font-size: 0.95rem;">
+            Automatic workload calculations from timetable entries, department distribution, overloaded & underutilized faculty monitoring.
+        </p>
+    </div>
+</div>
+
+<!-- Summary Metrics Cards -->
+<div class="metrics-grid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 16px; margin-bottom: 25px;">
+    <div class="metric-card" style="background: white; border: 1px solid #e2e8f0; padding: 20px; border-radius: 14px; box-shadow: 0 4px 15px rgba(0,0,0,0.03);">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+            <div style="font-size: 0.8rem; font-weight: 700; color: #64748b; text-transform: uppercase;">Total Faculty</div>
+            <i class="fa-solid fa-user-tie" style="color: #4f46e5; font-size: 1.2rem;"></i>
+        </div>
+        <div style="font-size: 1.9rem; font-weight: 800; color: #0f172a; margin-top: 6px;">{{ total_teachers }}</div>
+        <div style="font-size: 0.8rem; color: #64748b; margin-top: 4px;">Registered Instructors</div>
+    </div>
+
+    <div class="metric-card" style="background: white; border: 1px solid #e2e8f0; padding: 20px; border-radius: 14px; box-shadow: 0 4px 15px rgba(0,0,0,0.03);">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+            <div style="font-size: 0.8rem; font-weight: 700; color: #64748b; text-transform: uppercase;">Total Scheduled Periods</div>
+            <i class="fa-solid fa-calendar-days" style="color: #0284c7; font-size: 1.2rem;"></i>
+        </div>
+        <div style="font-size: 1.9rem; font-weight: 800; color: #0284c7; margin-top: 6px;">{{ total_college_periods }} <span style="font-size: 0.9rem; color: #64748b; font-weight: 600;">periods/wk</span></div>
+        <div style="font-size: 0.8rem; color: #64748b; margin-top: 4px;">Avg: <strong>{{ avg_college_periods }}</strong> periods/teacher</div>
+    </div>
+
+    <div class="metric-card" style="background: white; border: 1px solid #e2e8f0; padding: 20px; border-radius: 14px; box-shadow: 0 4px 15px rgba(0,0,0,0.03);">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+            <div style="font-size: 0.8rem; font-weight: 700; color: #64748b; text-transform: uppercase;">Overloaded Faculty</div>
+            <i class="fa-solid fa-triangle-exclamation" style="color: #ef4444; font-size: 1.2rem;"></i>
+        </div>
+        <div style="font-size: 1.9rem; font-weight: 800; color: #dc2626; margin-top: 6px;">{{ overloaded_count }}</div>
+        <div style="font-size: 0.8rem; color: #64748b; margin-top: 4px;">> 18 periods/week</div>
+    </div>
+
+    <div class="metric-card" style="background: white; border: 1px solid #e2e8f0; padding: 20px; border-radius: 14px; box-shadow: 0 4px 15px rgba(0,0,0,0.03);">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+            <div style="font-size: 0.8rem; font-weight: 700; color: #64748b; text-transform: uppercase;">Underutilized Faculty</div>
+            <i class="fa-solid fa-battery-quarter" style="color: #f59e0b; font-size: 1.2rem;"></i>
+        </div>
+        <div style="font-size: 1.9rem; font-weight: 800; color: #d97706; margin-top: 6px;">{{ underutilized_count }}</div>
+        <div style="font-size: 0.8rem; color: #64748b; margin-top: 4px;">< 12 periods/week</div>
+    </div>
+</div>
+
+<!-- Department Workload Breakdown -->
+<div class="card" style="background: white; border-radius: 16px; padding: 24px; box-shadow: 0 4px 20px rgba(0,0,0,0.05); border: 1px solid #e2e8f0; margin-bottom: 25px;">
+    <h2 style="font-size: 1.2rem; font-weight: 800; color: #0f172a; margin: 0 0 16px 0; display: flex; align-items: center; gap: 8px;">
+        <i class="fa-solid fa-building" style="color: #0284c7;"></i> Department Workload Breakdown
+    </h2>
+    <div class="table-responsive">
+        <table style="width: 100%; border-collapse: separate; border-spacing: 0; font-size: 0.95rem;">
+            <thead>
+                <tr style="background: #f8fafc; color: #475569; text-align: left;">
+                    <th style="padding: 12px 16px; border-bottom: 2px solid #e2e8f0;">Department / Branch</th>
+                    <th style="padding: 12px 16px; border-bottom: 2px solid #e2e8f0; text-align: center;">Faculty Count</th>
+                    <th style="padding: 12px 16px; border-bottom: 2px solid #e2e8f0; text-align: center;">Total Department Periods</th>
+                    <th style="padding: 12px 16px; border-bottom: 2px solid #e2e8f0; text-align: center;">Avg Periods / Teacher</th>
+                    <th style="padding: 12px 16px; border-bottom: 2px solid #e2e8f0; text-align: center;">Overloaded</th>
+                    <th style="padding: 12px 16px; border-bottom: 2px solid #e2e8f0; text-align: center;">Underutilized</th>
+                    <th style="padding: 12px 16px; border-bottom: 2px solid #e2e8f0; text-align: center;">Dept Status</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for d in department_analytics %}
+                <tr style="border-bottom: 1px solid #f1f5f9;">
+                    <td style="padding: 14px 16px; font-weight: 700; color: #0f172a;">{{ d.department }}</td>
+                    <td style="padding: 14px 16px; text-align: center; color: #334155;">{{ d.teacher_count }}</td>
+                    <td style="padding: 14px 16px; text-align: center; font-weight: 700; color: #0284c7;">{{ d.total_periods }}</td>
+                    <td style="padding: 14px 16px; text-align: center; font-weight: 700; color: #4f46e5;">{{ d.avg_periods }}</td>
+                    <td style="padding: 14px 16px; text-align: center; color: #ef4444; font-weight: 700;">{{ d.overloaded }}</td>
+                    <td style="padding: 14px 16px; text-align: center; color: #f59e0b; font-weight: 700;">{{ d.underutilized }}</td>
+                    <td style="padding: 14px 16px; text-align: center;">
+                        {% if d.status == 'High Load' %}
+                        <span style="background: #fee2e2; color: #991b1b; padding: 4px 10px; border-radius: 6px; font-size: 0.8rem; font-weight: 700;">HIGH LOAD</span>
+                        {% elif d.status == 'Low Load' %}
+                        <span style="background: #fef3c7; color: #92400e; padding: 4px 10px; border-radius: 6px; font-size: 0.8rem; font-weight: 700;">LOW LOAD</span>
+                        {% else %}
+                        <span style="background: #dcfce7; color: #166534; padding: 4px 10px; border-radius: 6px; font-size: 0.8rem; font-weight: 700;">BALANCED</span>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% else %}
+                <tr>
+                    <td colspan="7" style="padding: 20px; text-align: center; color: #94a3b8; font-style: italic;">
+                        No departmental workload records available.
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<!-- Two Column: Overloaded Alert & Underutilized Faculty -->
+<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 24px; margin-bottom: 25px;">
+    <!-- Overloaded Faculty -->
+    <div class="card" style="background: white; border-radius: 16px; padding: 24px; box-shadow: 0 4px 20px rgba(0,0,0,0.05); border: 1px solid #e2e8f0;">
+        <h2 style="font-size: 1.15rem; font-weight: 800; color: #991b1b; margin: 0 0 16px 0; display: flex; align-items: center; gap: 8px;">
+            <i class="fa-solid fa-triangle-exclamation" style="color: #ef4444;"></i> Overloaded Faculty (> 18 Periods/Wk)
+        </h2>
+        <div style="display: flex; flex-direction: column; gap: 12px;">
+            {% for t in overloaded_teachers %}
+            <div style="background: #fef2f2; border: 1px solid #fca5a5; padding: 14px 16px; border-radius: 10px;">
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                    <span style="font-weight: 800; color: #7f1d1d; font-size: 0.95rem;">{{ t.teacher.name }}</span>
+                    <span style="background: #ef4444; color: white; padding: 2px 8px; border-radius: 6px; font-weight: 800; font-size: 0.8rem;">
+                        {{ t.weekly_periods }} periods/wk
+                    </span>
+                </div>
+                <div style="font-size: 0.85rem; color: #991b1b; margin-top: 4px;">
+                    Department: {{ t.teacher.department }} | Handled Subjects: {{ t.subjects_handled_count }}
+                </div>
+                <div style="font-size: 0.8rem; color: #b91c1c; margin-top: 4px; font-style: italic;">
+                    💡 {{ t.recommendation }}
+                </div>
+            </div>
+            {% else %}
+            <div style="text-align: center; color: #94a3b8; font-style: italic; padding: 20px;">
+                No faculty members exceed the maximum weekly workload threshold.
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+
+    <!-- Underutilized Faculty -->
+    <div class="card" style="background: white; border-radius: 16px; padding: 24px; box-shadow: 0 4px 20px rgba(0,0,0,0.05); border: 1px solid #e2e8f0;">
+        <h2 style="font-size: 1.15rem; font-weight: 800; color: #92400e; margin: 0 0 16px 0; display: flex; align-items: center; gap: 8px;">
+            <i class="fa-solid fa-battery-quarter" style="color: #f59e0b;"></i> Underutilized Faculty (< 12 Periods/Wk)
+        </h2>
+        <div style="display: flex; flex-direction: column; gap: 12px;">
+            {% for t in underutilized_teachers %}
+            <div style="background: #fffbebfb; border: 1px solid #fde68a; padding: 14px 16px; border-radius: 10px;">
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                    <span style="font-weight: 800; color: #78350f; font-size: 0.95rem;">{{ t.teacher.name }}</span>
+                    <span style="background: #f59e0b; color: white; padding: 2px 8px; border-radius: 6px; font-weight: 800; font-size: 0.8rem;">
+                        {{ t.weekly_periods }} periods/wk
+                    </span>
+                </div>
+                <div style="font-size: 0.85rem; color: #92400e; margin-top: 4px;">
+                    Department: {{ t.teacher.department }} | Handled Subjects: {{ t.subjects_handled_count }}
+                </div>
+                <div style="font-size: 0.8rem; color: #b45309; margin-top: 4px; font-style: italic;">
+                    💡 {{ t.recommendation }}
+                </div>
+            </div>
+            {% else %}
+            <div style="text-align: center; color: #94a3b8; font-style: italic; padding: 20px;">
+                All faculty members meet minimum workload thresholds.
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+</div>
+
+<!-- Full Teacher Workload Matrix -->
+<div class="card" style="background: white; border-radius: 16px; padding: 24px; box-shadow: 0 4px 20px rgba(0,0,0,0.05); border: 1px solid #e2e8f0;">
+    <h2 style="font-size: 1.25rem; font-weight: 800; color: #0f172a; margin: 0 0 16px 0;">
+        Full Faculty Workload Matrix
+    </h2>
+    <div class="table-responsive">
+        <table style="width: 100%; border-collapse: separate; border-spacing: 0; font-size: 0.95rem;">
+            <thead>
+                <tr style="background: #f8fafc; color: #475569; text-align: left;">
+                    <th style="padding: 12px 16px; border-bottom: 2px solid #e2e8f0;">Faculty Name</th>
+                    <th style="padding: 12px 16px; border-bottom: 2px solid #e2e8f0;">Department</th>
+                    <th style="padding: 12px 16px; border-bottom: 2px solid #e2e8f0; text-align: center;">Weekly Periods</th>
+                    <th style="padding: 12px 16px; border-bottom: 2px solid #e2e8f0; text-align: center;">Weekly Hours</th>
+                    <th style="padding: 12px 16px; border-bottom: 2px solid #e2e8f0; text-align: center;">Monthly Hours</th>
+                    <th style="padding: 12px 16px; border-bottom: 2px solid #e2e8f0; text-align: center;">Conducted Sessions</th>
+                    <th style="padding: 12px 16px; border-bottom: 2px solid #e2e8f0; text-align: center;">Sections</th>
+                    <th style="padding: 12px 16px; border-bottom: 2px solid #e2e8f0; text-align: center;">Workload Status</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for t in teacher_analytics %}
+                <tr style="border-bottom: 1px solid #f1f5f9;">
+                    <td style="padding: 14px 16px; font-weight: 700; color: #0f172a;">{{ t.teacher.name }}</td>
+                    <td style="padding: 14px 16px; color: #475569;">{{ t.teacher.department }}</td>
+                    <td style="padding: 14px 16px; text-align: center; font-weight: 800; color: #0284c7;">{{ t.weekly_periods }}</td>
+                    <td style="padding: 14px 16px; text-align: center; color: #334155;">{{ t.weekly_hours }} hrs</td>
+                    <td style="padding: 14px 16px; text-align: center; color: #334155;">{{ t.monthly_hours }} hrs</td>
+                    <td style="padding: 14px 16px; text-align: center; color: #059669; font-weight: 700;">{{ t.classes_conducted }}</td>
+                    <td style="padding: 14px 16px; text-align: center; color: #475569;">{{ t.sections_handled_count }}</td>
+                    <td style="padding: 14px 16px; text-align: center;">
+                        <span style="background: {% if t.workload_status == 'Overloaded' %}#fee2e2{% elif t.workload_status == 'Underutilized' %}#fef3c7{% else %}#dcfce7{% endif %}; color: {% if t.workload_status == 'Overloaded' %}#991b1b{% elif t.workload_status == 'Underutilized' %}#92400e{% else %}#166534{% endif %}; padding: 4px 12px; border-radius: 8px; font-size: 0.8rem; font-weight: 800;">
+                            {{ t.workload_status|upper }}
+                        </span>
+                    </td>
+                </tr>
+                {% else %}
+                <tr>
+                    <td colspan="8" style="padding: 20px; text-align: center; color: #94a3b8; font-style: italic;">
+                        No faculty workload data available.
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}
