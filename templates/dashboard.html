@@ -341,6 +341,7 @@ document.addEventListener('DOMContentLoaded', function() {
     <div class="card">
         <h2><i class="fa-solid fa-bolt"></i> Quick Actions</h2>
         <div style="display: flex; flex-direction: column; gap: 12px;">
+            <a href="{{ url_for('admin_fees') }}" class="button" style="background-color: #2563eb; color: white;"><i class="fa-solid fa-indian-rupee-sign"></i> Fee Management System</a>
             <a href="{{ url_for('mark_attendance') }}" class="button"><i class="fa-solid fa-plus"></i> Mark Attendance</a>
             <a href="{{ url_for('timetable_manage') }}" class="button" style="background-color: var(--primary-hover);"><i class="fa-solid fa-calendar-days"></i> Manage Timetable</a>
             <a href="{{ url_for('download_attendance') }}" class="button" style="background-color: var(--text-secondary);"><i class="fa-solid fa-file-excel"></i> Download Attendance Report</a>

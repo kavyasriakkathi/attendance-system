@@ -1,0 +1,94 @@
+{% extends "layout.html" %}
+{% block head %}
+<title>Record Payment - ERP Admin</title>
+<style>
+  .card-box {
+    background: #ffffff;
+    border-radius: 12px;
+    padding: 1.5rem;
+    box-shadow: 0 4px 15px rgba(0, 0, 0, 0.05);
+    max-width: 700px;
+    margin: 0 auto;
+  }
+  .form-group {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    margin-bottom: 1.25rem;
+  }
+  .form-group label {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: #334155;
+  }
+  .form-control {
+    padding: 0.65rem 0.8rem;
+    border: 1px solid #cbd5e1;
+    border-radius: 8px;
+    font-size: 0.95rem;
+  }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="container-fluid" style="max-width: 1200px; margin: 0 auto; padding: 1.5rem 1rem;">
+  <div style="margin-bottom: 1.5rem; text-align: center;">
+    <a href="{{ url_for('admin_fees') }}" style="color:#2563eb; text-decoration:none; font-weight:600;"><i class="fa-solid fa-arrow-left"></i> Back to Fee Dashboard</a>
+    <h2 style="margin:0.5rem 0 0 0; color:#0f172a; font-weight:800;"><i class="fa-solid fa-hand-holding-dollar" style="color:#10b981;"></i> Record Fee Payment</h2>
+    <p style="margin:0.25rem 0 0 0; color:#64748b; font-size:0.95rem;">Enter transaction details to update student fee balance and issue a receipt</p>
+  </div>
+
+  <div class="card-box">
+    <form action="{{ url_for('admin_record_payment') }}" method="POST">
+      <div class="form-group">
+        <label>Select Pending Fee Assignment *</label>
+        <select name="assignment_id" class="form-control" required>
+          <option value="">-- Select Pending Student Fee --</option>
+          {% for a in assignments %}
+            <option value="{{ a.assignment_id }}" {% if selected_assignment_id == a.assignment_id %}selected{% endif %}>
+              {{ a.student_name }} ({{ a.enrollment }}) - {{ a.fee_name }} [{{ a.status }}]
+            </option>
+          {% endfor %}
+        </select>
+      </div>
+
+      <div class="form-group">
+        <label>Amount Paid (₹) *</label>
+        <input type="number" step="0.01" name="amount_paid" class="form-control" placeholder="e.g. 25000.00" required>
+      </div>
+
+      <div class="form-group">
+        <label>Payment Date *</label>
+        <input type="date" name="payment_date" class="form-control" value="{{ today_date }}" required>
+      </div>
+
+      <div class="form-group">
+        <label>Payment Mode *</label>
+        <select name="payment_mode" class="form-control" required>
+          <option value="Online">Online / NetBanking</option>
+          <option value="UPI">UPI / QR</option>
+          <option value="Cash">Cash</option>
+          <option value="Bank Transfer">Bank Transfer (NEFT/RTGS)</option>
+          <option value="Cheque">Cheque / Demand Draft</option>
+        </select>
+      </div>
+
+      <div class="form-group">
+        <label>Transaction / Reference ID (Optional)</label>
+        <input type="text" name="transaction_id" class="form-control" placeholder="e.g. UPI/123456789 or Cheque #">
+      </div>
+
+      <div class="form-group">
+        <label>Notes / Comments (Optional)</label>
+        <input type="text" name="notes" class="form-control" placeholder="e.g. Installment 1 payment">
+      </div>
+
+      <div style="margin-top: 1.5rem;">
+        <button type="submit" class="btn" style="width:100%; background:#10b981; color:#fff; padding:0.75rem; border:none; border-radius:8px; font-weight:700; font-size:1rem; cursor:pointer;">
+          <i class="fa-solid fa-file-invoice-dollar"></i> Submit Payment & Generate Receipt
+        </button>
+      </div>
+    </form>
+  </div>
+</div>
+{% endblock %}

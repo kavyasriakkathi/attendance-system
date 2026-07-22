@@ -1,0 +1,161 @@
+{% extends "layout.html" %}
+{% block head %}
+<title>Child Fees - Parent Portal</title>
+<style>
+  .fee-summary-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 1.25rem;
+    margin-bottom: 2rem;
+  }
+  .fee-card {
+    background: #ffffff;
+    border-radius: 12px;
+    padding: 1.25rem 1.5rem;
+    box-shadow: 0 4px 15px rgba(0, 0, 0, 0.05);
+    border-left: 5px solid #2563eb;
+  }
+  .fee-card.green { border-left-color: #10b981; }
+  .fee-card.amber { border-left-color: #f59e0b; }
+  
+  .fee-val {
+    font-size: 1.75rem;
+    font-weight: 800;
+    color: #1e293b;
+    margin-top: 0.35rem;
+  }
+  .fee-lbl {
+    font-size: 0.85rem;
+    color: #64748b;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    font-weight: 600;
+  }
+  
+  .card-box {
+    background: #ffffff;
+    border-radius: 12px;
+    padding: 1.5rem;
+    box-shadow: 0 4px 15px rgba(0, 0, 0, 0.05);
+    margin-bottom: 2rem;
+  }
+  
+  .badge {
+    padding: 0.35rem 0.75rem;
+    border-radius: 20px;
+    font-size: 0.8rem;
+    font-weight: 700;
+  }
+  .badge-paid { background: #d1fae5; color: #065f46; }
+  .badge-partial { background: #fef3c7; color: #92400e; }
+  .badge-overdue { background: #fee2e2; color: #991b1b; }
+  .badge-unpaid { background: #f1f5f9; color: #475569; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="container-fluid" style="max-width: 1200px; margin: 0 auto; padding: 1.5rem 1rem;">
+  <div style="margin-bottom: 1.5rem;">
+    <h2 style="margin:0; color:#0f172a; font-weight:800;"><i class="fa-solid fa-wallet" style="color:#2563eb;"></i> Child Fee Portal</h2>
+    <p style="margin:0.25rem 0 0 0; color:#64748b; font-size:0.95rem;">Fee breakdown, payment status, and receipt downloads for <strong>{{ student.name }}</strong> (Enrollment: {{ student.enrollment }}, Branch: {{ student.branch_name or 'N/A' }})</p>
+  </div>
+
+  <!-- Summary Cards -->
+  <div class="fee-summary-grid">
+    <div class="fee-card">
+      <div class="fee-lbl">Total Fee Assigned</div>
+      <div class="fee-val">₹{{ "{:,.2f}".format(summary.total_assigned) }}</div>
+    </div>
+    <div class="fee-card green">
+      <div class="fee-lbl">Total Amount Paid</div>
+      <div class="fee-val" style="color:#059669;">₹{{ "{:,.2f}".format(summary.total_paid) }}</div>
+    </div>
+    <div class="fee-card amber">
+      <div class="fee-lbl">Outstanding Balance</div>
+      <div class="fee-val" style="color:#d97706;">₹{{ "{:,.2f}".format(summary.total_pending) }}</div>
+    </div>
+  </div>
+
+  <!-- Fee Assignments Breakdown -->
+  <div class="card-box">
+    <h3 style="margin-top:0; color:#1e293b; font-size:1.15rem; font-weight:700;"><i class="fa-solid fa-receipt" style="color:#2563eb;"></i> Assigned Fee Structures</h3>
+    
+    {% for a in summary.assignments %}
+    <div style="border: 1px solid #e2e8f0; border-radius: 10px; padding: 1.25rem; margin-top: 1rem; background:#ffffff;">
+      <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:0.5rem; margin-bottom:0.75rem;">
+        <div>
+          <h4 style="margin:0; color:#0f172a; font-size:1.1rem; font-weight:700;">{{ a.fee_name }}</h4>
+          <span style="color:#64748b; font-size:0.85rem;">Category: {{ a.category }} | Academic Year: {{ a.academic_year }}</span>
+        </div>
+        <div>
+          {% if a.status == 'Paid' %}
+            <span class="badge badge-paid"><i class="fa-solid fa-circle-check"></i> Fully Paid</span>
+          {% elif a.status == 'Partially Paid' %}
+            <span class="badge badge-partial"><i class="fa-solid fa-clock"></i> Partially Paid</span>
+          {% elif a.status == 'Overdue' %}
+            <span class="badge badge-overdue"><i class="fa-solid fa-triangle-exclamation"></i> Overdue</span>
+          {% else %}
+            <span class="badge badge-unpaid"><i class="fa-solid fa-circle"></i> Unpaid</span>
+          {% endif %}
+        </div>
+      </div>
+
+      <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap:1rem; background:#f8fafc; padding:0.85rem 1rem; border-radius:8px; margin-bottom:1rem;">
+        <div>
+          <span style="font-size:0.78rem; color:#64748b; font-weight:600; display:block;">NET FEE</span>
+          <span style="font-weight:700; color:#1e293b; font-size:1.05rem;">₹{{ "{:,.2f}".format(a.net_amount) }}</span>
+        </div>
+        <div>
+          <span style="font-size:0.78rem; color:#64748b; font-weight:600; display:block;">AMOUNT PAID</span>
+          <span style="font-weight:700; color:#059669; font-size:1.05rem;">₹{{ "{:,.2f}".format(a.total_paid) }}</span>
+        </div>
+        <div>
+          <span style="font-size:0.78rem; color:#64748b; font-weight:600; display:block;">REMAINING DUE</span>
+          <span style="font-weight:700; color:#dc2626; font-size:1.05rem;">₹{{ "{:,.2f}".format(a.pending_amount) }}</span>
+        </div>
+        <div>
+          <span style="font-size:0.78rem; color:#64748b; font-weight:600; display:block;">DUE DATE</span>
+          <span style="font-weight:600; color:#475569;">{{ a.due_date or 'N/A' }}</span>
+        </div>
+      </div>
+
+      {% if a.payments %}
+      <div style="margin-top:0.75rem;">
+        <h5 style="margin:0 0 0.5rem 0; font-size:0.88rem; color:#334155; font-weight:700;">Payment Receipts:</h5>
+        <div style="overflow-x:auto;">
+          <table style="width:100%; border-collapse:collapse; text-align:left; font-size:0.85rem;">
+            <thead>
+              <tr style="border-bottom:1px solid #cbd5e1; color:#64748b;">
+                <th style="padding:0.4rem;">Receipt #</th>
+                <th style="padding:0.4rem;">Date</th>
+                <th style="padding:0.4rem;">Mode</th>
+                <th style="padding:0.4rem;">Amount</th>
+                <th style="padding:0.4rem; text-align:right;">Action</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for p in a.payments %}
+              <tr style="border-bottom:1px solid #f1f5f9;">
+                <td style="padding:0.4rem; font-weight:600; color:#2563eb;">{{ p.receipt_number }}</td>
+                <td style="padding:0.4rem;">{{ p.payment_date }}</td>
+                <td style="padding:0.4rem;">{{ p.payment_mode }}</td>
+                <td style="padding:0.4rem; font-weight:700; color:#059669;">₹{{ "{:,.2f}".format(p.amount_paid) }}</td>
+                <td style="padding:0.4rem; text-align:right;">
+                  <a href="{{ url_for('fee_receipt', payment_id=p.id) }}" target="_blank" style="color:#2563eb; text-decoration:none; font-weight:600;">
+                    <i class="fa-solid fa-print"></i> View Receipt
+                  </a>
+                </td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      {% endif %}
+    </div>
+    {% else %}
+    <p style="color:#94a3b8; text-align:center; padding:1.5rem 0;">No fee records assigned yet for your child.</p>
+    {% endfor %}
+  </div>
+</div>
+{% endblock %}

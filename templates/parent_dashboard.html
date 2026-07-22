@@ -38,6 +38,21 @@
     </div>
 </div>
 
+<!-- Child Fee Quick Access Banner -->
+<div class="card" style="background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%); border-radius: 16px; padding: 20px 24px; margin-bottom: 25px; display: flex; justify-content: space-between; align-items: center; gap: 16px; color: white; box-shadow: 0 4px 15px rgba(0,0,0,0.08);">
+    <div>
+        <h3 style="margin: 0 0 4px 0; color: #ffffff; font-size: 1.15rem; font-weight: 800;">
+            <i class="fa-solid fa-wallet" style="color: #38bdf8;"></i> Child Fee Portal
+        </h3>
+        <p style="margin: 0; color: #94a3b8; font-size: 0.9rem;">
+            View fee breakdown, payment receipts, pending balances, and due dates for {{ student.name }}.
+        </p>
+    </div>
+    <a href="{{ url_for('parent_fees') }}" style="background: #0284c7; color: white; padding: 10px 18px; border-radius: 10px; font-weight: 700; text-decoration: none; font-size: 0.9rem; white-space: nowrap;">
+        <i class="fa-solid fa-receipt"></i> View Fee Details
+    </a>
+</div>
+
 <!-- Attendance Shortage Warning Banner (If Attendance < 75%) -->
 {% if attendance_shortage_warning %}
 <div class="card" style="background: #fef2f2; border: 1px solid #fca5a5; border-radius: 14px; padding: 18px 24px; margin-bottom: 25px; display: flex; align-items: center; gap: 16px; box-shadow: 0 4px 15px rgba(239, 68, 68, 0.08);">

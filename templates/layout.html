@@ -28,6 +28,9 @@
             {% if has_endpoint('student_results') %}
             <a class="nav-link" href="{{ url_for('student_results') }}"><i class="fa-solid fa-square-poll-vertical"></i> My Results</a>
             {% endif %}
+            {% if has_endpoint('student_fees') %}
+            <a class="nav-link" href="{{ url_for('student_fees') }}"><i class="fa-solid fa-wallet"></i> My Fees</a>
+            {% endif %}
             <a class="logout" href="{{ url_for('logout') }}"><i class="fa-solid fa-right-from-bracket"></i></a>
             {% elif session.role == 'admin' %}
             <a class="nav-link" href="{{ url_for('dashboard') }}"><i class="fa-solid fa-chart-line"></i> Dashboard</a>
@@ -37,6 +40,9 @@
             <a class="nav-link" href="{{ url_for('students') }}"><i class="fa-solid fa-users"></i> Students</a>
             <a class="nav-link" href="{{ url_for('branches') }}"><i class="fa-solid fa-building"></i> Depts</a>
             <a class="nav-link" href="{{ url_for('subjects') }}"><i class="fa-solid fa-book-open"></i> Subjects</a>
+            {% if has_endpoint('admin_fees') %}
+            <a class="nav-link" href="{{ url_for('admin_fees') }}"><i class="fa-solid fa-indian-rupee-sign"></i> Fees</a>
+            {% endif %}
             {% if has_endpoint('manage_teachers') %}
             <a class="nav-link" href="{{ url_for('manage_teachers') }}"><i class="fa-solid fa-user-tie"></i> Teachers</a>
             {% endif %}
@@ -95,6 +101,9 @@
             {% endif %}
             {% if has_endpoint('parent_results') %}
             <a class="nav-link" href="{{ url_for('parent_results') }}"><i class="fa-solid fa-graduation-cap"></i> Results</a>
+            {% endif %}
+            {% if has_endpoint('parent_fees') %}
+            <a class="nav-link" href="{{ url_for('parent_fees') }}"><i class="fa-solid fa-wallet"></i> Child Fees</a>
             {% endif %}
             {% if has_endpoint('parent_notifications') %}
             <a class="nav-link" href="{{ url_for('parent_notifications') }}"><i class="fa-solid fa-bell"></i> Alerts</a>

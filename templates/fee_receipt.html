@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Fee Payment Receipt - {{ p.receipt_number }}</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.2/css/all.min.css" />
+  <style>
+    * {
+      box-sizing: border-box;
+      font-family: 'Outfit', sans-serif;
+    }
+    body {
+      background: #f1f5f9;
+      margin: 0;
+      padding: 2rem 1rem;
+      color: #1e293b;
+    }
+    .receipt-container {
+      max-width: 800px;
+      margin: 0 auto;
+      background: #ffffff;
+      border-radius: 12px;
+      padding: 2.5rem;
+      box-shadow: 0 10px 25px rgba(0, 0, 0, 0.08);
+      border: 1px solid #e2e8f0;
+      position: relative;
+    }
+    .receipt-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-bottom: 2px solid #e2e8f0;
+      padding-bottom: 1.5rem;
+      margin-bottom: 1.5rem;
+    }
+    .college-name {
+      font-size: 1.4rem;
+      font-weight: 800;
+      color: #0f172a;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .college-sub {
+      font-size: 0.85rem;
+      color: #64748b;
+      margin-top: 0.2rem;
+    }
+    .receipt-title-badge {
+      background: #2563eb;
+      color: #ffffff;
+      padding: 0.5rem 1rem;
+      border-radius: 8px;
+      font-weight: 700;
+      font-size: 1.1rem;
+      letter-spacing: 0.5px;
+      text-align: right;
+    }
+    .info-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 1.5rem;
+      margin-bottom: 1.5rem;
+    }
+    .info-box {
+      background: #f8fafc;
+      border-radius: 8px;
+      padding: 1rem 1.25rem;
+      border: 1px solid #f1f5f9;
+    }
+    .info-box h4 {
+      margin: 0 0 0.5rem 0;
+      font-size: 0.85rem;
+      color: #64748b;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .info-row {
+      display: flex;
+      justify-content: space-between;
+      font-size: 0.92rem;
+      margin-bottom: 0.35rem;
+    }
+    .info-row span.label {
+      color: #64748b;
+    }
+    .info-row span.val {
+      font-weight: 600;
+      color: #0f172a;
+    }
+    .table-details {
+      width: 100%;
+      border-collapse: collapse;
+      margin-bottom: 1.5rem;
+    }
+    .table-details th {
+      background: #f1f5f9;
+      color: #475569;
+      font-size: 0.85rem;
+      text-transform: uppercase;
+      padding: 0.75rem 1rem;
+      text-align: left;
+      border-bottom: 2px solid #cbd5e1;
+    }
+    .table-details td {
+      padding: 0.85rem 1rem;
+      border-bottom: 1px solid #e2e8f0;
+      font-size: 0.95rem;
+    }
+    .summary-box {
+      background: #ecfdf5;
+      border: 1px solid #a7f3d0;
+      border-radius: 8px;
+      padding: 1rem 1.25rem;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 2rem;
+    }
+    .signatures {
+      display: flex;
+      justify-content: space-between;
+      margin-top: 3rem;
+      padding-top: 1rem;
+    }
+    .sig-block {
+      text-align: center;
+      width: 200px;
+    }
+    .sig-line {
+      border-top: 1.5px dashed #94a3b8;
+      margin-top: 2.5rem;
+      padding-top: 0.35rem;
+      font-size: 0.85rem;
+      font-weight: 600;
+      color: #475569;
+    }
+
+    .no-print {
+      max-width: 800px;
+      margin: 0 auto 1rem auto;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    @media print {
+      body {
+        background: #ffffff;
+        padding: 0;
+      }
+      .no-print {
+        display: none !important;
+      }
+      .receipt-container {
+        box-shadow: none;
+        border: none;
+        padding: 1.5rem;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="no-print">
+    <button onclick="window.history.back()" style="background:#64748b; color:#fff; border:none; padding:0.6rem 1rem; border-radius:6px; font-weight:600; cursor:pointer;">
+      <i class="fa-solid fa-arrow-left"></i> Back
+    </button>
+    <button onclick="window.print()" style="background:#2563eb; color:#fff; border:none; padding:0.6rem 1.25rem; border-radius:6px; font-weight:700; cursor:pointer;">
+      <i class="fa-solid fa-print"></i> Print / Download Receipt
+    </button>
+  </div>
+
+  <div class="receipt-container">
+    <div class="receipt-header">
+      <div>
+        <div class="college-name">Siddhartha Institute of Technology & Sciences</div>
+        <div class="college-sub">Accredited by NAAC & Approved by AICTE | Affiliated to JNTUH</div>
+        <div class="college-sub">Campus: Narapally, Hyderabad, Telangana - 500088</div>
+      </div>
+      <div class="receipt-title-badge">
+        FEE RECEIPT
+      </div>
+    </div>
+
+    <div class="info-grid">
+      <div class="info-box">
+        <h4><i class="fa-solid fa-user-graduate"></i> Student Details</h4>
+        <div class="info-row"><span class="label">Student Name:</span><span class="val">{{ p.student_name }}</span></div>
+        <div class="info-row"><span class="label">Enrollment #:</span><span class="val">{{ p.enrollment }}</span></div>
+        <div class="info-row"><span class="label">Branch / Dept:</span><span class="val">{{ p.branch_name or 'N/A' }}</span></div>
+        <div class="info-row"><span class="label">Academic Year:</span><span class="val">{{ p.academic_year }}</span></div>
+      </div>
+
+      <div class="info-box">
+        <h4><i class="fa-solid fa-file-invoice"></i> Payment Particulars</h4>
+        <div class="info-row"><span class="label">Receipt Number:</span><span class="val" style="color:#2563eb;">{{ p.receipt_number }}</span></div>
+        <div class="info-row"><span class="label">Payment Date:</span><span class="val">{{ p.payment_date }}</span></div>
+        <div class="info-row"><span class="label">Payment Mode:</span><span class="val">{{ p.payment_mode }}</span></div>
+        <div class="info-row"><span class="label">Transaction Ref ID:</span><span class="val">{{ p.transaction_id }}</span></div>
+      </div>
+    </div>
+
+    <table class="table-details">
+      <thead>
+        <tr>
+          <th>Description / Fee Component</th>
+          <th>Category</th>
+          <th style="text-align:right;">Amount (₹)</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td style="font-weight:600;">
+            {{ p.fee_name }}
+            {% if p.notes %}<div style="font-size:0.8rem; color:#64748b; font-weight:normal;">Note: {{ p.notes }}</div>{% endif %}
+          </td>
+          <td>{{ p.category }}</td>
+          <td style="text-align:right; font-weight:700;">₹{{ "{:,.2f}".format(net_amount) }}</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="summary-box">
+      <div>
+        <div style="font-size:0.85rem; color:#065f46; font-weight:600; text-transform:uppercase;">AMOUNT PAID IN THIS TRANSACTION</div>
+        <div style="font-size:1.6rem; font-weight:800; color:#047857;">₹{{ "{:,.2f}".format(p.amount_paid) }}</div>
+      </div>
+      <div style="text-align:right;">
+        <div style="font-size:0.85rem; color:#475569; font-weight:600;">Total Paid So Far: ₹{{ "{:,.2f}".format(tot_paid) }}</div>
+        <div style="font-size:0.85rem; color:#dc2626; font-weight:700;">Remaining Balance Due: ₹{{ "{:,.2f}".format(pending_balance) }}</div>
+      </div>
+    </div>
+
+    <div class="signatures">
+      <div class="sig-block">
+        <div class="sig-line">Student / Parent Signature</div>
+      </div>
+      <div class="sig-block">
+        <div style="font-size:0.75rem; color:#059669; font-weight:700;"><i class="fa-solid fa-seal-check"></i> System Generated & Verified</div>
+        <div class="sig-line">Accounts Dept / Cashier</div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>
