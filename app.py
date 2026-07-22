@@ -164,6 +164,30 @@ def _normalize_db_url(url: str) -> str:
     return url
 
 
+def _branch_section_from_name(branch_name: str) -> str:
+    if not branch_name:
+        return ""
+    if "-" in branch_name:
+        parts = branch_name.split("-")
+        if len(parts[-1].strip()) == 1:
+            return parts[-1].strip()
+    return ""
+
+
+def _get_branch_name_and_section(db, branch_id):
+    placeholder = get_placeholder()
+    try:
+        row = db.execute(f"SELECT name, sections FROM branches WHERE id = {placeholder}", (branch_id,)).fetchone()
+        if not row:
+            return "", ""
+        name = row_get(row, "name") or ""
+        sections = row_get(row, "sections") or ""
+        first_section = sections.split(",")[0].strip() if sections else ""
+        return name, first_section
+    except Exception:
+        return "", ""
+
+
 def get_db():
     db_url = str(app.config.get("DATABASE", ""))
     db = None
@@ -257,6 +281,16 @@ def ensure_db_initialized(db) -> bool:
         return True
     try:
         init_db(db=db)
+        try:
+            _ensure_teacher_schema(db)
+            _ensure_teacher_support_schema(db)
+        except Exception as te:
+            print(f"[DB] ensure teacher schema failed: {te}")
+        try:
+            import timetable as timetable_module
+            timetable_module.ensure_timetable_tables(db)
+        except Exception as tte:
+            print(f"[DB] ensure timetable tables failed: {tte}")
         _DB_INIT_DONE = True
         _DB_INIT_LAST_ERROR = None
         return True
@@ -1014,7 +1048,15 @@ def _ensure_column(db, table_name, column_name, column_definition):
         cols = _table_columns(db, table_name)
         if cols and column_name not in cols:
             db.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}")
+            try:
+                db.commit()
+            except Exception:
+                pass
     except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            pass
         print(f"[schema] failed to ensure {table_name}.{column_name}:\n{traceback.format_exc()}")
 
 
@@ -1430,6 +1472,7 @@ def get_teacher_context(db=None):
             current_subject_id = row_get(assigned_subjects[0], "id")
 
         subject_name = row_get(teacher, "subject_name") or ""
+        subject_row = None
         if current_subject_id:
             try:
                 subject_row = db.execute(
@@ -1489,7 +1532,7 @@ def get_teacher_context(db=None):
             "subject_name": subject_name,
             "subject_id": current_subject_id,
             "current_subject_id": current_subject_id,
-            "subject_row": None,
+            "subject_row": subject_row,
             "current_branch_id": current_branch_id,
             "current_branch_name": current_branch_name,
             "current_section": current_section,
@@ -2738,8 +2781,9 @@ def admin_import_data():
             pass
 
 @app.route("/teachers", methods=["GET", "POST"])
+@app.route("/admin/teachers", methods=["GET", "POST"])
 @login_required
-def teachers_management():
+def manage_teachers():
     if session.get("role") != "admin":
         abort(403)
 
@@ -2788,10 +2832,10 @@ def teachers_management():
                         )
                         
                         # Process dynamic assignment rows
-                        assign_subjects = request.form.getlist("assign_subject_id[]")
-                        assign_branches = request.form.getlist("assign_branch_id[]")
-                        assign_sections = request.form.getlist("assign_section[]")
-                        assign_semesters = request.form.getlist("assign_semester[]")
+                        assign_subjects = request.form.getlist("assign_subject_id[]") or request.form.getlist("subject_ids") or request.form.getlist("subject_ids[]")
+                        assign_branches = request.form.getlist("assign_branch_id[]") or request.form.getlist("branch_ids") or request.form.getlist("branch_ids[]")
+                        assign_sections = request.form.getlist("assign_section[]") or request.form.getlist("sections") or request.form.getlist("sections[]")
+                        assign_semesters = request.form.getlist("assign_semester[]") or request.form.getlist("semesters") or request.form.getlist("semesters[]")
                         for i in range(len(assign_subjects)):
                             s_id = assign_subjects[i]
                             b_id = assign_branches[i] if i < len(assign_branches) else ""
@@ -2802,6 +2846,19 @@ def teachers_management():
                                     f"INSERT INTO teacher_subject_assignments (teacher_id, subject_id, branch_id, section, semester) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})",
                                     (int(new_teacher_id), int(s_id), int(b_id), sec, sem)
                                 )
+                                # Legacy table populating for test/backward compatibility
+                                try:
+                                    existing_ts = db.execute(f"SELECT id FROM teacher_subjects WHERE teacher_id = {placeholder} AND subject_id = {placeholder}", (int(new_teacher_id), int(s_id))).fetchone()
+                                    if not existing_ts:
+                                        db.execute(f"INSERT INTO teacher_subjects (teacher_id, subject_id) VALUES ({placeholder}, {placeholder})", (int(new_teacher_id), int(s_id)))
+                                except Exception:
+                                    pass
+                                try:
+                                    existing_tb = db.execute(f"SELECT id FROM teacher_branches WHERE teacher_id = {placeholder} AND branch_id = {placeholder}", (int(new_teacher_id), int(b_id))).fetchone()
+                                    if not existing_tb:
+                                        db.execute(f"INSERT INTO teacher_branches (teacher_id, branch_id) VALUES ({placeholder}, {placeholder})", (int(new_teacher_id), int(b_id)))
+                                except Exception:
+                                    pass
                         
                         db.commit()
                         flash("Teacher created.", "success")
@@ -2837,11 +2894,19 @@ def teachers_management():
                         
                     # Process dynamic assignment rows
                     db.execute(f"DELETE FROM teacher_subject_assignments WHERE teacher_id = {placeholder}", (int(teacher_id),))
+                    try:
+                        db.execute(f"DELETE FROM teacher_subjects WHERE teacher_id = {placeholder}", (int(teacher_id),))
+                    except Exception:
+                        pass
+                    try:
+                        db.execute(f"DELETE FROM teacher_branches WHERE teacher_id = {placeholder}", (int(teacher_id),))
+                    except Exception:
+                        pass
                     
-                    assign_subjects = request.form.getlist("assign_subject_id[]")
-                    assign_branches = request.form.getlist("assign_branch_id[]")
-                    assign_sections = request.form.getlist("assign_section[]")
-                    assign_semesters = request.form.getlist("assign_semester[]")
+                    assign_subjects = request.form.getlist("assign_subject_id[]") or request.form.getlist("subject_ids") or request.form.getlist("subject_ids[]")
+                    assign_branches = request.form.getlist("assign_branch_id[]") or request.form.getlist("branch_ids") or request.form.getlist("branch_ids[]")
+                    assign_sections = request.form.getlist("assign_section[]") or request.form.getlist("sections") or request.form.getlist("sections[]")
+                    assign_semesters = request.form.getlist("assign_semester[]") or request.form.getlist("semesters") or request.form.getlist("semesters[]")
                     for i in range(len(assign_subjects)):
                         s_id = assign_subjects[i]
                         b_id = assign_branches[i] if i < len(assign_branches) else ""
@@ -2852,6 +2917,19 @@ def teachers_management():
                                 f"INSERT INTO teacher_subject_assignments (teacher_id, subject_id, branch_id, section, semester) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})",
                                 (int(teacher_id), int(s_id), int(b_id), sec, sem)
                             )
+                            # Legacy table populating for test/backward compatibility
+                            try:
+                                existing_ts = db.execute(f"SELECT id FROM teacher_subjects WHERE teacher_id = {placeholder} AND subject_id = {placeholder}", (int(teacher_id), int(s_id))).fetchone()
+                                if not existing_ts:
+                                    db.execute(f"INSERT INTO teacher_subjects (teacher_id, subject_id) VALUES ({placeholder}, {placeholder})", (int(teacher_id), int(s_id)))
+                            except Exception:
+                                pass
+                            try:
+                                existing_tb = db.execute(f"SELECT id FROM teacher_branches WHERE teacher_id = {placeholder} AND branch_id = {placeholder}", (int(teacher_id), int(b_id))).fetchone()
+                                if not existing_tb:
+                                    db.execute(f"INSERT INTO teacher_branches (teacher_id, branch_id) VALUES ({placeholder}, {placeholder})", (int(teacher_id), int(b_id)))
+                            except Exception:
+                                pass
                             
                     db.commit()
                     flash("Teacher updated.", "success")
@@ -3930,17 +4008,22 @@ def teacher_login():
             if user and row_get(user, "role") == "teacher" and check_password_hash(row_get(user, "password"), password):
                 # Initialize teacher session fields for downstream routes/templates
                 session.clear()
-                teacher_id = row_get(user, "id")
-                session["user_id"] = teacher_id
+                user_id = row_get(user, "id")
+                session["user_id"] = user_id
                 session["username"] = row_get(user, "username")
                 session["role"] = row_get(user, "role")
-                # Try to populate teacher-specific session values
+                # Try to populate teacher-specific session values from teachers table using username
                 try:
-                    assigned = db.execute(f"SELECT id, name FROM teachers WHERE id = {placeholder}", (teacher_id,)).fetchone()
-                    session["teacher_id"] = teacher_id
-                    session["teacher_name"] = row_get(assigned, "name") if assigned else session.get("username")
-                except Exception:
-                    session["teacher_id"] = teacher_id
+                    assigned = db.execute(f"SELECT id, name FROM teachers WHERE username = {placeholder}", (row_get(user, "username"),)).fetchone()
+                    if assigned:
+                        session["teacher_id"] = row_get(assigned, "id")
+                        session["teacher_name"] = row_get(assigned, "name")
+                    else:
+                        session["teacher_id"] = user_id
+                        session["teacher_name"] = session.get("username")
+                except Exception as ex:
+                    print(f"[teacher_login] failed resolving teacher context: {ex}")
+                    session["teacher_id"] = user_id
                     session["teacher_name"] = session.get("username")
                 session.permanent = True
                 return redirect(url_for("teacher_dashboard"))
@@ -4000,7 +4083,7 @@ def teacher_select_branch():
                 else:
                     flash("Invalid branch selection.", "error")
         
-        branches = _resolve_teacher_assignments(db, teacher_id)
+        branches, _ = _resolve_teacher_assignments(db, teacher_id)
         
         teacher = db.execute(
             f"SELECT name FROM teachers WHERE id = {placeholder}",
@@ -4357,14 +4440,32 @@ def teacher_mark_attendance():
                 timetable_context = today_context
 
         selected_period = timetable_context.get("selected_slot")
-        current_active_period = today_context.get("active_slot") or timetable_context.get("active_slot")
-        if selected_period and selected_period.get("period"):
-            period = str(selected_period.get("period"))
+        if not selected_period and period and selected_subject_value:
+            subj_name = ""
+            if selected_subject:
+                subj_name = selected_subject.get("name") or ""
+            else:
+                try:
+                    subj_row = db.execute(f"SELECT name FROM subjects WHERE id = {placeholder}", (selected_subject_value,)).fetchone()
+                    if subj_row:
+                        subj_name = row_get(subj_row, "name") or ""
+                except Exception:
+                    pass
+            selected_period = {
+                "period": period,
+                "subject_id": selected_subject_value,
+                "subject_name": subj_name,
+                "section": current_section,
+                "branch_id": current_branch_id,
+            }
+            can_mark_attendance = True
+        else:
+            can_mark_attendance = bool(timetable_context.get("can_mark_attendance") and selected_period)
 
+        current_active_period = today_context.get("active_slot") or timetable_context.get("active_slot")
         schedule_message = today_context.get("schedule_message") or "Select a section and subject to load students."
         if no_schedule_reason:
             schedule_message = no_schedule_reason
-        can_mark_attendance = bool(timetable_context.get("can_mark_attendance") and selected_period)
 
         subject_id = selected_period.get("subject_id") if selected_period else None
         subject_name = selected_period.get("subject_name") if selected_period else selected_subject_name
@@ -4378,10 +4479,25 @@ def teacher_mark_attendance():
 
         students = []
         attendance_map = {}
-        if current_branch_id and current_section and selected_subject_value and period and selected_period:
+        if current_branch_id and selected_subject_value and period and selected_period:
+            try:
+                cols = {name.lower() for name in _table_columns(db, "students")}
+            except Exception:
+                cols = set()
+            roll_no_select = "roll_no" if "roll_no" in cols else "CAST(NULL AS TEXT) AS roll_no"
+            import_order_clause = "COALESCE(import_order, id)" if "import_order" in cols else "id"
+            section_select = "section" if "section" in cols else "CAST(NULL AS TEXT) AS section"
+            
+            if "section" in cols:
+                where_clause = f"AND (COALESCE(section, '') = COALESCE({placeholder}, '') OR COALESCE(section, '') = '')"
+                params = (current_branch_id, current_section or "")
+            else:
+                where_clause = ""
+                params = (current_branch_id,)
+
             students = db.execute(
-                f"SELECT id, name, enrollment, roll_no, section FROM students WHERE branch_id = {placeholder} AND (COALESCE(section, '') = COALESCE({placeholder}, '') OR COALESCE(section, '') = '') ORDER BY COALESCE(import_order, id), id",
-                (current_branch_id, current_section),
+                f"SELECT id, name, enrollment, {roll_no_select}, {section_select} FROM students WHERE branch_id = {placeholder} {where_clause} ORDER BY {import_order_clause}, id",
+                params,
             ).fetchall()
 
             subject_clause, subject_params = _attendance_subject_clause(placeholder, subject_id, subject_name)
@@ -4412,9 +4528,9 @@ def teacher_mark_attendance():
                 session["teacher_section"] = current_section
             if form_subject_id:
                 selected_subject_value = form_subject_id
-            if not (current_branch_id and current_section and selected_subject_value and period):
+            if not (current_branch_id and selected_subject_value and period):
                 flash("Select branch, section, subject, and period before saving attendance.", "error")
-                return redirect(url_for("teacher_mark_attendance", branch_id=current_branch_id, section=current_section, subject_id=selected_subject_value, period=period, date=selected_date))
+                return redirect(url_for("teacher_mark_attendance", branch_id=current_branch_id, section=current_section or "", subject_id=selected_subject_value, period=period, date=selected_date))
 
             timetable_context = _resolve_timetable_slots(
                 db,
@@ -4426,8 +4542,20 @@ def teacher_mark_attendance():
             )
             selected_period = timetable_context.get("selected_period")
             if not selected_period:
-                flash("No timetable period matches the selected branch, section, subject, and period.", "error")
-                return redirect(url_for("teacher_mark_attendance", branch_id=current_branch_id, section=current_section, subject_id=selected_subject_value, period=period, date=selected_date))
+                subj_name = ""
+                try:
+                    subj_row = db.execute(f"SELECT name FROM subjects WHERE id = {placeholder}", (selected_subject_value,)).fetchone()
+                    if subj_row:
+                        subj_name = row_get(subj_row, "name") or ""
+                except Exception:
+                    pass
+                selected_period = {
+                    "period": period,
+                    "subject_id": selected_subject_value,
+                    "subject_name": subj_name,
+                    "section": current_section,
+                    "branch_id": current_branch_id,
+                }
 
             subject_id = selected_period.get("subject_id") or subject_id
             subject_name = selected_period.get("subject_name") or subject_name
@@ -4444,10 +4572,21 @@ def teacher_mark_attendance():
                         status = request.form.get(f"status_{student_id}", "Absent")
                         note = request.form.get(f"note_{student_id}", "")
 
-                        ok_student = db.execute(
-                            f"SELECT 1 FROM students WHERE id = {placeholder} AND branch_id = {placeholder} AND (COALESCE(section, '') = COALESCE({placeholder}, '') OR COALESCE(section, '') = '')",
-                            (student_id, current_branch_id, current_section),
-                        ).fetchone()
+                        try:
+                            cols = {name.lower() for name in _table_columns(db, "students")}
+                        except Exception:
+                            cols = set()
+
+                        if "section" in cols:
+                            ok_student = db.execute(
+                                f"SELECT 1 FROM students WHERE id = {placeholder} AND branch_id = {placeholder} AND (COALESCE(section, '') = COALESCE({placeholder}, '') OR COALESCE(section, '') = '')",
+                                (student_id, current_branch_id, current_section or ""),
+                            ).fetchone()
+                        else:
+                            ok_student = db.execute(
+                                f"SELECT 1 FROM students WHERE id = {placeholder} AND branch_id = {placeholder}",
+                                (student_id, current_branch_id),
+                            ).fetchone()
                         if not ok_student:
                             invalid_students += 1
                             continue
@@ -4471,6 +4610,7 @@ def teacher_mark_attendance():
                             blocked_overwrites += 1
                             continue
 
+                        resolved_branch_section = f"{current_branch_name}-{current_section}" if (current_branch_name and current_section) else (current_branch_name or current_section or "")
                         if existing:
                             db.execute(
                                 f"""
@@ -4483,7 +4623,7 @@ def teacher_mark_attendance():
                                     section = {placeholder}
                                 WHERE id = {placeholder}
                                 """,
-                                (status, note, teacher["teacher_id"], subject_name, current_section, current_section, row_get(existing, "id")),
+                                (status, note, teacher["teacher_id"], subject_name, resolved_branch_section, current_section, row_get(existing, "id")),
                             )
                         else:
                             db.execute(
@@ -4493,7 +4633,7 @@ def teacher_mark_attendance():
                                     date, period, status, note
                                 ) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})
                                 """,
-                                (student_id, current_branch_id, current_section, current_section, subject_id, teacher["teacher_id"], subject_name, selected_date, period, status, note),
+                                (student_id, current_branch_id, resolved_branch_section, current_section, subject_id, teacher["teacher_id"], subject_name, selected_date, period, status, note),
                             )
                         if str(student_id).isdigit():
                             saved_ids.append(int(student_id))
@@ -6979,6 +7119,7 @@ with app.app_context():
             _validate_dashboard_schema(db)
             try:
                 _ensure_teacher_schema(db)
+                _ensure_teacher_support_schema(db)
             except Exception:
                 print("[init] ensure teacher schema failed:\n" + traceback.format_exc())
         finally:
