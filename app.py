@@ -2036,6 +2036,12 @@ def init_db(db=None):
         _ensure_results_schema(db)
     if "_ensure_security_schema" in globals():
         _ensure_security_schema(db)
+    if "_ensure_notification_schema" in globals():
+        _ensure_notification_schema(db)
+    if "_ensure_fee_schema" in globals():
+        _ensure_fee_schema(db)
+    if "_ensure_parent_schema" in globals():
+        _ensure_parent_schema(db)
     _ensure_database_indexes(db)
 
     # ✅ Admin check
@@ -8982,6 +8988,11 @@ def _ensure_notification_schema(db):
 
 def _ensure_parent_schema(db):
     """Ensure parent module tables exist safely across SQLite and PostgreSQL."""
+    if "_ensure_notification_schema" in globals():
+        try:
+            _ensure_notification_schema(db)
+        except Exception:
+            pass
     placeholder = get_placeholder()
     is_pg = str(app.config.get("DATABASE", "")).startswith("postgres")
 
@@ -9162,34 +9173,39 @@ def get_relevant_announcements(db, role, branch_id=None, section=None, semester=
 
 
 def create_parent_notification(db, student_id, title, message, notif_type="general", parent_id=None):
-    """Helper to create notification for linked parent account. Now wraps send_sys_notification."""
-    placeholder = get_placeholder()
-    # Prevent identical notifications from being sent multiple times
-    existing = db.execute(
-        f"""
-        SELECT 1 FROM sys_notifications n
-        JOIN sys_notification_recipients r ON n.id = r.notification_id
-        WHERE r.recipient_id = {placeholder} AND r.recipient_role = 'student' AND n.title = {placeholder}
-        """,
-        (student_id, title)
-    ).fetchone()
-    if existing:
-        return
+    """Helper to create notification for linked parent account. Now wraps send_sys_notification safely."""
+    try:
+        if "_ensure_notification_schema" in globals():
+            _ensure_notification_schema(db)
+        if "_ensure_parent_schema" in globals():
+            _ensure_parent_schema(db)
 
-    # We want to send this to the student and to the parent
-    recipients = [(student_id, "student")]
-    if parent_id:
-        recipients.append((parent_id, "parent"))
-    else:
-        # Find parent for this student if any
-        try:
-            parent_row = db.execute(f"SELECT id FROM parents WHERE student_id = {placeholder}", (student_id,)).fetchone()
-            if parent_row:
-                recipients.append((row_get(parent_row, "id"), "parent"))
-        except Exception:
-            pass
-            
-    send_sys_notification(db, recipients, title, message, notif_type=notif_type, priority="high")
+        placeholder = get_placeholder()
+        existing = db.execute(
+            f"""
+            SELECT 1 FROM sys_notifications n
+            JOIN sys_notification_recipients r ON n.id = r.notification_id
+            WHERE r.recipient_id = {placeholder} AND r.recipient_role = 'student' AND n.title = {placeholder}
+            """,
+            (student_id, title)
+        ).fetchone()
+        if existing:
+            return
+
+        recipients = [(student_id, "student")]
+        if parent_id:
+            recipients.append((parent_id, "parent"))
+        else:
+            try:
+                parent_row = db.execute(f"SELECT id FROM parents WHERE student_id = {placeholder}", (student_id,)).fetchone()
+                if parent_row:
+                    recipients.append((row_get(parent_row, "id"), "parent"))
+            except Exception:
+                pass
+                
+        send_sys_notification(db, recipients, title, message, notif_type=notif_type, priority="high")
+    except Exception as e:
+        print(f"[create_parent_notification WARNING]: {repr(e)}")
 
 
 def generate_parent_alerts_for_student(db, student_id):
@@ -10690,11 +10706,12 @@ def trigger_fee_reminders(db):
         print(f"[trigger_fee_reminders ERROR]: {repr(e)}")
 
 def _ensure_fee_schema(db):
-    """Ensure Fee Management system tables exist safely across SQLite and PostgreSQL.
-
-    Safe to call on every request — uses IF NOT EXISTS guards.
-    No data is ever deleted.  New columns are added via ALTER TABLE when missing.
-    """
+    """Ensure Fee Management system tables exist safely across SQLite and PostgreSQL."""
+    if "_ensure_notification_schema" in globals():
+        try:
+            _ensure_notification_schema(db)
+        except Exception:
+            pass
     is_pg = str(app.config.get("DATABASE", "")).startswith("postgres")
     try:
         if is_pg:
@@ -11713,6 +11730,8 @@ def accountant_record_payment():
 
             _recalculate_assignment_status(db, assignment_id)
             db.commit()
+            _log_audit(db, "COLLECTED_FEES", entity="fee_payments", entity_id=payment_id, detail=f"amount={amount_paid} receipt={receipt_number}")
+            create_parent_notification(db, student_id, f"✅ Payment Received: {receipt_number}", f"A payment of ₹{amount_paid:,.2f} has been successfully recorded. Receipt Number: {receipt_number}.", notif_type="fee_payment")
             flash(f"Payment of ₹{amount_paid:,.2f} recorded! Receipt: {receipt_number}", "success")
             return redirect(url_for("fee_receipt", payment_id=payment_id))
         except Exception as e:
