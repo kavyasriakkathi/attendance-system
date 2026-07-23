@@ -2240,6 +2240,9 @@ def dashboard():
         db = get_db()
         placeholder = get_placeholder()
 
+        # Trigger background notifications once per day
+        trigger_fee_reminders(db)
+
         def _safe_scalar(sql, params=(), default=0):
             try:
                 row = db.execute(sql, params).fetchone()
@@ -2439,7 +2442,17 @@ def dashboard():
             LIMIT 10
         """)
 
+        # Notification Summary Stats
+        notif_total = int(_safe_scalar("SELECT COUNT(*) FROM sys_notifications", default=0) or 0)
+        notif_high_priority = int(_safe_scalar("SELECT COUNT(*) FROM sys_notifications WHERE priority IN ('High', 'Emergency')", default=0) or 0)
+        notif_today = int(_safe_scalar(f"SELECT COUNT(*) FROM sys_notifications WHERE DATE(created_at) = DATE({placeholder})", (date.today().isoformat(),), default=0) or 0)
+        recent_announcements = _safe_rows("SELECT title, created_at, priority FROM sys_announcements ORDER BY created_at DESC LIMIT 5")
+
         dashboard_context.update({
+            "notif_total": notif_total,
+            "notif_high_priority": notif_high_priority,
+            "notif_today": notif_today,
+            "recent_announcements": recent_announcements,
             "branch_count": branch_count,
             "student_count": student_count,
             "subject_count": subject_count,
@@ -3097,6 +3110,17 @@ def assign_teachers():
                     (int(teacher_id), int(subject_id), int(branch_id), section, semester, academic_year),
                 )
                 db.commit()
+
+                # Fetch names for notification
+                subj_name = row_get(db.execute(f"SELECT name FROM subjects WHERE id={placeholder}", (int(subject_id),)).fetchone(), "name")
+                branch_name = row_get(db.execute(f"SELECT name FROM branches WHERE id={placeholder}", (int(branch_id),)).fetchone(), "name")
+                
+                msg = f"You have been assigned to teach {subj_name} for Branch: {branch_name}"
+                if section: msg += f", Section: {section}"
+                if semester: msg += f", Semester: {semester}"
+                
+                send_sys_notification(db, "New Subject Assignment", msg, recipients=[{"id": int(teacher_id), "role": "teacher"}], type="general")
+
                 flash("Assignment saved.", "success")
 
         teachers = db.execute("SELECT id, name, username FROM teachers ORDER BY name").fetchall()
@@ -8866,6 +8890,18 @@ def _ensure_notification_schema(db):
             );
             """)
         db.commit()
+
+        # Add safe columns
+        _ensure_column(db, "sys_announcements", "priority", "TEXT DEFAULT 'Normal'")
+        _ensure_column(db, "sys_announcements", "expiry_date", "TIMESTAMP")
+        _ensure_column(db, "sys_notification_recipients", "is_archived", "INTEGER DEFAULT 0")
+        _ensure_column(db, "sys_notification_recipients", "is_deleted", "INTEGER DEFAULT 0")
+
+        # Create safe indexes
+        db.execute("CREATE INDEX IF NOT EXISTS idx_sys_notif_recipient ON sys_notification_recipients(recipient_id, recipient_role, is_read, is_deleted, is_archived)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_sys_notif_created ON sys_notifications(created_at)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_sys_ann_expiry ON sys_announcements(expiry_date)")
+        db.commit()
     except Exception as e:
         print(f"[_ensure_notification_schema ERROR]: {repr(e)}")
 
@@ -9011,13 +9047,13 @@ def get_unread_notifications(db, user_id, role, limit=5):
     ).fetchall()
 
 
-def publish_announcement(db, title, content, target_audience="all", branch_id=None, section=None, semester=None, created_by="Admin"):
+def publish_announcement(db, title, content, target_audience="all", branch_id=None, section=None, semester=None, created_by="Admin", priority="Normal", expiry_date=None):
     _ensure_notification_schema(db)
     placeholder = get_placeholder()
     try:
         db.execute(
-            f"INSERT INTO sys_announcements (title, content, target_audience, branch_id, section, semester, created_by) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})",
-            (title, content, target_audience, branch_id, section, semester, created_by)
+            f"INSERT INTO sys_announcements (title, content, target_audience, branch_id, section, semester, created_by, priority, expiry_date) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})",
+            (title, content, target_audience, branch_id, section, semester, created_by, priority, expiry_date)
         )
         db.commit()
     except Exception as e:
@@ -9027,7 +9063,8 @@ def publish_announcement(db, title, content, target_audience="all", branch_id=No
 
 def get_relevant_announcements(db, role, branch_id=None, section=None, semester=None, limit=5):
     placeholder = get_placeholder()
-    query = f"SELECT * FROM sys_announcements WHERE target_audience IN ('all', {placeholder})"
+    # Only fetch announcements where expiry_date is NULL or in the future
+    query = f"SELECT * FROM sys_announcements WHERE target_audience IN ('all', {placeholder}) AND (expiry_date IS NULL OR expiry_date > CURRENT_TIMESTAMP)"
     params = [role]
     
     if branch_id:
@@ -9487,11 +9524,15 @@ def admin_announcements():
             branch_id = _coerce_int(request.form.get("branch_id"))
             section = (request.form.get("section", "") or "").strip()
             semester = (request.form.get("semester", "") or "").strip()
+            priority = (request.form.get("priority", "") or "Normal").strip()
+            expiry = (request.form.get("expiry_date", "") or "").strip()
+            if not expiry:
+                expiry = None
 
             if not title or not content:
                 flash("Please enter title and announcement content.", "error")
             else:
-                publish_announcement(db, title, content, target_audience=target, branch_id=branch_id, section=section, semester=semester, created_by=session.get("username", "Admin"))
+                publish_announcement(db, title, content, target_audience=target, branch_id=branch_id, section=section, semester=semester, created_by=session.get("username", "Admin"), priority=priority, expiry_date=expiry)
                 flash("Announcement published successfully!", "success")
 
         announcements = db.execute("SELECT a.*, b.name AS branch_name FROM sys_announcements a LEFT JOIN branches b ON a.branch_id = b.id ORDER BY a.created_at DESC LIMIT 50").fetchall()
@@ -9500,6 +9541,101 @@ def admin_announcements():
     except Exception as e:
         print(f"[admin_announcements ERROR]: {repr(e)}")
         flash("Error publishing announcement.", "error")
+        return redirect(url_for("dashboard"))
+    finally:
+        if db:
+            try: db.close()
+            except: pass
+
+
+# ==========================================
+# NOTIFICATION API ACTIONS
+# ==========================================
+
+@app.route("/api/notifications/<int:notif_id>/<action>", methods=["POST"])
+@login_required
+def notification_action(notif_id, action):
+    if action not in ["read", "archive", "delete"]:
+        return jsonify({"success": False, "error": "Invalid action"}), 400
+        
+    db = None
+    try:
+        db = get_db()
+        placeholder = get_placeholder()
+        user_id = session.get("student_id") or session.get("teacher_id") or session.get("parent_id")
+        role = session.get("role")
+        
+        # Admins don't have personal notifications right now, but fallbacks exist
+        if not user_id:
+            user_id = session.get("admin_id") or 0
+
+        # Validate ownership
+        rec = db.execute(f"SELECT id FROM sys_notification_recipients WHERE notification_id = {placeholder} AND recipient_id = {placeholder} AND recipient_role = {placeholder}", (notif_id, user_id, role)).fetchone()
+        if not rec:
+            return jsonify({"success": False, "error": "Notification not found or unauthorized"}), 404
+            
+        rec_id = row_get(rec, "id")
+        
+        if action == "read":
+            db.execute(f"UPDATE sys_notification_recipients SET is_read = 1, read_at = CURRENT_TIMESTAMP WHERE id = {placeholder}", (rec_id,))
+        elif action == "archive":
+            db.execute(f"UPDATE sys_notification_recipients SET is_archived = 1 WHERE id = {placeholder}", (rec_id,))
+        elif action == "delete":
+            db.execute(f"UPDATE sys_notification_recipients SET is_deleted = 1 WHERE id = {placeholder}", (rec_id,))
+            
+        db.commit()
+        return jsonify({"success": True})
+    except Exception as e:
+        print(f"[notification_action ERROR]: {repr(e)}")
+        return jsonify({"success": False, "error": str(e)}), 500
+    finally:
+        if db:
+            try: db.close()
+            except: pass
+
+@app.route("/notifications", methods=["GET"])
+@login_required
+def notifications_center():
+    db = None
+    try:
+        db = get_db()
+        placeholder = get_placeholder()
+        user_id = session.get("student_id") or session.get("teacher_id") or session.get("parent_id")
+        role = session.get("role")
+        if not user_id:
+            user_id = session.get("admin_id") or 0
+            
+        # Handle filters
+        filter_type = request.args.get("type", "all")
+        filter_status = request.args.get("status", "all")
+        
+        query = f"""
+            SELECT n.*, r.is_read, r.is_archived, r.id as recipient_entry_id 
+            FROM sys_notifications n
+            JOIN sys_notification_recipients r ON n.id = r.notification_id
+            WHERE r.recipient_id = {placeholder} AND r.recipient_role = {placeholder} AND r.is_deleted = 0
+        """
+        params = [user_id, role]
+        
+        if filter_type != "all":
+            query += f" AND n.type = {placeholder}"
+            params.append(filter_type)
+            
+        if filter_status == "unread":
+            query += " AND r.is_read = 0 AND r.is_archived = 0"
+        elif filter_status == "archived":
+            query += " AND r.is_archived = 1"
+        else:
+            query += " AND r.is_archived = 0"
+            
+        query += " ORDER BY n.created_at DESC"
+        
+        notifications = db.execute(query, tuple(params)).fetchall()
+        
+        return render_template("notifications_center.html", notifications=notifications, filter_type=filter_type, filter_status=filter_status)
+    except Exception as e:
+        print(f"[notifications_center ERROR]: {repr(e)}")
+        flash("Failed to load notifications.", "error")
         return redirect(url_for("dashboard"))
     finally:
         if db:
@@ -10408,6 +10544,70 @@ def _check_account_locked(db, username):
 # ==========================================
 # FEE MANAGEMENT SYSTEM MODULE
 # ==========================================
+
+def trigger_fee_reminders(db):
+    """Scan fee assignments and installments and generate reminders."""
+    placeholder = get_placeholder()
+    today_str = date.today().isoformat()
+    seven_days_str = (date.today() + timedelta(days=7)).isoformat()
+    
+    try:
+        # Prevent running multiple times a day by checking if a reminder was sent today
+        last_run = db.execute(f"SELECT COUNT(*) FROM sys_notifications WHERE type = 'fee_reminder' AND DATE(created_at) = DATE({placeholder})", (today_str,)).fetchone()[0]
+        if last_run > 0:
+            return
+
+        # 1. Installments due in 7 days
+        due_soon = db.execute(f"""
+            SELECT i.id, i.due_date, a.student_id, f.fee_name, i.installment_amount
+            FROM fee_installments i
+            JOIN student_fee_assignments a ON i.assignment_id = a.id
+            JOIN fee_structures f ON a.fee_structure_id = f.id
+            WHERE i.status = 'Pending' AND i.due_date = {placeholder}
+        """, (seven_days_str,)).fetchall()
+
+        for inst in due_soon:
+            student_id = row_get(inst, "student_id")
+            fee_name = row_get(inst, "fee_name")
+            amt = row_get(inst, "installment_amount")
+            msg = f"Reminder: Your fee installment of ₹{amt} for {fee_name} is due on {seven_days_str}."
+            send_sys_notification(db, f"Fee Installment Due Soon", msg, recipients=[{"id": student_id, "role": "student"}, {"id": student_id, "role": "parent"}], type="fee_reminder", priority="Normal")
+
+        # 2. Overdue Installments
+        overdue_inst = db.execute(f"""
+            SELECT i.id, i.due_date, a.student_id, f.fee_name, i.installment_amount
+            FROM fee_installments i
+            JOIN student_fee_assignments a ON i.assignment_id = a.id
+            JOIN fee_structures f ON a.fee_structure_id = f.id
+            WHERE i.status = 'Pending' AND i.due_date < {placeholder}
+        """, (today_str,)).fetchall()
+
+        for inst in overdue_inst:
+            student_id = row_get(inst, "student_id")
+            fee_name = row_get(inst, "fee_name")
+            amt = row_get(inst, "installment_amount")
+            msg = f"URGENT: Your fee installment of ₹{amt} for {fee_name} is OVERDUE (due {row_get(inst, 'due_date')}). Please pay immediately."
+            send_sys_notification(db, f"Fee Installment Overdue", msg, recipients=[{"id": student_id, "role": "student"}, {"id": student_id, "role": "parent"}], type="fee_reminder", priority="High")
+
+        # 3. Full Fee Overdue (No installments, just assignment due date)
+        overdue_full = db.execute(f"""
+            SELECT a.id, a.due_date, a.student_id, f.fee_name, f.amount, a.discount_amount
+            FROM student_fee_assignments a
+            JOIN fee_structures f ON a.fee_structure_id = f.id
+            LEFT JOIN fee_installments i ON a.id = i.assignment_id
+            WHERE a.status = 'Unpaid' AND a.due_date < {placeholder} AND i.id IS NULL
+        """, (today_str,)).fetchall()
+
+        for asn in overdue_full:
+            student_id = row_get(asn, "student_id")
+            fee_name = row_get(asn, "fee_name")
+            amt = (row_get(asn, "amount") or 0) - (row_get(asn, "discount_amount") or 0)
+            msg = f"URGENT: Your full fee of ₹{amt} for {fee_name} is OVERDUE (due {row_get(asn, 'due_date')}). Please pay immediately."
+            send_sys_notification(db, f"Full Fee Overdue", msg, recipients=[{"id": student_id, "role": "student"}, {"id": student_id, "role": "parent"}], type="fee_reminder", priority="High")
+        
+        db.commit()
+    except Exception as e:
+        print(f"[trigger_fee_reminders ERROR]: {repr(e)}")
 
 def _ensure_fee_schema(db):
     """Ensure Fee Management system tables exist safely across SQLite and PostgreSQL.

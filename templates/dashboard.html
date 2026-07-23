@@ -248,6 +248,54 @@ document.addEventListener('DOMContentLoaded', function() {
 </div>
 {% endif %}
 
+<!-- Admin Notification Summary -->
+<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 20px; margin-bottom: 30px;">
+    <!-- Notification Stats -->
+    <div class="card" style="margin-bottom: 0;">
+        <h2 style="font-size: 1.15rem; font-weight: 800; color: #0f172a; margin: 0 0 16px 0; display: flex; align-items: center; gap: 8px;">
+            <i class="fa-solid fa-bell" style="color: #4f46e5;"></i> Notification Summary
+        </h2>
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+            <div style="background: #f8fafc; padding: 16px; border-radius: 12px; border: 1px solid #e2e8f0; text-align: center;">
+                <div style="font-size: 1.8rem; font-weight: 800; color: #0f172a;">{{ notif_total }}</div>
+                <div style="font-size: 0.8rem; font-weight: 700; color: #64748b; text-transform: uppercase;">Total Sent</div>
+            </div>
+            <div style="background: #fff1f2; padding: 16px; border-radius: 12px; border: 1px solid #ffe4e6; text-align: center;">
+                <div style="font-size: 1.8rem; font-weight: 800; color: #e11d48;">{{ notif_high_priority }}</div>
+                <div style="font-size: 0.8rem; font-weight: 700; color: #be123c; text-transform: uppercase;">High Priority</div>
+            </div>
+            <div style="background: #f0fdf4; padding: 16px; border-radius: 12px; border: 1px solid #dcfce7; text-align: center; grid-column: span 2;">
+                <div style="font-size: 1.8rem; font-weight: 800; color: #166534;">{{ notif_today }}</div>
+                <div style="font-size: 0.8rem; font-weight: 700; color: #15803d; text-transform: uppercase;">Notifications Today</div>
+            </div>
+        </div>
+        <div style="margin-top: 16px; text-align: center;">
+            <a href="{{ url_for('admin_announcements') }}" class="button small" style="width: 100%; justify-content: center; background: #f1f5f9; color: #334155;">Manage Announcements</a>
+        </div>
+    </div>
+
+    <!-- Recent Announcements -->
+    <div class="card" style="margin-bottom: 0;">
+        <h2 style="font-size: 1.15rem; font-weight: 800; color: #0f172a; margin: 0 0 16px 0; display: flex; align-items: center; gap: 8px;">
+            <i class="fa-solid fa-bullhorn" style="color: #0284c7;"></i> Recent Announcements
+        </h2>
+        <div style="display: flex; flex-direction: column; gap: 12px;">
+            {% for ann in recent_announcements %}
+            <div style="background: #f0f9ff; padding: 12px 14px; border-radius: 10px; border-left: 4px solid {% if ann.priority == 'Emergency' %}#ef4444{% elif ann.priority == 'High' %}#f59e0b{% else %}#0284c7{% endif %}; display: flex; justify-content: space-between; align-items: center;">
+                <div>
+                    <div style="font-weight: 700; font-size: 0.9rem; color: #0369a1;">{{ ann.title }}</div>
+                    <div style="font-size: 0.75rem; color: #94a3b8; margin-top: 4px;">{{ ann.created_at }}</div>
+                </div>
+                {% if ann.priority and ann.priority != 'Normal' %}
+                <span style="font-size: 0.7rem; background: #fee2e2; color: #b91c1c; padding: 2px 6px; border-radius: 4px; font-weight: 700;">{{ ann.priority|upper }}</span>
+                {% endif %}
+            </div>
+            {% else %}
+            <div style="text-align: center; color: #94a3b8; font-style: italic; padding: 20px;">No recent announcements.</div>
+            {% endfor %}
+        </div>
+    </div>
+</div>
 <div class="stats-grid">
     <div class="stat-box" style="border-bottom: 4px solid var(--primary-color);">
         <i class="fa-solid fa-building-columns" style="font-size: 1.5rem; color: var(--text-secondary); margin-bottom: 15px;"></i>
