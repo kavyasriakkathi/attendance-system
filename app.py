@@ -1824,6 +1824,197 @@ def _ensure_database_indexes(db):
         print(f"[_ensure_database_indexes warning]: {repr(e)}")
 
 
+def _ensure_notification_schema(db):
+    """Ensure unified notification and announcement tables exist safely across SQLite and PostgreSQL."""
+    is_pg = str(app.config.get("DATABASE", "")).startswith("postgres")
+    try:
+        if is_pg:
+            db.execute("""
+            CREATE TABLE IF NOT EXISTS sys_notifications (
+                id SERIAL PRIMARY KEY,
+                title TEXT NOT NULL,
+                message TEXT NOT NULL,
+                type TEXT DEFAULT 'general',
+                priority TEXT DEFAULT 'normal',
+                created_by TEXT DEFAULT 'system',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+            db.execute("""
+            CREATE TABLE IF NOT EXISTS sys_notification_recipients (
+                id SERIAL PRIMARY KEY,
+                notification_id INTEGER NOT NULL REFERENCES sys_notifications(id) ON DELETE CASCADE,
+                recipient_id INTEGER NOT NULL,
+                recipient_role TEXT NOT NULL,
+                is_read INTEGER DEFAULT 0,
+                read_at TIMESTAMP,
+                is_archived INTEGER DEFAULT 0,
+                is_deleted INTEGER DEFAULT 0
+            );
+            """)
+            db.execute("""
+            CREATE TABLE IF NOT EXISTS sys_announcements (
+                id SERIAL PRIMARY KEY,
+                title TEXT NOT NULL,
+                content TEXT NOT NULL,
+                target_audience TEXT DEFAULT 'all',
+                branch_id INTEGER,
+                section TEXT,
+                semester TEXT,
+                created_by TEXT DEFAULT 'Admin',
+                priority TEXT DEFAULT 'Normal',
+                expiry_date TIMESTAMP,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+        else:
+            db.execute("""
+            CREATE TABLE IF NOT EXISTS sys_notifications (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                message TEXT NOT NULL,
+                type TEXT DEFAULT 'general',
+                priority TEXT DEFAULT 'normal',
+                created_by TEXT DEFAULT 'system',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+            db.execute("""
+            CREATE TABLE IF NOT EXISTS sys_notification_recipients (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                notification_id INTEGER NOT NULL,
+                recipient_id INTEGER NOT NULL,
+                recipient_role TEXT NOT NULL,
+                is_read INTEGER DEFAULT 0,
+                read_at TIMESTAMP,
+                is_archived INTEGER DEFAULT 0,
+                is_deleted INTEGER DEFAULT 0,
+                FOREIGN KEY(notification_id) REFERENCES sys_notifications(id) ON DELETE CASCADE
+            );
+            """)
+            db.execute("""
+            CREATE TABLE IF NOT EXISTS sys_announcements (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                content TEXT NOT NULL,
+                target_audience TEXT DEFAULT 'all',
+                branch_id INTEGER,
+                section TEXT,
+                semester TEXT,
+                created_by TEXT DEFAULT 'Admin',
+                priority TEXT DEFAULT 'Normal',
+                expiry_date TIMESTAMP,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+        db.commit()
+
+        # Add safe columns if tables already existed without them
+        _ensure_column(db, "sys_announcements", "priority", "TEXT DEFAULT 'Normal'")
+        _ensure_column(db, "sys_announcements", "expiry_date", "TIMESTAMP")
+        _ensure_column(db, "sys_notification_recipients", "is_archived", "INTEGER DEFAULT 0")
+        _ensure_column(db, "sys_notification_recipients", "is_deleted", "INTEGER DEFAULT 0")
+
+        # Create safe indexes
+        db.execute("CREATE INDEX IF NOT EXISTS idx_sys_notif_recipient ON sys_notification_recipients(recipient_id, recipient_role, is_read, is_deleted, is_archived)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_sys_notif_created ON sys_notifications(created_at)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_sys_ann_expiry ON sys_announcements(expiry_date)")
+        db.commit()
+    except Exception as e:
+        print(f"[_ensure_notification_schema ERROR]: {repr(e)}")
+
+
+def _ensure_parent_schema(db):
+    """Ensure parent module tables exist safely across SQLite and PostgreSQL."""
+    _ensure_notification_schema(db)
+    placeholder = get_placeholder()
+    is_pg = str(app.config.get("DATABASE", "")).startswith("postgres")
+
+    try:
+        if is_pg:
+            db.execute("""
+            CREATE TABLE IF NOT EXISTS parents (
+                id SERIAL PRIMARY KEY,
+                name TEXT NOT NULL,
+                username TEXT UNIQUE NOT NULL,
+                password TEXT NOT NULL,
+                phone TEXT,
+                email TEXT,
+                student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+            db.execute("""
+            CREATE TABLE IF NOT EXISTS parent_notifications (
+                id SERIAL PRIMARY KEY,
+                parent_id INTEGER,
+                student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+                title TEXT NOT NULL,
+                message TEXT NOT NULL,
+                type TEXT DEFAULT 'general',
+                is_read INTEGER DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+            db.execute("""
+            CREATE TABLE IF NOT EXISTS college_announcements (
+                id SERIAL PRIMARY KEY,
+                title TEXT NOT NULL,
+                content TEXT NOT NULL,
+                target_audience TEXT DEFAULT 'all',
+                created_by TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+        else:
+            db.execute("""
+            CREATE TABLE IF NOT EXISTS parents (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                username TEXT UNIQUE NOT NULL,
+                password TEXT NOT NULL,
+                phone TEXT,
+                email TEXT,
+                student_id INTEGER NOT NULL,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(student_id) REFERENCES students(id)
+            );
+            """)
+            db.execute("""
+            CREATE TABLE IF NOT EXISTS parent_notifications (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                parent_id INTEGER,
+                student_id INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                message TEXT NOT NULL,
+                type TEXT DEFAULT 'general',
+                is_read INTEGER DEFAULT 0,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(student_id) REFERENCES students(id)
+            );
+            """)
+            db.execute("""
+            CREATE TABLE IF NOT EXISTS college_announcements (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                content TEXT NOT NULL,
+                target_audience TEXT DEFAULT 'all',
+                created_by TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+        try:
+            db.commit()
+        except Exception:
+            pass
+    except Exception as e:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        print(f"[_ensure_parent_schema WARNING]: {repr(e)}")
+
+
 def init_db(db=None):
     """Create schema and seed minimal defaults.
 
@@ -2030,18 +2221,16 @@ def init_db(db=None):
 
     _ensure_subject_alias_table(db)
     _ensure_timetable_entry_text_columns(db)
+    _ensure_notification_schema(db)
+    _ensure_parent_schema(db)
     if "_ensure_attendance_schema" in globals():
         _ensure_attendance_schema(db)
     if "_ensure_results_schema" in globals():
         _ensure_results_schema(db)
     if "_ensure_security_schema" in globals():
         _ensure_security_schema(db)
-    if "_ensure_notification_schema" in globals():
-        _ensure_notification_schema(db)
     if "_ensure_fee_schema" in globals():
         _ensure_fee_schema(db)
-    if "_ensure_parent_schema" in globals():
-        _ensure_parent_schema(db)
     _ensure_database_indexes(db)
 
     # ✅ Admin check
