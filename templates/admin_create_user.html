@@ -1,0 +1,45 @@
+{% extends "layout.html" %}
+{% block content %}
+<style>
+    .create-user-container { max-width: 600px; margin: 40px auto; background: white; padding: 30px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+    .create-header { margin-bottom: 25px; color: var(--primary-color); text-align: center; }
+    .form-group { margin-bottom: 20px; }
+    .form-group label { display: block; margin-bottom: 8px; font-weight: 500; color: #475569; }
+    .form-group input, .form-group select { width: 100%; padding: 10px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 1rem; }
+    .form-group input:focus, .form-group select:focus { outline: none; border-color: #3b82f6; box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1); }
+    .btn-submit { width: 100%; padding: 12px; background: #3b82f6; color: white; border: none; border-radius: 6px; font-size: 1rem; font-weight: 600; cursor: pointer; transition: background 0.2s; }
+    .btn-submit:hover { background: #2563eb; }
+    .back-link { display: block; text-align: center; margin-top: 20px; color: #64748b; text-decoration: none; font-size: 0.9rem; }
+</style>
+
+<div class="create-user-container">
+    <h2 class="create-header"><i class="fa-solid fa-user-plus"></i> Create System User</h2>
+    
+    <form method="POST" action="{{ url_for('admin_create_user') }}">
+        <div class="form-group">
+            <label for="username">Username</label>
+            <input type="text" id="username" name="username" required autocomplete="off" placeholder="Enter unique username">
+        </div>
+        
+        <div class="form-group">
+            <label for="password">Initial Password</label>
+            <input type="password" id="password" name="password" required autocomplete="new-password" placeholder="Enter secure password">
+        </div>
+        
+        <div class="form-group">
+            <label for="role">User Role</label>
+            <select id="role" name="role" required>
+                <option value="">Select Role...</option>
+                <option value="admin">Administrator</option>
+                <option value="accountant">Accountant</option>
+                <option value="teacher">Teacher (System Account)</option>
+            </select>
+            <small style="color: #64748b; display: block; margin-top: 5px;">Note: Students and Parents should be managed via their respective modules.</small>
+        </div>
+        
+        <button type="submit" class="btn-submit">Create User</button>
+    </form>
+    
+    <a href="{{ url_for('admin_user_management') }}" class="back-link"><i class="fa-solid fa-arrow-left"></i> Back to User Management</a>
+</div>
+{% endblock %}

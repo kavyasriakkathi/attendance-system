@@ -1977,6 +1977,7 @@ def init_db(db=None):
     _ensure_timetable_entry_text_columns(db)
     _ensure_attendance_schema(db)
     _ensure_results_schema(db)
+    _ensure_security_schema(db)
 
     # ✅ Admin check
     admin = db.execute(
@@ -2092,7 +2093,18 @@ def login():
         db = None
         try:
             db = get_db()
+            _ensure_security_schema(db)
             placeholder = get_placeholder()
+
+            # ── Account lockout / disable check ──────────────────────────────
+            is_locked, locked_until_str = _check_account_locked(db, username)
+            if is_locked:
+                if locked_until_str == "Account disabled by administrator":
+                    flash("Your account has been disabled. Please contact the administrator.", "error")
+                else:
+                    flash(f"Account locked due to too many failed attempts. Try again after {locked_until_str}.", "warning")
+                return render_template("login.html")
+
             user = db.execute(
                 f"SELECT id, username, password, role FROM users WHERE username = {placeholder}",
                 (username,),
@@ -2103,15 +2115,24 @@ def login():
                     flash("Please use the student login page.", "error")
                     return redirect(url_for("student_login"))
 
+                # ── Successful login ──────────────────────────────────────────
+                _track_login_attempt(db, username, success=True)
+                _log_audit(db, "LOGIN_SUCCESS", entity="users",
+                           entity_id=row_get(user, "id"),
+                           detail=f"Role: {row_get(user, 'role')}")
+
                 session.clear()
                 session["user_id"] = row_get(user, "id")
                 session["username"] = row_get(user, "username")
                 session["role"] = row_get(user, "role")
+                session["_login_at"] = int(time.time())
                 # Redirect accountant to dedicated portal
                 if row_get(user, "role") == "accountant":
                     return redirect(url_for("accountant_dashboard"))
                 return redirect(url_for("dashboard"))
 
+            # ── Failed login ──────────────────────────────────────────────────
+            _track_login_attempt(db, username, success=False)
             flash("Invalid username or password.", "error")
 
         except Exception as e:
@@ -3804,6 +3825,7 @@ def students():
                         
                         db.execute(f"INSERT INTO users (username, password, role, student_id) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder})", (enrollment, generate_password_hash(enrollment[-4:]), "student", student_id))
                         db.commit()
+                        _log_audit(db, "STUDENT_ADDED", entity="students", entity_id=student_id, detail=f"name={name} enrollment={enrollment}")
                         flash("Student added successfully.", "success")
                     except Exception as e:
                         db.rollback()
@@ -3852,7 +3874,17 @@ def student_login():
         db = None
         try:
             db = get_db()
+            _ensure_security_schema(db)
             placeholder = get_placeholder()
+
+            # ── Account lockout / disable check ──────────────────────────────
+            is_locked, locked_until_str = _check_account_locked(db, username)
+            if is_locked:
+                if locked_until_str == "Account disabled by administrator":
+                    flash("Your account has been disabled. Please contact the administrator.", "error")
+                else:
+                    flash(f"Account locked due to too many failed attempts. Try again after {locked_until_str}.", "warning")
+                return render_template("student_login.html", next=next_url)
 
             # ── Primary lookup: exact username match ───────────────────────
             user = db.execute(
@@ -3881,15 +3913,24 @@ def student_login():
                     ).fetchone()
 
             if user and row_get(user, "role") == "student" and check_password_hash(row_get(user, "password"), password):
+                # ── Successful login ──────────────────────────────────────────
+                _track_login_attempt(db, username, success=True)
+                _log_audit(db, "LOGIN_SUCCESS", entity="users",
+                           entity_id=row_get(user, "id"),
+                           detail=f"Role: {row_get(user, 'role')}")
+
                 session.clear()
                 session["user_id"] = row_get(user, "id")
                 session["username"] = row_get(user, "username")
                 session["role"] = row_get(user, "role")
                 session["student_id"] = row_get(user, "student_id")
+                session["_login_at"] = int(time.time())
                 if next_url:
                     return redirect(next_url)
                 return redirect(url_for("student_dashboard"))
 
+            # ── Failed login ──────────────────────────────────────────────────
+            _track_login_attempt(db, username, success=False)
             flash("Invalid student login credentials.", "error")
 
         except Exception as e:
@@ -4047,19 +4088,37 @@ def teacher_login():
             db = None
             try:
                 db = get_db()
+                _ensure_security_schema(db)
                 placeholder = get_placeholder()
+                
+                # ── Account lockout / disable check ──────────────────────────────
+                is_locked, locked_until_str = _check_account_locked(db, username)
+                if is_locked:
+                    if locked_until_str == "Account disabled by administrator":
+                        flash("Your account has been disabled. Please contact the administrator.", "error")
+                    else:
+                        flash(f"Account locked due to too many failed attempts. Try again after {locked_until_str}.", "warning")
+                    return render_template("teacher_login.html", hide_nav=True)
+
                 user = db.execute(
                     f"SELECT id, username, password, role FROM users WHERE username = {placeholder}",
                     (username,),
                 ).fetchone()
 
                 if user and row_get(user, "role") == "teacher" and check_password_hash(row_get(user, "password"), password):
+                    # ── Successful login ──────────────────────────────────────────
+                    _track_login_attempt(db, username, success=True)
+                    _log_audit(db, "LOGIN_SUCCESS", entity="users",
+                               entity_id=row_get(user, "id"),
+                               detail=f"Role: {row_get(user, 'role')}")
+
                     # Initialize teacher session fields for downstream routes/templates
                     session.clear()
                     user_id = row_get(user, "id")
                     session["user_id"] = user_id
                     session["username"] = row_get(user, "username")
                     session["role"] = row_get(user, "role")
+                    session["_login_at"] = int(time.time())
                     # Try to populate teacher-specific session values from teachers table using username
                     try:
                         assigned = db.execute(f"SELECT id, name FROM teachers WHERE username = {placeholder}", (row_get(user, "username"),)).fetchone()
@@ -4076,6 +4135,8 @@ def teacher_login():
                     session.permanent = True
                     return redirect(url_for("teacher_dashboard"))
 
+                # ── Failed login ──────────────────────────────────────────────────
+                _track_login_attempt(db, username, success=False)
                 flash("Invalid teacher login credentials.", "error")
 
             except Exception as e:
@@ -4694,6 +4755,7 @@ def teacher_mark_attendance():
                         if str(student_id).isdigit():
                             saved_ids.append(int(student_id))
                     db.commit()
+                    _log_audit(db, "MODIFIED_ATTENDANCE", entity="attendance", detail=f"branch={current_branch_id} section={current_section} period={period} date={selected_date}")
                     if invalid_students:
                         flash(f"Skipped {invalid_students} invalid student(s).", "warning")
                     if blocked_overwrites:
@@ -8039,6 +8101,7 @@ def teacher_enter_marks():
                                 (st_id, sub_id, ex_id, m1_val, m2_val, m3_val, ext_val, val, global_max_marks, teacher_id),
                             )
                 db.commit()
+                _log_audit(db, "ENTERED_MARKS", entity="marks", detail=f"subject_id={sub_id} exam_id={ex_id} branch_id={selected_branch_id}")
                 flash("University examination marks saved successfully.", "success")
 
         students = []
@@ -8875,6 +8938,16 @@ def parent_login():
             db = get_db()
             placeholder = get_placeholder()
             _ensure_parent_schema(db)
+            _ensure_security_schema(db)
+
+            # ── Account lockout / disable check ──────────────────────────────
+            is_locked, locked_until_str = _check_account_locked(db, login_input)
+            if is_locked:
+                if locked_until_str == "Account disabled by administrator":
+                    flash("Your account has been disabled. Please contact the administrator.", "error")
+                else:
+                    flash(f"Account locked due to too many failed attempts. Try again after {locked_until_str}.", "warning")
+                return render_template("parent_login.html")
 
             # 1. Search in parents table
             parent = db.execute(
@@ -8885,6 +8958,12 @@ def parent_login():
             ).fetchone()
 
             if parent and check_password_hash(row_get(parent, "password"), password):
+                # ── Successful login ──────────────────────────────────────────
+                _track_login_attempt(db, login_input, success=True)
+                _log_audit(db, "LOGIN_SUCCESS", entity="parents",
+                           entity_id=row_get(parent, "id"),
+                           detail="Role: parent")
+
                 session.clear()
                 session["user_id"] = row_get(parent, "id")
                 session["parent_id"] = row_get(parent, "id")
@@ -8892,6 +8971,7 @@ def parent_login():
                 session["role"] = "parent"
                 session["student_id"] = row_get(parent, "student_id")
                 session["student_name"] = row_get(parent, "student_name")
+                session["_login_at"] = int(time.time())
                 flash(f"Welcome, {row_get(parent, 'name')}!", "success")
                 return redirect(url_for("parent_dashboard"))
 
@@ -8908,6 +8988,11 @@ def parent_login():
                 ).fetchone()
 
                 if u_parent and check_password_hash(row_get(u_parent, "password"), password):
+                    _track_login_attempt(db, login_input, success=True)
+                    _log_audit(db, "LOGIN_SUCCESS", entity="users",
+                               entity_id=row_get(u_parent, "id"),
+                               detail="Role: parent (via users table)")
+
                     session.clear()
                     session["user_id"] = row_get(u_parent, "id")
                     session["parent_id"] = row_get(u_parent, "id")
@@ -8915,9 +9000,12 @@ def parent_login():
                     session["role"] = "parent"
                     session["student_id"] = row_get(student, "id")
                     session["student_name"] = row_get(student, "name")
+                    session["_login_at"] = int(time.time())
                     flash(f"Welcome, Parent of {row_get(student, 'name')}!", "success")
                     return redirect(url_for("parent_dashboard"))
 
+            # ── Failed login ──────────────────────────────────────────────────
+            _track_login_attempt(db, login_input, success=False)
             flash("Invalid Parent Username / Enrollment or Password.", "error")
             return render_template("parent_login.html")
         except Exception as e:
@@ -9734,6 +9822,7 @@ def promote_single_student(db, student_id, target_semester=None, target_academic
 
     try:
         db.commit()
+        _log_audit(db, "PROMOTED_STUDENT", entity="students", entity_id=student_id, detail=f"from={from_sem} to={to_sem} status={status}")
     except Exception:
         pass
 
@@ -9870,6 +9959,200 @@ def admin_promotions():
         if db:
             try: db.close()
             except: pass
+
+
+
+# ==========================================
+# SECURITY & ADMINISTRATION MODULE
+# ==========================================
+
+_MAX_LOGIN_ATTEMPTS = 5       # lock after this many consecutive failures
+_LOCKOUT_MINUTES    = 15      # how long an account stays locked
+
+def _ensure_security_schema(db):
+    """Create audit_logs, login_attempts, and security columns. Safe/idempotent."""
+    is_pg = str(app.config.get("DATABASE", "")).startswith("postgres")
+    try:
+        if is_pg:
+            db.execute("""
+            CREATE TABLE IF NOT EXISTS audit_logs (
+                id SERIAL PRIMARY KEY,
+                actor_username TEXT NOT NULL,
+                actor_role TEXT,
+                action TEXT NOT NULL,
+                entity TEXT,
+                entity_id TEXT,
+                detail TEXT,
+                ip_address TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+            db.execute("""
+            CREATE TABLE IF NOT EXISTS login_attempts (
+                id SERIAL PRIMARY KEY,
+                username TEXT NOT NULL,
+                ip_address TEXT,
+                success INTEGER DEFAULT 0,
+                attempted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+            # Safe columns on users table
+            db.execute("""
+            DO $$ BEGIN
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                    WHERE table_name='users' AND column_name='is_active')
+                THEN ALTER TABLE users ADD COLUMN is_active INTEGER DEFAULT 1; END IF;
+            END $$;
+            """)
+            db.execute("""
+            DO $$ BEGIN
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                    WHERE table_name='users' AND column_name='last_login')
+                THEN ALTER TABLE users ADD COLUMN last_login TEXT; END IF;
+            END $$;
+            """)
+            db.execute("""
+            DO $$ BEGIN
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                    WHERE table_name='users' AND column_name='locked_until')
+                THEN ALTER TABLE users ADD COLUMN locked_until TEXT; END IF;
+            END $$;
+            """)
+            db.execute("""
+            DO $$ BEGIN
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                    WHERE table_name='users' AND column_name='failed_attempts')
+                THEN ALTER TABLE users ADD COLUMN failed_attempts INTEGER DEFAULT 0; END IF;
+            END $$;
+            """)
+        else:
+            db.execute("""
+            CREATE TABLE IF NOT EXISTS audit_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                actor_username TEXT NOT NULL,
+                actor_role TEXT,
+                action TEXT NOT NULL,
+                entity TEXT,
+                entity_id TEXT,
+                detail TEXT,
+                ip_address TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+            db.execute("""
+            CREATE TABLE IF NOT EXISTS login_attempts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT NOT NULL,
+                ip_address TEXT,
+                success INTEGER DEFAULT 0,
+                attempted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+            # Safe ALTER for SQLite
+            for col, definition in [
+                ("is_active",       "INTEGER DEFAULT 1"),
+                ("last_login",      "TEXT"),
+                ("locked_until",    "TEXT"),
+                ("failed_attempts", "INTEGER DEFAULT 0"),
+            ]:
+                try:
+                    existing = {r[1].lower() for r in db.execute("PRAGMA table_info(users)").fetchall()}
+                    if col not in existing:
+                        db.execute(f"ALTER TABLE users ADD COLUMN {col} {definition}")
+                except Exception:
+                    pass
+        try:
+            db.commit()
+        except Exception:
+            pass
+    except Exception as e:
+        print(f"[_ensure_security_schema WARNING]: {repr(e)}")
+
+
+def _log_audit(db, action, entity=None, entity_id=None, detail=None):
+    """Write a row to audit_logs. Never raises — log failures are swallowed."""
+    try:
+        actor   = session.get("username", "system")
+        role    = session.get("role", "")
+        ip      = request.remote_addr if request else None
+        ph      = get_placeholder()
+        db.execute(
+            f"INSERT INTO audit_logs (actor_username, actor_role, action, entity, entity_id, detail, ip_address)"
+            f" VALUES ({ph},{ph},{ph},{ph},{ph},{ph},{ph})",
+            (actor, role, action, entity, str(entity_id) if entity_id else None, detail, ip),
+        )
+        try:
+            db.commit()
+        except Exception:
+            pass
+    except Exception as e:
+        print(f"[_log_audit WARNING]: {repr(e)}")
+
+
+def _track_login_attempt(db, username, success: bool):
+    """Record a login attempt and update failed_attempts / locked_until on the user row."""
+    try:
+        ip = request.remote_addr if request else None
+        ph = get_placeholder()
+        db.execute(
+            f"INSERT INTO login_attempts (username, ip_address, success) VALUES ({ph},{ph},{ph})",
+            (username, ip, 1 if success else 0),
+        )
+        if success:
+            # Reset failure counter and last_login
+            now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            db.execute(
+                f"UPDATE users SET failed_attempts=0, locked_until=NULL, last_login={ph} WHERE username={ph}",
+                (now_str, username),
+            )
+        else:
+            # Increment failure counter; lock if threshold reached
+            db.execute(
+                f"UPDATE users SET failed_attempts = COALESCE(failed_attempts,0)+1 WHERE username={ph}",
+                (username,),
+            )
+            row = db.execute(f"SELECT failed_attempts FROM users WHERE username={ph}", (username,)).fetchone()
+            if row and (row_get(row, "failed_attempts") or 0) >= _MAX_LOGIN_ATTEMPTS:
+                locked_until = (datetime.now() + timedelta(minutes=_LOCKOUT_MINUTES)).strftime("%Y-%m-%d %H:%M:%S")
+                db.execute(
+                    f"UPDATE users SET locked_until={ph} WHERE username={ph}",
+                    (locked_until, username),
+                )
+        try:
+            db.commit()
+        except Exception:
+            pass
+    except Exception as e:
+        print(f"[_track_login_attempt WARNING]: {repr(e)}")
+
+
+def _check_account_locked(db, username):
+    """Return (is_locked: bool, locked_until_str: str|None)."""
+    try:
+        ph  = get_placeholder()
+        row = db.execute(f"SELECT locked_until, is_active FROM users WHERE username={ph}", (username,)).fetchone()
+        if not row:
+            return False, None
+        if not (row_get(row, "is_active") if row_get(row, "is_active") is not None else 1):
+            return True, "Account disabled by administrator"
+        lu = row_get(row, "locked_until")
+        if lu:
+            try:
+                locked_dt = datetime.strptime(lu, "%Y-%m-%d %H:%M:%S")
+                if datetime.now() < locked_dt:
+                    return True, lu
+                # Lockout expired — auto-clear
+                db.execute(
+                    f"UPDATE users SET locked_until=NULL, failed_attempts=0 WHERE username={ph}",
+                    (username,),
+                )
+                try: db.commit()
+                except Exception: pass
+            except Exception:
+                pass
+    except Exception as e:
+        print(f"[_check_account_locked WARNING]: {repr(e)}")
+    return False, None
 
 
 # ==========================================
@@ -10482,6 +10765,7 @@ def admin_record_payment():
 
             _recalculate_assignment_status(db, assignment_id)
             db.commit()
+            _log_audit(db, "COLLECTED_FEES", entity="fee_payments", entity_id=payment_id, detail=f"amount={amount_paid} receipt={receipt_number}")
 
             flash(f"Payment of ₹{amount_paid:,.2f} recorded successfully! Receipt #: {receipt_number}", "success")
             return redirect(url_for("fee_receipt", payment_id=payment_id))
@@ -11239,3 +11523,325 @@ def api_student_fee_assignments():
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
 
+
+
+# ==========================================
+# SESSION TIMEOUT HOOK
+# ==========================================
+
+_SESSION_TIMEOUT_SECONDS = 7200   # 2 hours
+
+@app.before_request
+def _enforce_session_timeout():
+    """Auto-logout idle sessions."""
+    if "user_id" in session:
+        login_at = session.get("_login_at")
+        if login_at and (int(time.time()) - login_at) > _SESSION_TIMEOUT_SECONDS:
+            session.clear()
+            flash("Your session has expired. Please log in again.", "warning")
+            return redirect(url_for("login"))
+
+
+# ==========================================
+# SECURITY ADMIN ROUTES
+# ==========================================
+
+def _admin_required_security(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if session.get("role") != "admin":
+            flash("Administrator access required.", "danger")
+            return redirect(url_for("login"))
+        return f(*args, **kwargs)
+    return decorated
+
+
+@app.route("/admin/security", methods=["GET"])
+@_admin_required_security
+def admin_security_dashboard():
+    db = get_db()
+    _ensure_security_schema(db)
+    try:
+        all_users = db.execute(
+            "SELECT id, username, role, last_login, is_active, failed_attempts, locked_until FROM users ORDER BY username"
+        ).fetchall()
+        recent_activity = db.execute(
+            "SELECT * FROM audit_logs ORDER BY id DESC LIMIT 50"
+        ).fetchall()
+        failed_logins = db.execute(
+            "SELECT * FROM login_attempts WHERE success=0 ORDER BY id DESC LIMIT 30"
+        ).fetchall()
+        role_counts = {}
+        for u in all_users:
+            r = row_get(u, "role") or "unknown"
+            role_counts[r] = role_counts.get(r, 0) + 1
+        total_users    = len(all_users)
+        active_users   = sum(1 for u in all_users if row_get(u, "is_active") in (1, None, "1"))
+        locked_users   = sum(1 for u in all_users if row_get(u, "locked_until"))
+        disabled_users = sum(1 for u in all_users if row_get(u, "is_active") == 0)
+        total_failed_row = db.execute("SELECT COUNT(*) AS c FROM login_attempts WHERE success=0").fetchone()
+        total_failed_count = row_get(total_failed_row, "c") or 0
+        return render_template(
+            "admin_security_dashboard.html",
+            all_users=all_users,
+            recent_activity=recent_activity,
+            failed_logins=failed_logins,
+            role_counts=role_counts,
+            total_users=total_users,
+            active_users=active_users,
+            locked_users=locked_users,
+            disabled_users=disabled_users,
+            total_failed_count=total_failed_count,
+        )
+    except Exception as e:
+        print(f"[admin_security_dashboard ERROR]: {repr(e)}")
+        flash(f"Error loading security dashboard: {str(e)}", "error")
+        return redirect(url_for("dashboard"))
+    finally:
+        if db:
+            try: db.close()
+            except: pass
+
+
+@app.route("/admin/security/users", methods=["GET"])
+@_admin_required_security
+def admin_user_management():
+    db = get_db()
+    _ensure_security_schema(db)
+    ph = get_placeholder()
+    search_q    = request.args.get("q", "").strip()
+    role_filter = request.args.get("role", "").strip()
+    try:
+        sql    = "SELECT id, username, role, last_login, is_active, failed_attempts, locked_until FROM users WHERE 1=1"
+        params = []
+        if search_q:
+            sql += f" AND LOWER(username) LIKE {ph}"
+            params.append(f"%{search_q.lower()}%")
+        if role_filter:
+            sql += f" AND role = {ph}"
+            params.append(role_filter)
+        sql += " ORDER BY username ASC"
+        users = db.execute(sql, tuple(params)).fetchall()
+        return render_template("admin_user_management.html", users=users, search_q=search_q, role_filter=role_filter)
+    except Exception as e:
+        flash(f"Error loading users: {str(e)}", "error")
+        return redirect(url_for("admin_security_dashboard"))
+    finally:
+        if db:
+            try: db.close()
+            except: pass
+
+
+@app.route("/admin/security/users/create", methods=["GET", "POST"])
+@_admin_required_security
+def admin_create_user():
+    db = get_db()
+    _ensure_security_schema(db)
+    ph = get_placeholder()
+    if request.method == "POST":
+        username = (request.form.get("username") or "").strip()
+        password = (request.form.get("password") or "").strip()
+        role     = (request.form.get("role") or "").strip()
+        if not username or not password or not role:
+            flash("Username, password and role are required.", "error")
+            return redirect(url_for("admin_create_user"))
+        if len(password) < 8 or not re.search(r"\d", password):
+            flash("Password must be at least 8 characters and include a number.", "error")
+            return redirect(url_for("admin_create_user"))
+        try:
+            db.execute(
+                f"INSERT INTO users (username, password, role, is_active) VALUES ({ph},{ph},{ph},1)",
+                (username, generate_password_hash(password), role),
+            )
+            db.commit()
+            _log_audit(db, "USER_CREATED", entity="users", detail=f"username={username} role={role}")
+            flash(f"User '{username}' created with role '{role}'.", "success")
+            return redirect(url_for("admin_user_management"))
+        except Exception as e:
+            flash(f"Error creating user: {str(e)}", "error")
+            return redirect(url_for("admin_create_user"))
+        finally:
+            if db:
+                try: db.close()
+                except: pass
+    if db:
+        try: db.close()
+        except: pass
+    return render_template("admin_create_user.html")
+
+
+@app.route("/admin/security/users/<int:user_id>/toggle", methods=["POST"])
+@_admin_required_security
+def admin_toggle_user(user_id):
+    db = get_db()
+    _ensure_security_schema(db)
+    ph = get_placeholder()
+    try:
+        row = db.execute(f"SELECT username, is_active FROM users WHERE id={ph}", (user_id,)).fetchone()
+        if not row:
+            flash("User not found.", "error")
+            return redirect(url_for("admin_user_management"))
+        username   = row_get(row, "username")
+        cur_active = row_get(row, "is_active")
+        new_active = 0 if (cur_active in (1, None, "1")) else 1
+        db.execute(f"UPDATE users SET is_active={ph} WHERE id={ph}", (new_active, user_id))
+        db.commit()
+        action_word = "DISABLED" if new_active == 0 else "ENABLED"
+        _log_audit(db, f"USER_{action_word}", entity="users", entity_id=user_id, detail=f"username={username}")
+        flash(f"User '{username}' {'disabled' if new_active==0 else 're-enabled'}.", "success")
+    except Exception as e:
+        flash(f"Error: {str(e)}", "error")
+    finally:
+        if db:
+            try: db.close()
+            except: pass
+    return redirect(url_for("admin_user_management"))
+
+
+@app.route("/admin/security/users/<int:user_id>/reset-password", methods=["POST"])
+@_admin_required_security
+def admin_reset_password(user_id):
+    db = get_db()
+    _ensure_security_schema(db)
+    ph = get_placeholder()
+    new_password = (request.form.get("new_password") or "").strip()
+    if len(new_password) < 8 or not re.search(r"\d", new_password):
+        flash("Password must be >= 8 chars and include a digit.", "error")
+        return redirect(url_for("admin_user_management"))
+    try:
+        row = db.execute(f"SELECT username FROM users WHERE id={ph}", (user_id,)).fetchone()
+        if not row:
+            flash("User not found.", "error")
+            return redirect(url_for("admin_user_management"))
+        username = row_get(row, "username")
+        db.execute(
+            f"UPDATE users SET password={ph}, failed_attempts=0, locked_until=NULL WHERE id={ph}",
+            (generate_password_hash(new_password), user_id),
+        )
+        db.commit()
+        _log_audit(db, "PASSWORD_RESET", entity="users", entity_id=user_id, detail=f"username={username}")
+        flash(f"Password for '{username}' reset.", "success")
+    except Exception as e:
+        flash(f"Error: {str(e)}", "error")
+    finally:
+        if db:
+            try: db.close()
+            except: pass
+    return redirect(url_for("admin_user_management"))
+
+
+@app.route("/admin/security/users/<int:user_id>/change-role", methods=["POST"])
+@_admin_required_security
+def admin_change_role(user_id):
+    db = get_db()
+    _ensure_security_schema(db)
+    ph = get_placeholder()
+    new_role = (request.form.get("new_role") or "").strip()
+    if new_role not in ("admin", "accountant", "teacher", "student", "parent"):
+        flash("Invalid role.", "error")
+        return redirect(url_for("admin_user_management"))
+    try:
+        row = db.execute(f"SELECT username, role FROM users WHERE id={ph}", (user_id,)).fetchone()
+        if not row:
+            flash("User not found.", "error")
+            return redirect(url_for("admin_user_management"))
+        username = row_get(row, "username")
+        old_role = row_get(row, "role")
+        db.execute(f"UPDATE users SET role={ph} WHERE id={ph}", (new_role, user_id))
+        db.commit()
+        _log_audit(db, "ROLE_CHANGED", entity="users", entity_id=user_id,
+                   detail=f"username={username} {old_role}->{new_role}")
+        flash(f"Role for '{username}' changed from '{old_role}' to '{new_role}'.", "success")
+    except Exception as e:
+        flash(f"Error: {str(e)}", "error")
+    finally:
+        if db:
+            try: db.close()
+            except: pass
+    return redirect(url_for("admin_user_management"))
+
+
+@app.route("/admin/security/users/<int:user_id>/unlock", methods=["POST"])
+@_admin_required_security
+def admin_unlock_user(user_id):
+    db = get_db()
+    _ensure_security_schema(db)
+    ph = get_placeholder()
+    try:
+        row = db.execute(f"SELECT username FROM users WHERE id={ph}", (user_id,)).fetchone()
+        if not row:
+            flash("User not found.", "error")
+            return redirect(url_for("admin_user_management"))
+        username = row_get(row, "username")
+        db.execute(f"UPDATE users SET locked_until=NULL, failed_attempts=0 WHERE id={ph}", (user_id,))
+        db.commit()
+        _log_audit(db, "ACCOUNT_UNLOCKED", entity="users", entity_id=user_id, detail=f"username={username}")
+        flash(f"Account '{username}' unlocked.", "success")
+    except Exception as e:
+        flash(f"Error: {str(e)}", "error")
+    finally:
+        if db:
+            try: db.close()
+            except: pass
+    return redirect(url_for("admin_user_management"))
+
+
+@app.route("/admin/security/audit-log", methods=["GET"])
+@_admin_required_security
+def admin_audit_log():
+    db = get_db()
+    _ensure_security_schema(db)
+    ph = get_placeholder()
+    actor_filter  = request.args.get("actor", "").strip()
+    action_filter = request.args.get("action", "").strip()
+    date_from     = request.args.get("date_from", "").strip()
+    date_to       = request.args.get("date_to", "").strip()
+    try:
+        sql    = "SELECT * FROM audit_logs WHERE 1=1"
+        params = []
+        if actor_filter:
+            sql += f" AND LOWER(actor_username) LIKE {ph}"
+            params.append(f"%{actor_filter.lower()}%")
+        if action_filter:
+            sql += f" AND action LIKE {ph}"
+            params.append(f"%{action_filter}%")
+        if date_from:
+            sql += f" AND DATE(created_at) >= {ph}"
+            params.append(date_from)
+        if date_to:
+            sql += f" AND DATE(created_at) <= {ph}"
+            params.append(date_to)
+        sql += " ORDER BY id DESC LIMIT 200"
+        logs = db.execute(sql, tuple(params)).fetchall()
+        return render_template(
+            "admin_audit_log.html",
+            logs=logs, actor_filter=actor_filter,
+            action_filter=action_filter,
+            date_from=date_from, date_to=date_to,
+        )
+    except Exception as e:
+        flash(f"Error loading audit log: {str(e)}", "error")
+        return redirect(url_for("admin_security_dashboard"))
+    finally:
+        if db:
+            try: db.close()
+            except: pass
+
+
+@app.route("/admin/security/failed-logins", methods=["GET"])
+@_admin_required_security
+def admin_failed_logins():
+    db = get_db()
+    _ensure_security_schema(db)
+    try:
+        rows = db.execute(
+            "SELECT * FROM login_attempts WHERE success=0 ORDER BY id DESC LIMIT 100"
+        ).fetchall()
+        return render_template("admin_failed_logins.html", rows=rows)
+    except Exception as e:
+        flash(f"Error: {str(e)}", "error")
+        return redirect(url_for("admin_security_dashboard"))
+    finally:
+        if db:
+            try: db.close()
+            except: pass

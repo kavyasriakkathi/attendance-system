@@ -1,0 +1,106 @@
+{% extends "layout.html" %}
+{% block content %}
+<style>
+    .user-mgmt { padding: 20px; }
+    .page-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+    .page-header h2 { margin: 0; color: var(--primary-color); }
+    .btn-primary { background: #3b82f6; color: white; padding: 8px 16px; border-radius: 6px; text-decoration: none; font-weight: 500; }
+    .user-table { width: 100%; border-collapse: collapse; background: white; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); overflow: hidden; }
+    .user-table th, .user-table td { padding: 12px 15px; text-align: left; border-bottom: 1px solid #e2e8f0; }
+    .user-table th { background: #f8fafc; font-weight: 600; color: #475569; font-size: 0.85rem; text-transform: uppercase; }
+    .user-table tr:last-child td { border-bottom: none; }
+    .badge { display: inline-block; padding: 3px 8px; border-radius: 999px; font-size: 0.75rem; font-weight: 600; }
+    .role-admin { background: #fee2e2; color: #991b1b; }
+    .role-teacher { background: #e0f2fe; color: #0369a1; }
+    .role-student { background: #dcfce7; color: #166534; }
+    .role-parent { background: #fef9c3; color: #854d0e; }
+    .role-accountant { background: #f3e8ff; color: #6b21a8; }
+    .status-active { color: #16a34a; }
+    .status-disabled { color: #dc2626; }
+    .status-locked { color: #ea580c; }
+    .action-btn { display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; border-radius: 4px; border: none; cursor: pointer; color: white; margin-right: 5px; text-decoration: none; }
+    .btn-toggle { background: #ef4444; }
+    .btn-enable { background: #10b981; }
+    .btn-reset { background: #f59e0b; }
+    .btn-unlock { background: #3b82f6; }
+    .filters { background: white; padding: 15px; border-radius: 8px; margin-bottom: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); display: flex; gap: 15px; align-items: center; }
+    .filters select, .filters input, .filters button { padding: 8px 12px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 0.9rem; }
+    .filters button { background: #3b82f6; color: white; border: none; cursor: pointer; }
+</style>
+
+<div class="user-mgmt">
+    <div class="page-header">
+        <h2><i class="fa-solid fa-users-gear"></i> User Management</h2>
+        <a href="{{ url_for('admin_create_user') }}" class="btn-primary"><i class="fa-solid fa-user-plus"></i> Create User</a>
+    </div>
+
+    <form class="filters" method="GET" action="{{ url_for('admin_user_management') }}">
+        <select name="role">
+            <option value="">All Roles</option>
+            <option value="admin" {% if selected_role == 'admin' %}selected{% endif %}>Admin</option>
+            <option value="teacher" {% if selected_role == 'teacher' %}selected{% endif %}>Teacher</option>
+            <option value="student" {% if selected_role == 'student' %}selected{% endif %}>Student</option>
+            <option value="parent" {% if selected_role == 'parent' %}selected{% endif %}>Parent</option>
+            <option value="accountant" {% if selected_role == 'accountant' %}selected{% endif %}>Accountant</option>
+        </select>
+        <input type="text" name="search" placeholder="Search username..." value="{{ search_query }}">
+        <button type="submit"><i class="fa-solid fa-magnifying-glass"></i> Filter</button>
+        <a href="{{ url_for('admin_security_dashboard') }}" style="margin-left: auto; color: #64748b; text-decoration: none;"><i class="fa-solid fa-arrow-left"></i> Back to Dashboard</a>
+    </form>
+
+    <table class="user-table">
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>Username</th>
+                <th>Role</th>
+                <th>Status</th>
+                <th>Last Login</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for user in users %}
+            <tr>
+                <td>{{ user.id }}</td>
+                <td><strong>{{ user.username }}</strong></td>
+                <td><span class="badge role-{{ user.role }}">{{ user.role }}</span></td>
+                <td>
+                    {% if user.is_active == 0 %}
+                        <span class="status-disabled"><i class="fa-solid fa-ban"></i> Disabled</span>
+                    {% elif user.locked_until and user.locked_until > current_time %}
+                        <span class="status-locked"><i class="fa-solid fa-lock"></i> Locked</span>
+                    {% else %}
+                        <span class="status-active"><i class="fa-solid fa-check-circle"></i> Active</span>
+                    {% endif %}
+                </td>
+                <td style="font-size: 0.85rem; color: #64748b;">{{ user.last_login or 'Never' }}</td>
+                <td>
+                    <form action="{{ url_for('admin_toggle_user', user_id=user.id) }}" method="POST" style="display:inline;" onsubmit="return confirm('Are you sure you want to toggle this user\'s status?');">
+                        {% if user.is_active == 0 %}
+                            <button type="submit" class="action-btn btn-enable" title="Enable User"><i class="fa-solid fa-check"></i></button>
+                        {% else %}
+                            <button type="submit" class="action-btn btn-toggle" title="Disable User"><i class="fa-solid fa-ban"></i></button>
+                        {% endif %}
+                    </form>
+                    
+                    {% if user.locked_until and user.locked_until > current_time %}
+                    <form action="{{ url_for('admin_unlock_user', user_id=user.id) }}" method="POST" style="display:inline;">
+                        <button type="submit" class="action-btn btn-unlock" title="Unlock Account"><i class="fa-solid fa-unlock"></i></button>
+                    </form>
+                    {% endif %}
+
+                    <form action="{{ url_for('admin_reset_password', user_id=user.id) }}" method="POST" style="display:inline;" onsubmit="return confirm('Are you sure you want to reset the password to default?');">
+                        <button type="submit" class="action-btn btn-reset" title="Reset Password"><i class="fa-solid fa-key"></i></button>
+                    </form>
+                </td>
+            </tr>
+            {% else %}
+            <tr>
+                <td colspan="6" style="text-align: center; color: #94a3b8; padding: 30px;">No users found.</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}

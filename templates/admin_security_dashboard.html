@@ -1,0 +1,92 @@
+{% extends "layout.html" %}
+{% block content %}
+<style>
+    .security-dashboard { padding: 20px; }
+    .sec-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+    .sec-header h2 { margin: 0; color: var(--primary-color); }
+    .sec-actions a { padding: 8px 16px; border-radius: 6px; text-decoration: none; margin-left: 10px; font-weight: 500; }
+    .btn-manage { background: #3b82f6; color: white; }
+    .btn-audit { background: #64748b; color: white; }
+    .btn-failed { background: #f59e0b; color: white; }
+    .stat-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; margin-bottom: 30px; }
+    .stat-card { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); text-align: center; }
+    .stat-card h5 { margin: 0 0 10px 0; color: #64748b; font-size: 0.9rem; text-transform: uppercase; letter-spacing: 0.05em; }
+    .stat-card h2 { margin: 0; font-size: 2rem; color: #0f172a; }
+    .stat-card.locked h5, .stat-card.locked h2 { color: #ef4444; }
+    .stat-card.failed h5, .stat-card.failed h2 { color: #f59e0b; }
+    .recent-activity { background: white; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); overflow: hidden; }
+    .recent-activity-header { padding: 15px 20px; border-bottom: 1px solid #e2e8f0; background: #f8fafc; }
+    .recent-activity-header h3 { margin: 0; font-size: 1.1rem; color: #334155; }
+    .sec-table { width: 100%; border-collapse: collapse; }
+    .sec-table th, .sec-table td { padding: 12px 15px; text-align: left; border-bottom: 1px solid #e2e8f0; }
+    .sec-table th { background: #f8fafc; font-weight: 600; color: #475569; font-size: 0.85rem; text-transform: uppercase; }
+    .sec-table tr:last-child td { border-bottom: none; }
+    .badge { display: inline-block; padding: 3px 8px; border-radius: 999px; font-size: 0.75rem; font-weight: 600; }
+    .badge-blue { background: #e0f2fe; color: #0369a1; }
+    .details-cell { font-size: 0.85rem; color: #64748b; max-width: 200px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+</style>
+
+<div class="security-dashboard">
+    <div class="sec-header">
+        <h2><i class="fa-solid fa-shield-halved"></i> Security & Administration</h2>
+        <div class="sec-actions">
+            <a href="{{ url_for('admin_user_management') }}" class="btn-manage"><i class="fa-solid fa-users-gear"></i> Manage Users</a>
+            <a href="{{ url_for('admin_audit_log') }}" class="btn-audit"><i class="fa-solid fa-list-check"></i> Audit Log</a>
+            <a href="{{ url_for('admin_failed_logins') }}" class="btn-failed"><i class="fa-solid fa-user-lock"></i> Failed Logins</a>
+        </div>
+    </div>
+
+    <div class="stat-cards">
+        <div class="stat-card">
+            <h5>Total Users</h5>
+            <h2>{{ total_users }}</h2>
+        </div>
+        <div class="stat-card">
+            <h5>Active Users</h5>
+            <h2>{{ active_users }}</h2>
+        </div>
+        <div class="stat-card locked">
+            <h5>Locked Users</h5>
+            <h2>{{ locked_users }}</h2>
+        </div>
+        <div class="stat-card failed">
+            <h5>Failed Logins (24h)</h5>
+            <h2>{{ failed_logins_24h }}</h2>
+        </div>
+    </div>
+
+    <div class="recent-activity">
+        <div class="recent-activity-header">
+            <h3><i class="fa-solid fa-clock-rotate-left"></i> Recent Activity</h3>
+        </div>
+        <table class="sec-table">
+            <thead>
+                <tr>
+                    <th>Timestamp</th>
+                    <th>Actor</th>
+                    <th>Action</th>
+                    <th>Entity</th>
+                    <th>Details</th>
+                    <th>IP Address</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for log in recent_activity %}
+                <tr>
+                    <td>{{ log.timestamp }}</td>
+                    <td><strong>{{ log.actor }}</strong></td>
+                    <td><span class="badge badge-blue">{{ log.action }}</span></td>
+                    <td>{{ log.entity }} {% if log.entity_id %}#{{ log.entity_id }}{% endif %}</td>
+                    <td class="details-cell" title="{{ log.detail or '' }}">{{ log.detail or '-' }}</td>
+                    <td class="details-cell">{{ log.ip_address or '-' }}</td>
+                </tr>
+                {% else %}
+                <tr>
+                    <td colspan="6" style="text-center: center; color: #94a3b8; padding: 30px;">No recent activity.</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}

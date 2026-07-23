@@ -1,0 +1,64 @@
+{% extends "layout.html" %}
+{% block content %}
+<style>
+    .failed-logins { padding: 20px; }
+    .page-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+    .page-header h2 { margin: 0; color: #f59e0b; }
+    .failed-table { width: 100%; border-collapse: collapse; background: white; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); overflow: hidden; }
+    .failed-table th, .failed-table td { padding: 12px 15px; text-align: left; border-bottom: 1px solid #e2e8f0; }
+    .failed-table th { background: #fef3c7; font-weight: 600; color: #b45309; font-size: 0.85rem; text-transform: uppercase; }
+    .failed-table tr:last-child td { border-bottom: none; }
+    .failed-badge { display: inline-block; padding: 3px 8px; border-radius: 999px; font-size: 0.75rem; font-weight: 600; background: #fee2e2; color: #991b1b; }
+    .pagination { display: flex; justify-content: center; margin-top: 20px; gap: 10px; }
+    .pagination a, .pagination span { padding: 8px 12px; border: 1px solid #e2e8f0; border-radius: 6px; text-decoration: none; color: #334155; }
+    .pagination .active { background: #f59e0b; color: white; border-color: #f59e0b; }
+</style>
+
+<div class="failed-logins">
+    <div class="page-header">
+        <h2><i class="fa-solid fa-user-lock"></i> Failed Login Attempts</h2>
+        <a href="{{ url_for('admin_security_dashboard') }}" style="color: #64748b; text-decoration: none;"><i class="fa-solid fa-arrow-left"></i> Dashboard</a>
+    </div>
+
+    <table class="failed-table">
+        <thead>
+            <tr>
+                <th>Timestamp</th>
+                <th>Attempted Username</th>
+                <th>Status</th>
+                <th>IP Address</th>
+                <th>User Agent</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for attempt in attempts %}
+            <tr>
+                <td>{{ attempt.attempt_time }}</td>
+                <td><strong>{{ attempt.username }}</strong></td>
+                <td><span class="failed-badge">Failed</span></td>
+                <td>{{ attempt.ip_address or 'Unknown' }}</td>
+                <td style="font-size: 0.8rem; color: #64748b; max-width: 300px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="{{ attempt.user_agent or '' }}">{{ attempt.user_agent or '-' }}</td>
+            </tr>
+            {% else %}
+            <tr>
+                <td colspan="5" style="text-align: center; color: #94a3b8; padding: 30px;">No failed login attempts recorded.</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+
+    {% if total_pages > 1 %}
+    <div class="pagination">
+        {% if page > 1 %}
+            <a href="{{ url_for('admin_failed_logins', page=page-1) }}">&laquo; Prev</a>
+        {% endif %}
+        
+        <span class="active">Page {{ page }} of {{ total_pages }}</span>
+        
+        {% if page < total_pages %}
+            <a href="{{ url_for('admin_failed_logins', page=page+1) }}">Next &raquo;</a>
+        {% endif %}
+    </div>
+    {% endif %}
+</div>
+{% endblock %}
