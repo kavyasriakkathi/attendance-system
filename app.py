@@ -11534,11 +11534,6 @@ def admin_record_payment():
     student_id_param = _coerce_int(request.args.get("student_id"))
     search_q = request.args.get("q", "").strip()
 
-    if selected_assignment_id and not student_id_param:
-        st_row = db.execute(f"SELECT student_id FROM student_fee_assignments WHERE id = {placeholder}", (selected_assignment_id,)).fetchone()
-        if st_row:
-            student_id_param = row_get(st_row, "student_id")
-
     try:
         sql = f"""
         SELECT sfa.id AS assignment_id, s.id AS student_id, s.name AS student_name, s.enrollment,
@@ -11550,13 +11545,10 @@ def admin_record_payment():
         JOIN fee_structures fs ON sfa.fee_structure_id = fs.id
         LEFT JOIN branches b ON s.branch_id = b.id
         LEFT JOIN fee_payments fp ON fp.assignment_id = sfa.id
-        WHERE (sfa.status IS NULL OR sfa.status != 'Paid')
+        WHERE (sfa.status IS NULL OR LOWER(sfa.status) NOT IN ('paid', 'completed'))
         """
         params = []
-        if student_id_param:
-            sql += f" AND sfa.student_id = {placeholder}"
-            params.append(student_id_param)
-        elif search_q:
+        if search_q:
             sql += f" AND (LOWER(s.name) LIKE {placeholder} OR LOWER(s.enrollment) LIKE {placeholder})"
             params.extend([f"%{search_q.lower()}%", f"%{search_q.lower()}%"])
 
@@ -11581,7 +11573,19 @@ def admin_record_payment():
             row_dict["gross_amount"] = gross
             row_dict["net_amount"] = net
             row_dict["pending_amount"] = pending
-            processed_assignments.append(row_dict)
+
+            if pending > 0 or row_dict["assignment_id"] == selected_assignment_id:
+                processed_assignments.append(row_dict)
+
+        target_sid = student_id_param
+        if selected_assignment_id and not target_sid:
+            for a in processed_assignments:
+                if a["assignment_id"] == selected_assignment_id:
+                    target_sid = a["student_id"]
+                    break
+
+        if target_sid:
+            processed_assignments.sort(key=lambda x: (0 if x["student_id"] == target_sid else 1, x["student_name"], x["fee_name"]))
 
         return render_template(
             "admin_record_payment.html",
@@ -11936,11 +11940,6 @@ def accountant_record_payment():
     student_id_param = _coerce_int(request.args.get("student_id"))
     search_q = request.args.get("q", "").strip()
 
-    if selected_assignment_id and not student_id_param:
-        st_row = db.execute(f"SELECT student_id FROM student_fee_assignments WHERE id = {placeholder}", (selected_assignment_id,)).fetchone()
-        if st_row:
-            student_id_param = row_get(st_row, "student_id")
-
     try:
         sql = f"""
         SELECT sfa.id AS assignment_id, s.id AS student_id, s.name AS student_name, s.enrollment,
@@ -11952,13 +11951,10 @@ def accountant_record_payment():
         JOIN fee_structures fs ON sfa.fee_structure_id = fs.id
         LEFT JOIN branches b ON s.branch_id = b.id
         LEFT JOIN fee_payments fp ON fp.assignment_id = sfa.id
-        WHERE (sfa.status IS NULL OR sfa.status != 'Paid')
+        WHERE (sfa.status IS NULL OR LOWER(sfa.status) NOT IN ('paid', 'completed'))
         """
         params = []
-        if student_id_param:
-            sql += f" AND sfa.student_id = {placeholder}"
-            params.append(student_id_param)
-        elif search_q:
+        if search_q:
             sql += f" AND (LOWER(s.name) LIKE {placeholder} OR LOWER(s.enrollment) LIKE {placeholder})"
             params.extend([f"%{search_q.lower()}%", f"%{search_q.lower()}%"])
 
@@ -11983,7 +11979,19 @@ def accountant_record_payment():
             row_dict["gross_amount"] = gross
             row_dict["net_amount"] = net
             row_dict["pending_amount"] = pending
-            processed_assignments.append(row_dict)
+
+            if pending > 0 or row_dict["assignment_id"] == selected_assignment_id:
+                processed_assignments.append(row_dict)
+
+        target_sid = student_id_param
+        if selected_assignment_id and not target_sid:
+            for a in processed_assignments:
+                if a["assignment_id"] == selected_assignment_id:
+                    target_sid = a["student_id"]
+                    break
+
+        if target_sid:
+            processed_assignments.sort(key=lambda x: (0 if x["student_id"] == target_sid else 1, x["student_name"], x["fee_name"]))
 
         return render_template(
             "accountant_record_payment.html",
