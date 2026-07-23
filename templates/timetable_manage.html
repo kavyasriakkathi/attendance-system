@@ -42,18 +42,27 @@
     </div>
 
     {% if preview_mode %}
-    <div class="card" style="background: rgba(15, 23, 42, 0.7); border: 2px solid #3b82f6; border-radius: 12px; padding: 20px; margin-bottom: 24px;">
-        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+    <div class="card" style="background: rgba(15, 23, 42, 0.85); border: 2px solid {% if validation_report and not validation_report.can_import %}#ef4444{% else %}#3b82f6{% endif %}; border-radius: 12px; padding: 20px; margin-bottom: 24px; box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; flex-wrap: wrap; gap: 12px;">
             <div>
-                <h2 style="margin: 0; font-size: 1.3rem; color: #fff;"><i class="fa-solid fa-eye" style="color: #3b82f6; margin-right: 8px;"></i> Timetable Setup Preview</h2>
-                <p style="margin: 4px 0 0 0; color: var(--text-secondary); font-size: 0.9rem;">Review extracted subjects, faculty assignments, and section setups before committing to the database.</p>
+                <h2 style="margin: 0; font-size: 1.3rem; color: #fff; display: flex; align-items: center; gap: 8px;">
+                    <i class="fa-solid fa-clipboard-check" style="color: {% if validation_report and not validation_report.can_import %}#ef4444{% else %}#3b82f6{% endif %};"></i> 
+                    Academic Setup Validation Report
+                </h2>
+                <p style="margin: 4px 0 0 0; color: var(--text-secondary); font-size: 0.9rem;">QA Architect Verification of staged timetable slots before database commitment.</p>
             </div>
-            <div style="display: flex; gap: 10px;">
+            <div style="display: flex; gap: 10px; align-items: center;">
                 <form method="post" style="margin: 0;">
                     <input type="hidden" name="action" value="confirm_import">
+                    {% if validation_report and not validation_report.can_import %}
+                    <button type="button" class="button" disabled style="background: #ef4444; color: white; font-weight: bold; padding: 10px 20px; opacity: 0.6; cursor: not-allowed;" title="Import blocked due to critical setup validation errors.">
+                        <i class="fa-solid fa-ban"></i> Import Blocked
+                    </button>
+                    {% else %}
                     <button type="submit" class="button" style="background: #10b981; color: white; font-weight: bold; padding: 10px 20px;">
                         <i class="fa-solid fa-check-circle"></i> Confirm Import
                     </button>
+                    {% endif %}
                 </form>
                 <form method="post" style="margin: 0;">
                     <input type="hidden" name="action" value="cancel_import">
@@ -64,26 +73,123 @@
             </div>
         </div>
 
-        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; margin-bottom: 20px;">
-            <div style="background: rgba(0,0,0,0.3); padding: 14px; border-radius: 8px; border-left: 4px solid #3b82f6;">
-                <span style="font-size: 0.8rem; color: var(--text-secondary); text-transform: uppercase;">Extracted Subjects</span>
-                <strong style="display: block; font-size: 1.4rem; color: #fff;">{{ unique_subjects|length }}</strong>
-            </div>
-            <div style="background: rgba(0,0,0,0.3); padding: 14px; border-radius: 8px; border-left: 4px solid #8b5cf6;">
-                <span style="font-size: 0.8rem; color: var(--text-secondary); text-transform: uppercase;">Faculty to Auto-Assign</span>
-                <strong style="display: block; font-size: 1.4rem; color: #fff;">{{ unique_teachers|length }}</strong>
-            </div>
-            <div style="background: rgba(0,0,0,0.3); padding: 14px; border-radius: 8px; border-left: 4px solid #ec4899;">
-                <span style="font-size: 0.8rem; color: var(--text-secondary); text-transform: uppercase;">Sections / Semesters</span>
-                <strong style="display: block; font-size: 1.4rem; color: #fff;">{{ unique_sections|length }}</strong>
-            </div>
-            <div style="background: rgba(0,0,0,0.3); padding: 14px; border-radius: 8px; border-left: 4px solid #10b981;">
-                <span style="font-size: 0.8rem; color: var(--text-secondary); text-transform: uppercase;">Total Slots Parsed</span>
-                <strong style="display: block; font-size: 1.4rem; color: #fff;">{{ preview_rows|length }}</strong>
+        {% if validation_report %}
+        <!-- Overall Gate Status Banner -->
+        <div style="padding: 12px 16px; border-radius: 8px; margin-bottom: 20px; display: flex; align-items: center; justify-content: space-between; background: {% if validation_report.can_import %}rgba(16, 185, 129, 0.15){% else %}rgba(239, 68, 68, 0.15){% endif %}; border: 1px solid {% if validation_report.can_import %}#10b981{% else %}#ef4444{% endif %};">
+            <div style="display: flex; align-items: center; gap: 10px;">
+                <i class="fa-solid {% if validation_report.can_import %}fa-circle-check{% else %}fa-triangle-exclamation{% endif %}" style="font-size: 1.4rem; color: {% if validation_report.can_import %}#10b981{% else %}#ef4444{% endif %};"></i>
+                <div>
+                    <strong style="color: #fff; font-size: 1rem;">
+                        STATUS: {% if validation_report.can_import %}<span style="color: #10b981;">PASS - Ready for Import</span>{% else %}<span style="color: #ef4444;">BLOCK IMPORT - Critical Errors Detected</span>{% endif %}
+                    </strong>
+                    <div style="font-size: 0.85rem; color: var(--text-secondary); margin-top: 2px;">
+                        Total slots scanned: {{ validation_report.pass.total_slots }} | 
+                        Critical Errors: {{ validation_report.block_import.critical_errors|length }} | 
+                        Warnings: {{ validation_report.warnings.missing_data|length + validation_report.warnings.conflicts|length }}
+                    </div>
+                </div>
             </div>
         </div>
 
-        <h3 style="font-size: 1rem; color: #fff; margin-bottom: 10px;">Extracted Academic Setup Preview:</h3>
+        <!-- 3-Column Validation Summary Panels: PASS, WARNINGS, BLOCK IMPORT -->
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; margin-bottom: 20px;">
+            
+            <!-- PASS PANEL -->
+            <div style="background: rgba(0, 0, 0, 0.3); border: 1px solid rgba(16, 185, 129, 0.4); border-top: 4px solid #10b981; border-radius: 8px; padding: 14px;">
+                <h4 style="margin: 0 0 10px 0; color: #10b981; font-size: 0.95rem; display: flex; align-items: center; gap: 6px;">
+                    <i class="fa-solid fa-circle-check"></i> PASS: DETECTED SETUP
+                </h4>
+                <div style="font-size: 0.85rem; color: #cbd5e1; display: flex; flex-direction: column; gap: 8px;">
+                    <div>
+                        <strong>Branches Detected ({{ validation_report.pass.branches_detected|length }}):</strong>
+                        <div style="display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px;">
+                            {% for b in validation_report.pass.branches_detected %}
+                            <span class="badge" style="background: rgba(59, 130, 246, 0.2); color: #60a5fa; border: 1px solid rgba(59, 130, 246, 0.4);">{{ b }}</span>
+                            {% else %}
+                            <em style="color: var(--text-secondary);">None</em>
+                            {% endfor %}
+                        </div>
+                    </div>
+                    <div>
+                        <strong>Sections Detected ({{ validation_report.pass.sections_detected|length }}):</strong>
+                        <div style="display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px;">
+                            {% for s in validation_report.pass.sections_detected %}
+                            <span class="badge" style="background: rgba(236, 72, 153, 0.2); color: #f472b6; border: 1px solid rgba(236, 72, 153, 0.4);">{{ s }}</span>
+                            {% else %}
+                            <em style="color: var(--text-secondary);">None</em>
+                            {% endfor %}
+                        </div>
+                    </div>
+                    <div>
+                        <strong>Subjects Detected ({{ validation_report.pass.subjects_detected|length }}):</strong>
+                        <div style="display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px;">
+                            {% for sub in validation_report.pass.subjects_detected[:6] %}
+                            <span class="badge" style="background: rgba(16, 185, 129, 0.2); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.4);">{{ sub }}</span>
+                            {% endfor %}
+                            {% if validation_report.pass.subjects_detected|length > 6 %}
+                            <span class="badge" style="background: rgba(255, 255, 255, 0.1);">+{{ validation_report.pass.subjects_detected|length - 6 }} more</span>
+                            {% endif %}
+                        </div>
+                    </div>
+                    <div>
+                        <strong>Faculty Detected ({{ validation_report.pass.faculty_detected|length }}):</strong>
+                        <div style="display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px;">
+                            {% for f in validation_report.pass.faculty_detected[:6] %}
+                            <span class="badge" style="background: rgba(139, 92, 246, 0.2); color: #c084fc; border: 1px solid rgba(139, 92, 246, 0.4);">{{ f }}</span>
+                            {% endfor %}
+                            {% if validation_report.pass.faculty_detected|length > 6 %}
+                            <span class="badge" style="background: rgba(255, 255, 255, 0.1);">+{{ validation_report.pass.faculty_detected|length - 6 }} more</span>
+                            {% endif %}
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- WARNINGS PANEL -->
+            <div style="background: rgba(0, 0, 0, 0.3); border: 1px solid rgba(245, 158, 11, 0.4); border-top: 4px solid #f59e0b; border-radius: 8px; padding: 14px;">
+                <h4 style="margin: 0 0 10px 0; color: #f59e0b; font-size: 0.95rem; display: flex; align-items: center; gap: 6px;">
+                    <i class="fa-solid fa-triangle-exclamation"></i> WARNINGS ({{ validation_report.warnings.missing_data|length + validation_report.warnings.conflicts|length }})
+                </h4>
+                <div style="font-size: 0.8rem; color: #cbd5e1; max-height: 160px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px;">
+                    {% if validation_report.warnings.missing_data or validation_report.warnings.conflicts %}
+                        {% for item in validation_report.warnings.missing_data %}
+                        <div style="padding: 4px 8px; background: rgba(245, 158, 11, 0.1); border-left: 3px solid #f59e0b; border-radius: 4px;">
+                            <strong style="color: #fbbf24;">[Missing Data]</strong> {{ item }}
+                        </div>
+                        {% endfor %}
+                        {% for item in validation_report.warnings.conflicts %}
+                        <div style="padding: 4px 8px; background: rgba(245, 158, 11, 0.1); border-left: 3px solid #f59e0b; border-radius: 4px;">
+                            <strong style="color: #fbbf24;">[Notice]</strong> {{ item }}
+                        </div>
+                        {% endfor %}
+                    {% else %}
+                        <div style="color: #10b981;"><i class="fa-solid fa-check"></i> No setup warnings detected.</div>
+                    {% endif %}
+                </div>
+            </div>
+
+            <!-- BLOCK IMPORT PANEL -->
+            <div style="background: rgba(0, 0, 0, 0.3); border: 1px solid rgba(239, 68, 68, 0.4); border-top: 4px solid #ef4444; border-radius: 8px; padding: 14px;">
+                <h4 style="margin: 0 0 10px 0; color: #ef4444; font-size: 0.95rem; display: flex; align-items: center; gap: 6px;">
+                    <i class="fa-solid fa-ban"></i> BLOCK IMPORT: CRITICAL ERRORS ({{ validation_report.block_import.critical_errors|length }})
+                </h4>
+                <div style="font-size: 0.8rem; color: #cbd5e1; max-height: 160px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px;">
+                    {% if validation_report.block_import.critical_errors %}
+                        {% for err in validation_report.block_import.critical_errors %}
+                        <div style="padding: 6px 8px; background: rgba(239, 68, 68, 0.15); border-left: 3px solid #ef4444; border-radius: 4px; color: #fca5a5;">
+                            <i class="fa-solid fa-circle-exclamation" style="margin-right: 4px;"></i> {{ err }}
+                        </div>
+                        {% endfor %}
+                    {% else %}
+                        <div style="color: #10b981;"><i class="fa-solid fa-shield-check"></i> Zero critical errors. Import permitted.</div>
+                    {% endif %}
+                </div>
+            </div>
+
+        </div>
+        {% endif %}
+
+        <h3 style="font-size: 1rem; color: #fff; margin-bottom: 10px;">Parsed Slots Preview:</h3>
         <div style="max-height: 250px; overflow-y: auto; border: 1px solid rgba(255,255,255,0.1); border-radius: 6px;">
             <table class="data-table" style="width: 100%; margin: 0; font-size: 0.85rem;">
                 <thead>
@@ -100,13 +206,13 @@
                 <tbody>
                     {% for row in preview_rows[:50] %}
                     <tr>
-                        <td><strong>{{ row.subject_name }}</strong></td>
-                        <td><span class="badge">{{ row.subject_name[:4]|upper }}</span></td>
+                        <td><strong>{{ row.subject_name or 'Unassigned' }}</strong></td>
+                        <td><span class="badge">{{ (row.subject_name or 'UNKN')[:4]|upper }}</span></td>
                         <td>{{ row.faculty_name or 'Unassigned' }}</td>
-                        <td>{{ row.branch }}</td>
-                        <td>{{ row.section }}</td>
-                        <td>Sem {{ row.semester }}</td>
-                        <td>{{ row.day }} {{ row.start_time }}-{{ row.end_time }}</td>
+                        <td>{{ row.branch or '-' }}</td>
+                        <td>{{ row.section or '-' }}</td>
+                        <td>Sem {{ row.semester or '-' }}</td>
+                        <td>{{ row.day or '-' }} {{ row.start_time or '' }}-{{ row.end_time or '' }}</td>
                     </tr>
                     {% endfor %}
                 </tbody>

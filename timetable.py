@@ -27,6 +27,11 @@ try:
 except Exception:
     pdfplumber = None
 
+try:
+    from academic_setup_validator import validate_staged_slots
+except Exception as val_imp_err:
+    validate_staged_slots = None
+
 logger = logging.getLogger("app.timetable")
 
 # Tunables for import batching and preview limits
@@ -4634,6 +4639,16 @@ def register_routes(app, db_getter=None):
                         flash("Staged timetable has no valid slots.", "error")
                         return redirect(url_for("timetable_manage"))
 
+                    # Academic Setup Validation Gate (Block Import if critical errors exist)
+                    if validate_staged_slots:
+                        val_report = validate_staged_slots(slots, db)
+                        if not val_report.get("can_import", True):
+                            critical_errs = val_report.get("block_import", {}).get("critical_errors", [])
+                            flash(f"Timetable import blocked due to {len(critical_errs)} critical validation error(s). Please review and correct the errors.", "error")
+                            for err in critical_errs[:5]:
+                                flash(f"• {err}", "error")
+                            return redirect(url_for("timetable_manage"))
+
                     # 1. Automatic Academic Setup (branches, subjects, teachers, assignments)
                     summary = auto_setup_academic_from_slots(db, slots)
 
@@ -4745,6 +4760,7 @@ def register_routes(app, db_getter=None):
         unique_subjects = []
         unique_teachers = []
         unique_sections = []
+        validation_report = None
         if os.path.exists(staged_path):
             try:
                 with open(staged_path, "r", encoding="utf-8") as f:
@@ -4786,6 +4802,8 @@ def register_routes(app, db_getter=None):
                     unique_subjects = list(subj_map.values())
                     unique_teachers = list(teach_map.values())
                     unique_sections = list(sec_map.values())
+                    if validate_staged_slots:
+                        validation_report = validate_staged_slots(staged_slots, db)
             except Exception as e:
                 logger.exception("Failed to load staged preview: %s", e)
         rows = []
@@ -4988,6 +5006,7 @@ def register_routes(app, db_getter=None):
             unique_subjects=unique_subjects,
             unique_teachers=unique_teachers,
             unique_sections=unique_sections,
+            validation_report=validation_report,
         )
 
     @app.route("/timetable/active")
