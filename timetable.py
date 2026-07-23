@@ -293,18 +293,43 @@ def _normalize_display_text(value: str) -> str:
     return re.sub(r"\s+", " ", " ".join(parts)).strip()
 
 
+_ACADEMIC_DEPARTMENT_PHRASES = {
+    "COMPUTER SCIENCE": "CSE",
+    "CIVIL": "CIVIL",
+    "ELECTRONICS & COMMUNICATION": "ECE",
+    "ELECTRONICS AND COMMUNICATION": "ECE",
+    "ELECTRICAL & ELECTRONICS": "EEE",
+    "ELECTRICAL AND ELECTRONICS": "EEE",
+    "MECHANICAL": "MECH",
+    "INFORMATION TECHNOLOGY": "IT",
+    "ARTIFICIAL INTELLIGENCE": "AIML",
+    "DATA SCIENCE": "DS",
+}
+
+
 def _normalize_timetable_branch_name(value: str, row_text: str = "") -> str:
-    text = _clean_text(value)
+    text = (_clean_text(value) + " " + _clean_text(row_text)).strip()
     if not text:
-        text = _clean_text(row_text)
-    if not text or _contains_blocked_timetable_text(text):
         return ""
-    text = re.sub(r"[‐‑‒–—―]", "-", text)
-    text = re.sub(r"[\s_/]+", " ", text).strip()
-    match = re.search(r"\b(CSM|CSE|ECE|EEE|IT|MECH|CIVIL|AIML|AIDS|DS)\b", text, flags=re.IGNORECASE)
+    text_clean = re.sub(r"[‐‑‒–—―]", "-", text)
+    text_clean = re.sub(r"[\s_/]+", " ", text_clean).strip()
+    
+    # 1. Search for explicit department acronym match first
+    match = re.search(r"\b(CSM|CSD|CSE|ECE|EEE|IT|MECH|CIVIL|AIML|AIDS|DS)\b", text_clean, flags=re.IGNORECASE)
     if match:
         return match.group(1).upper()
-    normalized = _normalize_academic_department_code(text.replace(" ", ""))
+
+    # 2. Search for department phrases
+    upper_text = text_clean.upper()
+    for phrase, code in _ACADEMIC_DEPARTMENT_PHRASES.items():
+        if phrase in upper_text:
+            return code
+
+    # 3. Fallback to blocked text check and department code normalization
+    if _contains_blocked_timetable_text(value) or _contains_blocked_timetable_text(row_text):
+        return ""
+
+    normalized = _normalize_academic_department_code(text_clean.replace(" ", ""))
     if normalized:
         return normalized
     return ""
@@ -1292,8 +1317,17 @@ def _append_jsonl(path: str, payload: Dict):
 
 def _section_branch_name(section_name: str, fallback: str = "") -> str:
     section_name = _clean_text(section_name)
-    if section_name and "-" in section_name:
-        return _clean_text(section_name.split("-", 1)[0])
+    if not section_name:
+        return _clean_text(fallback)
+    b_match = re.search(r"\b(CSM|CSD|CSE|ECE|EEE|IT|MECH|CIVIL|AIML|AIDS|DS)\b", section_name, flags=re.IGNORECASE)
+    if b_match:
+        return b_match.group(1).upper()
+    if "-" in section_name:
+        part = _clean_text(section_name.split("-", 1)[0])
+        b_match = re.search(r"\b(CSM|CSD|CSE|ECE|EEE|IT|MECH|CIVIL|AIML|AIDS|DS)\b", part, flags=re.IGNORECASE)
+        if b_match:
+            return b_match.group(1).upper()
+        return part
     return _clean_text(fallback)
 
 
@@ -1781,8 +1815,10 @@ def _pdf_normalize_section_value(dept: str, section: str) -> str:
     section = re.sub(r"[\s_]+", "-", _clean_text(section).upper())
     dept = re.sub(r"-+", "-", dept).strip("-")
     section = re.sub(r"-+", "-", section).strip("-")
-    if not dept or not section:
+    if not dept:
         return ""
+    if not section:
+        return dept
     return f"{dept}-{section}"
 
 

@@ -121,6 +121,16 @@
                         </div>
                     </div>
                     <div>
+                        <strong>Semesters Detected ({{ validation_report.pass.semesters_detected|length }}):</strong>
+                        <div style="display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px;">
+                            {% for sem in validation_report.pass.semesters_detected %}
+                            <span class="badge" style="background: rgba(245, 158, 11, 0.2); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.4);">Sem {{ sem }}</span>
+                            {% else %}
+                            <em style="color: var(--text-secondary);">None</em>
+                            {% endfor %}
+                        </div>
+                    </div>
+                    <div>
                         <strong>Subjects Detected ({{ validation_report.pass.subjects_detected|length }}):</strong>
                         <div style="display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px;">
                             {% for sub in validation_report.pass.subjects_detected[:6] %}

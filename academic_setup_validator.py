@@ -130,6 +130,7 @@ class AcademicSetupValidator:
         """
         branches: Set[str] = set()
         sections: Set[str] = set()
+        semesters: Set[str] = set()
         subjects: Set[str] = set()
         faculty_set: Set[str] = set()
 
@@ -181,6 +182,8 @@ class AcademicSetupValidator:
                 branches.add(branch)
             if section:
                 sections.add(f"{branch}-{section}" if branch and not section.startswith(branch) else section)
+            if semester:
+                semesters.add(str(semester))
             if subject:
                 subjects.add(subject)
             if faculty and not self._is_placeholder_faculty(faculty):
@@ -327,6 +330,7 @@ class AcademicSetupValidator:
             "pass": {
                 "branches_detected": sorted(list(branches)),
                 "sections_detected": sorted(list(sections)),
+                "semesters_detected": sorted(list(semesters)),
                 "subjects_detected": sorted(list(subjects)),
                 "faculty_detected": sorted(list(faculty_set)),
                 "total_slots": len(self.slots),
