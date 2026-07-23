@@ -1,3 +1,4 @@
+import os
 import requests
 import json
 import psycopg2
@@ -5,7 +6,7 @@ import psycopg2.extras
 from urllib.parse import urlparse
 
 RENDER_BASE_URL = "https://attendance-system-gi39.onrender.com"
-SEED_SCRIPT_URL = "postgresql://neondb_owner:npg_tlI7cGRBogs1@ep-withered-math-apo99psx-pooler.c-7.us-east-1.aws.neon.tech/neondb?sslmode=require"
+SEED_SCRIPT_URL = os.environ.get("DATABASE_URL", "")
 
 def mask_url(url_str):
     try:

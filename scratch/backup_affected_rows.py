@@ -1,8 +1,9 @@
+import os
 import psycopg2
 import json
 import sys
 
-DATABASE_URL = "postgresql://neondb_owner:npg_tlI7cGRBogs1@ep-withered-math-apo99psx-pooler.c-7.us-east-1.aws.neon.tech/neondb?sslmode=require"
+DATABASE_URL = os.environ.get("DATABASE_URL", "")
 BRANCH_ID = 16
 
 def run_backup():

@@ -9,7 +9,7 @@ from app import verify_database_schema, get_teacher_context, _ensure_teacher_sch
 from timetable import ensure_timetable_tables, auto_setup_academic_from_slots, import_slots_streaming, _is_postgres_db
 
 def test_postgres_academic_setup():
-    db_url = "postgresql://neondb_owner:npg_tlI7cGRBogs1@ep-withered-math-apo99psx-pooler.c-7.us-east-1.aws.neon.tech/neondb?sslmode=require"
+    db_url = os.environ.get("DATABASE_URL", "")
     print("Connecting to live Neon PostgreSQL database...")
     conn = psycopg2.connect(db_url, cursor_factory=RealDictCursor)
 

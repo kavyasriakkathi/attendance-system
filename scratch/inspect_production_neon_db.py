@@ -4,7 +4,7 @@ import psycopg2
 import psycopg2.extras
 import traceback
 
-PROD_DB_URL = "postgresql://neondb_owner:npg_tlI7cGRBogs1@ep-withered-math-apo99psx-pooler.c-7.us-east-1.aws.neon.tech/neondb?sslmode=require"
+PROD_DB_URL = os.environ.get("DATABASE_URL", "")
 
 def inspect_neon_production():
     print("=== CONNECTING TO PRODUCTION NEON POSTGRESQL DATABASE ===")
