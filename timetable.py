@@ -4532,6 +4532,14 @@ def register_routes(app, db_getter=None):
                     # 2. Import timetable entries into DB
                     import_info = import_slots_streaming(db, slots)
 
+                    # 3. Publish Announcement
+                    try:
+                        _db_execute(db, "INSERT INTO sys_announcements (title, content, target_audience, created_by) VALUES (?, ?, ?, ?)",
+                                    ("📅 Timetable Updated", f"A new timetable ({filename}) has been published. Please check your dashboard for the updated schedule.", "all", "Admin"))
+                        db.commit()
+                    except Exception as e:
+                        print(f"[Timetable Announcement ERROR] {repr(e)}")
+
                     # Clean staged file
                     try:
                         os.remove(staged_path)

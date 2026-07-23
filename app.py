@@ -4352,6 +4352,10 @@ def teacher_dashboard():
             global_active_slot = None
             upcoming_classes = []
 
+        # Notifications & Announcements
+        announcements = get_relevant_announcements(db, "teacher", branch_id=current_branch_id, limit=5)
+        notifications = get_unread_notifications(db, teacher_id, "teacher", limit=5)
+
         return render_template(
             "teacher_dashboard.html",
             teacher=teacher,
@@ -4362,6 +4366,8 @@ def teacher_dashboard():
             active_slot=active_slot,
             global_active_slot=global_active_slot,
             upcoming_classes=upcoming_classes,
+            announcements=announcements,
+            notifications=notifications,
         )
     except Exception as e:
         print(f"[teacher_dashboard] ERROR: {repr(e)}")
@@ -4754,8 +4760,26 @@ def teacher_mark_attendance():
                             )
                         if str(student_id).isdigit():
                             saved_ids.append(int(student_id))
+                            
+                            # Absent alert
+                            if status == "Absent":
+                                create_parent_notification(
+                                    db,
+                                    int(student_id),
+                                    f"⚠️ Absence Alert - {selected_date}",
+                                    f"Your child was marked absent in {subject_name} for Period {period}.",
+                                    notif_type="attendance_absent"
+                                )
                     db.commit()
                     _log_audit(db, "MODIFIED_ATTENDANCE", entity="attendance", detail=f"branch={current_branch_id} section={current_section} period={period} date={selected_date}")
+                    
+                    # Run alerts for saved students
+                    for sid in saved_ids:
+                        try:
+                            generate_parent_alerts_for_student(db, sid)
+                        except Exception as alert_err:
+                            print(f"[teacher_mark_attendance alert ERROR]: {repr(alert_err)}")
+
                     if invalid_students:
                         flash(f"Skipped {invalid_students} invalid student(s).", "warning")
                     if blocked_overwrites:
@@ -4939,8 +4963,12 @@ def student_dashboard():
             student_qr_data_uri = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
         except: pass
 
+        # Fetch notifications and announcements
+        announcements = get_relevant_announcements(db, "student", branch_id=row_get(student, "branch_id"), section=row_get(student, "section"), semester=row_get(student, "semester"), limit=5)
+        notifications = get_unread_notifications(db, student_id, "student", limit=5)
+
         db.close()
-        return render_template("student_dashboard.html", student=student, attendance_records=attendance_records, total_classes=total, present_count=present, absent_count=absent, percentage=percentage, subjects=subjects, subject_chart_labels=subject_chart_labels, subject_chart_percentages=subject_chart_percentages, selected_subject_id=selected_subject_id, student_qr_data_uri=student_qr_data_uri)
+        return render_template("student_dashboard.html", student=student, attendance_records=attendance_records, total_classes=total, present_count=present, absent_count=absent, percentage=percentage, subjects=subjects, subject_chart_labels=subject_chart_labels, subject_chart_percentages=subject_chart_percentages, selected_subject_id=selected_subject_id, student_qr_data_uri=student_qr_data_uri, announcements=announcements, notifications=notifications)
     except Exception as e:
         print(f"[student_dashboard] ERROR: {repr(e)}")
         if db:
@@ -8102,6 +8130,10 @@ def teacher_enter_marks():
                             )
                 db.commit()
                 _log_audit(db, "ENTERED_MARKS", entity="marks", detail=f"subject_id={sub_id} exam_id={ex_id} branch_id={selected_branch_id}")
+                for idx, st_id_str in enumerate(student_ids):
+                    st_id = _coerce_int(st_id_str)
+                    if st_id:
+                        generate_parent_alerts_for_student(db, st_id)
                 flash("University examination marks saved successfully.", "success")
 
         students = []
@@ -8758,6 +8790,86 @@ def admin_results():
             except: pass
 
 
+def _ensure_notification_schema(db):
+    """Ensure unified notification and announcement tables exist safely."""
+    is_pg = str(app.config.get("DATABASE", "")).startswith("postgres")
+    try:
+        if is_pg:
+            db.execute("""
+            CREATE TABLE IF NOT EXISTS sys_notifications (
+                id SERIAL PRIMARY KEY,
+                title TEXT NOT NULL,
+                message TEXT NOT NULL,
+                type TEXT DEFAULT 'general',
+                priority TEXT DEFAULT 'normal',
+                created_by TEXT DEFAULT 'system',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+            db.execute("""
+            CREATE TABLE IF NOT EXISTS sys_notification_recipients (
+                id SERIAL PRIMARY KEY,
+                notification_id INTEGER NOT NULL REFERENCES sys_notifications(id) ON DELETE CASCADE,
+                recipient_id INTEGER NOT NULL,
+                recipient_role TEXT NOT NULL,
+                is_read INTEGER DEFAULT 0,
+                read_at TIMESTAMP
+            );
+            """)
+            db.execute("""
+            CREATE TABLE IF NOT EXISTS sys_announcements (
+                id SERIAL PRIMARY KEY,
+                title TEXT NOT NULL,
+                content TEXT NOT NULL,
+                target_audience TEXT DEFAULT 'all',
+                branch_id INTEGER,
+                section TEXT,
+                semester TEXT,
+                created_by TEXT DEFAULT 'Admin',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+        else:
+            db.execute("""
+            CREATE TABLE IF NOT EXISTS sys_notifications (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                message TEXT NOT NULL,
+                type TEXT DEFAULT 'general',
+                priority TEXT DEFAULT 'normal',
+                created_by TEXT DEFAULT 'system',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+            db.execute("""
+            CREATE TABLE IF NOT EXISTS sys_notification_recipients (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                notification_id INTEGER NOT NULL,
+                recipient_id INTEGER NOT NULL,
+                recipient_role TEXT NOT NULL,
+                is_read INTEGER DEFAULT 0,
+                read_at TIMESTAMP,
+                FOREIGN KEY(notification_id) REFERENCES sys_notifications(id) ON DELETE CASCADE
+            );
+            """)
+            db.execute("""
+            CREATE TABLE IF NOT EXISTS sys_announcements (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                content TEXT NOT NULL,
+                target_audience TEXT DEFAULT 'all',
+                branch_id INTEGER,
+                section TEXT,
+                semester TEXT,
+                created_by TEXT DEFAULT 'Admin',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+        db.commit()
+    except Exception as e:
+        print(f"[_ensure_notification_schema ERROR]: {repr(e)}")
+
+
 def _ensure_parent_schema(db):
     """Ensure parent module tables exist safely across SQLite and PostgreSQL."""
     placeholder = get_placeholder()
@@ -8848,27 +8960,119 @@ def _ensure_parent_schema(db):
         print(f"[_ensure_parent_schema WARNING]: {repr(e)}")
 
 
-def create_parent_notification(db, student_id, title, message, notif_type="general", parent_id=None):
-    """Helper to create notification for linked parent account."""
-    _ensure_parent_schema(db)
+def send_sys_notification(db, recipients, title, message, notif_type="general", priority="normal", created_by="system"):
+    """
+    Unified method to send a notification to multiple recipients.
+    recipients is a list of tuples: (recipient_id, recipient_role)
+    """
+    if not recipients:
+        return
+    _ensure_notification_schema(db)
     placeholder = get_placeholder()
+    
+    try:
+        # Insert notification body
+        cur = db.execute(
+            f"INSERT INTO sys_notifications (title, message, type, priority, created_by) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})",
+            (title, message, notif_type, priority, created_by)
+        )
+        if hasattr(cur, "lastrowid") and cur.lastrowid:
+            notif_id = cur.lastrowid
+        else:
+            # Fallback for postgres without returning if lastrowid is unsupported
+            row = db.execute(f"SELECT id FROM sys_notifications WHERE title = {placeholder} AND message = {placeholder} ORDER BY id DESC LIMIT 1", (title, message)).fetchone()
+            notif_id = row_get(row, "id")
+            
+        # Insert recipients
+        for rec_id, rec_role in set(recipients):
+            # prevent duplicates
+            db.execute(
+                f"INSERT INTO sys_notification_recipients (notification_id, recipient_id, recipient_role) VALUES ({placeholder}, {placeholder}, {placeholder})",
+                (notif_id, rec_id, rec_role)
+            )
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        print(f"[send_sys_notification ERROR]: {repr(e)}")
 
-    # Avoid inserting identical unread notification
+
+def get_unread_notifications(db, user_id, role, limit=5):
+    placeholder = get_placeholder()
+    return db.execute(
+        f"""
+        SELECT n.*, r.is_read, r.id as recipient_entry_id 
+        FROM sys_notifications n
+        JOIN sys_notification_recipients r ON n.id = r.notification_id
+        WHERE r.recipient_id = {placeholder} AND r.recipient_role = {placeholder} AND r.is_read = 0
+        ORDER BY n.created_at DESC
+        LIMIT {limit}
+        """,
+        (user_id, role)
+    ).fetchall()
+
+
+def publish_announcement(db, title, content, target_audience="all", branch_id=None, section=None, semester=None, created_by="Admin"):
+    _ensure_notification_schema(db)
+    placeholder = get_placeholder()
+    try:
+        db.execute(
+            f"INSERT INTO sys_announcements (title, content, target_audience, branch_id, section, semester, created_by) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})",
+            (title, content, target_audience, branch_id, section, semester, created_by)
+        )
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        print(f"[publish_announcement ERROR]: {repr(e)}")
+
+
+def get_relevant_announcements(db, role, branch_id=None, section=None, semester=None, limit=5):
+    placeholder = get_placeholder()
+    query = f"SELECT * FROM sys_announcements WHERE target_audience IN ('all', {placeholder})"
+    params = [role]
+    
+    if branch_id:
+        query += f" AND (branch_id IS NULL OR branch_id = {placeholder})"
+        params.append(branch_id)
+    if section:
+        query += f" AND (section IS NULL OR section = '' OR section = {placeholder})"
+        params.append(section)
+    if semester:
+        query += f" AND (semester IS NULL OR semester = '' OR semester = {placeholder})"
+        params.append(semester)
+        
+    query += f" ORDER BY created_at DESC LIMIT {limit}"
+    return db.execute(query, tuple(params)).fetchall()
+
+
+def create_parent_notification(db, student_id, title, message, notif_type="general", parent_id=None):
+    """Helper to create notification for linked parent account. Now wraps send_sys_notification."""
+    placeholder = get_placeholder()
+    # Prevent identical notifications from being sent multiple times
     existing = db.execute(
-        f"SELECT id FROM parent_notifications WHERE student_id = {placeholder} AND title = {placeholder} AND is_read = 0",
-        (student_id, title),
+        f"""
+        SELECT 1 FROM sys_notifications n
+        JOIN sys_notification_recipients r ON n.id = r.notification_id
+        WHERE r.recipient_id = {placeholder} AND r.recipient_role = 'student' AND n.title = {placeholder}
+        """,
+        (student_id, title)
     ).fetchone()
     if existing:
         return
 
-    db.execute(
-        f"INSERT INTO parent_notifications (parent_id, student_id, title, message, type, is_read) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, 0)",
-        (parent_id, student_id, title, message, notif_type),
-    )
-    try:
-        db.commit()
-    except Exception:
-        pass
+    # We want to send this to the student and to the parent
+    recipients = [(student_id, "student")]
+    if parent_id:
+        recipients.append((parent_id, "parent"))
+    else:
+        # Find parent for this student if any
+        try:
+            parent_row = db.execute(f"SELECT id FROM parents WHERE student_id = {placeholder}", (student_id,)).fetchone()
+            if parent_row:
+                recipients.append((row_get(parent_row, "id"), "parent"))
+        except Exception:
+            pass
+            
+    send_sys_notification(db, recipients, title, message, notif_type=notif_type, priority="high")
 
 
 def generate_parent_alerts_for_student(db, student_id):
@@ -8890,6 +9094,14 @@ def generate_parent_alerts_for_student(db, student_id):
             f"Attendance Alert: Overall attendance for {student['name']} ({enrollment}) is {overall_att}%, which is below the required 75% threshold.",
             notif_type="attendance_shortage",
         )
+    elif overall_att >= 90.0:
+        create_parent_notification(
+            db,
+            student_id,
+            "🌟 Excellent Attendance",
+            f"Attendance Alert: Overall attendance for {student['name']} ({enrollment}) has reached {overall_att}%. Keep up the good work!",
+            notif_type="attendance_excellent",
+        )
 
     for sub in context.get("shortage_subjects", []):
         create_parent_notification(
@@ -8910,6 +9122,16 @@ def generate_parent_alerts_for_student(db, student_id):
                 f"Academic Update: University exam results for {sem_key} have been published. SGPA: {sem_info['sgpa']}, Result: {sem_info['status']}.",
                 notif_type="results_published",
             )
+
+    cgpa = context.get("cgpa", 0.0)
+    if cgpa > 0:
+        create_parent_notification(
+            db,
+            student_id,
+            f"📈 Cumulative Performance (CGPA: {cgpa})",
+            f"Academic Update: The current Cumulative Grade Point Average (CGPA) for {student['name']} is now {cgpa}.",
+            notif_type="cgpa_updated",
+        )
 
 
 def parent_login_required(f):
@@ -9064,11 +9286,21 @@ def parent_register():
                 return render_template("parent_register.html")
 
             hashed_pw = generate_password_hash(password)
-            db.execute(
+            cur = db.execute(
                 f"INSERT INTO parents (name, username, password, phone, email, student_id) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})",
                 (name, username, hashed_pw, phone, email, student_id),
             )
+            
+            if hasattr(cur, "lastrowid") and cur.lastrowid:
+                parent_id = cur.lastrowid
+            else:
+                row = db.execute(f"SELECT id FROM parents WHERE username = {placeholder}", (username,)).fetchone()
+                parent_id = row_get(row, "id")
+
             db.commit()
+
+            # Welcome Notification
+            create_parent_notification(db, student_id, "🤝 Parent Account Linked", f"Welcome {name}! Your parent account has been successfully linked to {row_get(student, 'name')}.", notif_type="parent_linked", parent_id=parent_id)
 
             flash(f"Parent account registered successfully! Linked with student {row_get(student, 'name')}. Please log in.", "success")
             return redirect(url_for("parent_login"))
@@ -9105,14 +9337,14 @@ def parent_dashboard():
             flash("Linked student record not found.", "error")
             return redirect(url_for("parent_login"))
 
-        notifications = db.execute(
-            f"SELECT * FROM parent_notifications WHERE student_id = {placeholder} ORDER BY id DESC LIMIT 5",
-            (student_id,),
-        ).fetchall()
+        notifications = get_unread_notifications(db, student_id, "parent", limit=5)
 
-        announcements = db.execute(
-            "SELECT * FROM college_announcements WHERE target_audience IN ('all', 'parents') ORDER BY id DESC LIMIT 5"
-        ).fetchall()
+        student_info = context.get("student", {})
+        branch_id = student_info.get("branch_id")
+        section = student_info.get("section")
+        semester = student_info.get("semester")
+
+        announcements = get_relevant_announcements(db, "parent", branch_id=branch_id, section=section, semester=semester, limit=5)
 
         return render_template(
             "parent_dashboard.html",
@@ -9191,7 +9423,7 @@ def parent_notifications():
 
         if request.method == "POST":
             db.execute(
-                f"UPDATE parent_notifications SET is_read = 1 WHERE student_id = {placeholder}",
+                f"UPDATE sys_notification_recipients SET is_read = 1 WHERE recipient_id = {placeholder} AND recipient_role = 'parent'",
                 (student_id,),
             )
             db.commit()
@@ -9200,13 +9432,24 @@ def parent_notifications():
         generate_parent_alerts_for_student(db, student_id)
 
         notifications = db.execute(
-            f"SELECT * FROM parent_notifications WHERE student_id = {placeholder} ORDER BY id DESC",
+            f"""
+            SELECT n.*, r.is_read, r.id as recipient_entry_id 
+            FROM sys_notifications n
+            JOIN sys_notification_recipients r ON n.id = r.notification_id
+            WHERE r.recipient_id = {placeholder} AND r.recipient_role = 'parent'
+            ORDER BY n.created_at DESC
+            """,
             (student_id,),
         ).fetchall()
 
-        announcements = db.execute(
-            "SELECT * FROM college_announcements WHERE target_audience IN ('all', 'parents') ORDER BY id DESC"
-        ).fetchall()
+        # Get context to find branch, section, semester
+        context = get_student_academic_profile_context(db, student_id)
+        student_info = context.get("student", {}) if context else {}
+        branch_id = student_info.get("branch_id")
+        section = student_info.get("section")
+        semester = student_info.get("semester")
+
+        announcements = get_relevant_announcements(db, "parent", branch_id=branch_id, section=section, semester=semester, limit=50)
 
         return render_template(
             "parent_notifications.html",
@@ -9241,19 +9484,19 @@ def admin_announcements():
             title = (request.form.get("title", "") or "").strip()
             content = (request.form.get("content", "") or "").strip()
             target = (request.form.get("target_audience", "") or "all").strip()
+            branch_id = _coerce_int(request.form.get("branch_id"))
+            section = (request.form.get("section", "") or "").strip()
+            semester = (request.form.get("semester", "") or "").strip()
 
             if not title or not content:
                 flash("Please enter title and announcement content.", "error")
             else:
-                db.execute(
-                    f"INSERT INTO college_announcements (title, content, target_audience, created_by) VALUES ({placeholder}, {placeholder}, {placeholder}, 'Admin')",
-                    (title, content, target),
-                )
-                db.commit()
-                flash("College announcement published successfully to Parent Portal!", "success")
+                publish_announcement(db, title, content, target_audience=target, branch_id=branch_id, section=section, semester=semester, created_by=session.get("username", "Admin"))
+                flash("Announcement published successfully!", "success")
 
-        announcements = db.execute("SELECT * FROM college_announcements ORDER BY id DESC").fetchall()
-        return render_template("admin_announcements.html", announcements=announcements)
+        announcements = db.execute("SELECT a.*, b.name AS branch_name FROM sys_announcements a LEFT JOIN branches b ON a.branch_id = b.id ORDER BY a.created_at DESC LIMIT 50").fetchall()
+        branches = db.execute("SELECT id, name FROM branches ORDER BY name").fetchall()
+        return render_template("admin_announcements.html", announcements=announcements, branches=branches)
     except Exception as e:
         print(f"[admin_announcements ERROR]: {repr(e)}")
         flash("Error publishing announcement.", "error")
@@ -9823,6 +10066,13 @@ def promote_single_student(db, student_id, target_semester=None, target_academic
     try:
         db.commit()
         _log_audit(db, "PROMOTED_STUDENT", entity="students", entity_id=student_id, detail=f"from={from_sem} to={to_sem} status={status}")
+        
+        # Send Promotion Notification
+        if "Detained" in status:
+            create_parent_notification(db, student_id, "⚠️ Student Detained", f"Academic Update: {student['name']} has been detained in {from_sem} due to {status}.", notif_type="promotion")
+        else:
+            create_parent_notification(db, student_id, f"🎉 Promotion: {to_sem}", f"Academic Update: {student['name']} has been promoted to {to_sem} (Academic Year: {to_ay}). Status: {status}.", notif_type="promotion")
+
     except Exception:
         pass
 
@@ -10642,6 +10892,14 @@ def admin_fee_assign():
                 )
                 db.commit()
                 flash("Fee assigned to student successfully!", "success")
+                
+                # Notification
+                fee_info = db.execute(f"SELECT fee_name, amount FROM fee_structures WHERE id = {placeholder}", (fee_structure_id,)).fetchone()
+                fee_name = row_get(fee_info, "fee_name") if fee_info else "Fee"
+                amount = custom_amount_val if custom_amount_val is not None else (row_get(fee_info, "amount") if fee_info else 0)
+                amount = amount - discount_amount
+                
+                create_parent_notification(db, student_id, f"💰 New Fee Assigned: {fee_name}", f"A new fee of ₹{amount} has been assigned. Due date: {due_date or 'Not specified'}.", notif_type="fee_assigned")
             except Exception as e:
                 print(f"[admin_fee_assign single ERROR]: {repr(e)}")
                 flash("Fee already assigned to this student or error occurred.", "warning")
@@ -10666,6 +10924,10 @@ def admin_fee_assign():
             students = db.execute(sql, tuple(params)).fetchall()
             assigned_count = 0
             skipped_count = 0
+            
+            fee_info = db.execute(f"SELECT fee_name, amount FROM fee_structures WHERE id = {placeholder}", (fee_structure_id,)).fetchone()
+            fee_name = row_get(fee_info, "fee_name") if fee_info else "Fee"
+            amount = row_get(fee_info, "amount") if fee_info else 0
 
             for st in students:
                 sid = row_get(st, "id")
@@ -10675,6 +10937,7 @@ def admin_fee_assign():
                         (sid, fee_structure_id)
                     )
                     assigned_count += 1
+                    create_parent_notification(db, sid, f"💰 New Fee Assigned: {fee_name}", f"A new fee of ₹{amount} has been assigned.", notif_type="fee_assigned")
                 except Exception:
                     skipped_count += 1
 
@@ -10766,6 +11029,9 @@ def admin_record_payment():
             _recalculate_assignment_status(db, assignment_id)
             db.commit()
             _log_audit(db, "COLLECTED_FEES", entity="fee_payments", entity_id=payment_id, detail=f"amount={amount_paid} receipt={receipt_number}")
+            
+            # Fee payment notification
+            create_parent_notification(db, student_id, f"✅ Payment Received: {receipt_number}", f"A payment of ₹{amount_paid:,.2f} has been successfully recorded. Receipt Number: {receipt_number}.", notif_type="fee_payment")
 
             flash(f"Payment of ₹{amount_paid:,.2f} recorded successfully! Receipt #: {receipt_number}", "success")
             return redirect(url_for("fee_receipt", payment_id=payment_id))
