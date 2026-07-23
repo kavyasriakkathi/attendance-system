@@ -37,7 +37,7 @@ def test_teacher_management_and_assignment_flow(tmp_path):
             follow_redirects=True,
         )
         assert create_resp.status_code == 200
-        assert b"Teacher created" in create_resp.data or b"Teacher created." in create_resp.data
+        assert b"Teacher created" in create_resp.data or b"Teacher account created" in create_resp.data or b"Teacher created." in create_resp.data
 
         assign_resp = client.post(
             "/assign-teachers",

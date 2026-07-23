@@ -331,10 +331,13 @@ def is_valid_email(email: str) -> bool:
     return re.match(pattern, email) is not None
 
 
-def is_mail_configured():
-    username = app.config.get("MAIL_USERNAME")
-    password = app.config.get("MAIL_PASSWORD")
-    return bool(username and username.strip() and password and password.strip())
+def is_mail_configured(target_app=None):
+    if target_app is None:
+        target_app = app
+    cfg = getattr(target_app, "config", {}) if target_app else {}
+    username = cfg.get("MAIL_USERNAME") or os.environ.get("MAIL_USERNAME")
+    password = cfg.get("MAIL_PASSWORD") or os.environ.get("MAIL_PASSWORD")
+    return bool(username and str(username).strip() and password and str(password).strip())
 
 
 def _coerce_int(v):
@@ -1582,7 +1585,7 @@ def get_teacher_context(db=None):
 def send_email(subject, recipient, body, attachments=None):
     # If credentials are not configured, allow a local dev fallback when explicitly enabled
     dev_fallback_enabled = os.environ.get("MAIL_DEV_FALLBACK", "False").lower() in ("1", "true", "yes")
-    if not is_mail_configured():
+    if not is_mail_configured(app):
         if not (dev_fallback_enabled or app.config.get("MAIL_SERVER") in ("localhost", "127.0.0.1")):
             print("Email not sent: mail credentials not configured.")
             return False
@@ -1592,7 +1595,7 @@ def send_email(subject, recipient, body, attachments=None):
         if not recipient or not str(recipient).strip():
             print("Email not sent: recipient is empty.")
             return False
-        from_addr = (app.config.get("MAIL_FROM") or app.config.get("MAIL_USERNAME") or "").strip()
+        from_addr = (app.config.get("MAIL_FROM") or app.config.get("MAIL_USERNAME") or os.environ.get("MAIL_FROM") or os.environ.get("MAIL_USERNAME") or "").strip()
         if not from_addr:
             print("Email not sent: MAIL_FROM/MAIL_USERNAME is empty.")
             return False
@@ -1625,9 +1628,10 @@ def send_email(subject, recipient, body, attachments=None):
 
     def _try_send(host_to_use: str) -> None:
         context = ssl.create_default_context()
-        if is_mail_configured():
-            username = app.config.get("MAIL_USERNAME")
-            password = app.config.get("MAIL_PASSWORD")
+        if is_mail_configured(app):
+            username = (app.config.get("MAIL_USERNAME") or os.environ.get("MAIL_USERNAME") or "").strip()
+            raw_pwd = (app.config.get("MAIL_PASSWORD") or os.environ.get("MAIL_PASSWORD") or "").strip()
+            password = raw_pwd.replace(" ", "")
             if use_tls:
                 with smtplib.SMTP(host_to_use, smtp_port, timeout=10) as server:
                     if debug:
@@ -1653,6 +1657,7 @@ def send_email(subject, recipient, body, attachments=None):
                 server.send_message(msg)
 
     attempts = 3
+    last_err = None
     for attempt in range(1, attempts + 1):
         try:
             # 1) Normal simple connection (beginner-friendly)
@@ -1662,12 +1667,12 @@ def send_email(subject, recipient, body, attachments=None):
 
         except smtplib.SMTPAuthenticationError as e:
             print(f"Attempt {attempt} - SMTP authentication failed: {repr(e)}")
-            return False
+            raise
 
         except OSError as e:
+            last_err = e
             print(f"Attempt {attempt} - OSError when sending email to {recipient}: {repr(e)}")
             if getattr(e, "errno", None) == 101:
-                # 2) Retry once using IPv4 A-record (avoids common IPv6 routing issues)
                 try:
                     ipv4 = socket.gethostbyname(smtp_host)
                     print(f"Retrying with IPv4 address: {smtp_host} -> {ipv4}")
@@ -1676,23 +1681,46 @@ def send_email(subject, recipient, body, attachments=None):
                     return True
                 except Exception as retry_err:
                     print(f"IPv4 retry failed: {repr(retry_err)}")
+            if attempt >= attempts:
+                raise
 
         except Exception as e:
+            last_err = e
             print(f"Attempt {attempt} - Failed to send email to {recipient}: {repr(e)}")
 
         if attempt < attempts:
-            time.sleep(2)
+            time.sleep(1)
             continue
+        if last_err:
+            raise last_err
         return False
 
 
 def safe_send_email(subject: str, recipient: str, body: str, attachments=None) -> bool:
     """Wrapper around send_email() that guarantees no exception escapes."""
     try:
-        return bool(send_email(subject=subject, recipient=recipient, body=body, attachments=attachments))
+        return send_email(subject, recipient, body, attachments=attachments)
     except Exception as e:
-        print(f"safe_send_email: unexpected error: {repr(e)}")
+        print(f"[safe_send_email ERROR]: {repr(e)}")
         return False
+
+
+def send_email_gmail(subject: str, recipient: str, body: str, attachments=None, debug=False):
+    """Legacy helper function returning (success: bool, error: str/None)."""
+    try:
+        socket.create_connection((app.config.get("MAIL_SERVER", "smtp.gmail.com"), int(app.config.get("MAIL_PORT", 587))), timeout=5)
+    except OSError as oe:
+        return False, f"No internet / network unreachable: {oe}"
+
+    try:
+        ok = send_email(subject, recipient, body, attachments=attachments)
+        return ok, None if ok else "Email send failed"
+    except smtplib.SMTPAuthenticationError as auth_err:
+        return False, f"SMTP authentication failed: {auth_err}"
+    except OSError as oe:
+        return False, f"No internet / network error: {oe}"
+    except Exception as exc:
+        return False, str(exc)
 
 
 def get_reset_serializer():
@@ -1766,7 +1794,34 @@ def notify_low_attendance(db, student_ids):
                     "percentage": row["percentage"],
                 })
 
-    return emailed_students
+def _ensure_database_indexes(db):
+    try:
+        indexes = [
+            "CREATE INDEX IF NOT EXISTS idx_sfa_student_id ON student_fee_assignments(student_id)",
+            "CREATE INDEX IF NOT EXISTS idx_sfa_fee_structure ON student_fee_assignments(fee_structure_id)",
+            "CREATE INDEX IF NOT EXISTS idx_fp_assignment_id ON fee_payments(assignment_id)",
+            "CREATE INDEX IF NOT EXISTS idx_fp_student_id ON fee_payments(student_id)",
+            "CREATE INDEX IF NOT EXISTS idx_attendance_student_date ON attendance(student_id, date)",
+            "CREATE INDEX IF NOT EXISTS idx_attendance_subject ON attendance(subject_id)",
+            "CREATE INDEX IF NOT EXISTS idx_marks_student_subject ON marks(student_id, subject_id)",
+            "CREATE INDEX IF NOT EXISTS idx_timetable_branch_day ON timetable_entries(branch_id, day)",
+            "CREATE INDEX IF NOT EXISTS idx_tsa_teacher_id ON teacher_subject_assignments(teacher_id)",
+            "CREATE INDEX IF NOT EXISTS idx_tsa_branch_id ON teacher_subject_assignments(branch_id)",
+            "CREATE INDEX IF NOT EXISTS idx_students_branch ON students(branch_id)",
+            "CREATE INDEX IF NOT EXISTS idx_students_enrollment ON students(enrollment)",
+            "CREATE INDEX IF NOT EXISTS idx_users_username ON users(username)",
+        ]
+        for idx_sql in indexes:
+            try:
+                db.execute(idx_sql)
+            except Exception:
+                pass
+        try:
+            db.commit()
+        except Exception:
+            pass
+    except Exception as e:
+        print(f"[_ensure_database_indexes warning]: {repr(e)}")
 
 
 def init_db(db=None):
@@ -1975,9 +2030,13 @@ def init_db(db=None):
 
     _ensure_subject_alias_table(db)
     _ensure_timetable_entry_text_columns(db)
-    _ensure_attendance_schema(db)
-    _ensure_results_schema(db)
-    _ensure_security_schema(db)
+    if "_ensure_attendance_schema" in globals():
+        _ensure_attendance_schema(db)
+    if "_ensure_results_schema" in globals():
+        _ensure_results_schema(db)
+    if "_ensure_security_schema" in globals():
+        _ensure_security_schema(db)
+    _ensure_database_indexes(db)
 
     # ✅ Admin check
     admin = db.execute(
@@ -3119,7 +3178,7 @@ def assign_teachers():
                 if section: msg += f", Section: {section}"
                 if semester: msg += f", Semester: {semester}"
                 
-                send_sys_notification(db, "New Subject Assignment", msg, recipients=[{"id": int(teacher_id), "role": "teacher"}], type="general")
+                send_sys_notification(db, [{"id": int(teacher_id), "role": "teacher"}], "New Subject Assignment", msg, notif_type="general")
 
                 flash("Assignment saved.", "success")
 
@@ -3130,13 +3189,22 @@ def assign_teachers():
             "SELECT tsa.id, tsa.teacher_id, tsa.subject_id, tsa.branch_id, tsa.section, tsa.semester, tsa.academic_year, t.name AS teacher_name, s.name AS subject_name, b.name AS branch_name FROM teacher_subject_assignments tsa JOIN teachers t ON t.id = tsa.teacher_id JOIN subjects s ON s.id = tsa.subject_id JOIN branches b ON b.id = tsa.branch_id ORDER BY t.name, s.name, b.name"
         ).fetchall()
 
-        return render_template(
-            "assign_teachers.html",
-            teachers=teachers,
-            subjects=subjects,
-            branches=branches,
-            assignments=assignments,
-        )
+        try:
+            return render_template(
+                "assign_teachers.html",
+                teachers=teachers,
+                subjects=subjects,
+                branches=branches,
+                assignments=assignments,
+            )
+        except Exception:
+            return render_template(
+                "admin_workload.html",
+                teachers=teachers,
+                subjects=subjects,
+                branches=branches,
+                assignments=assignments,
+            )
     finally:
         if db is not None:
             try:
@@ -5005,6 +5073,12 @@ def student_dashboard():
 @app.route("/student_dashboard/<int:student_id>")
 @login_required
 def student_dashboard_by_id(student_id):
+    user_role = session.get("role")
+    logged_student_id = session.get("student_id")
+    if user_role == "student" and logged_student_id and int(logged_student_id) != int(student_id):
+        flash("Access denied: You can only view your own student dashboard.", "danger")
+        return redirect(url_for("student_dashboard"))
+
     db = get_db()
     placeholder = get_placeholder()
     student = db.execute(
@@ -8999,15 +9073,24 @@ def _ensure_parent_schema(db):
 def send_sys_notification(db, recipients, title, message, notif_type="general", priority="normal", created_by="system"):
     """
     Unified method to send a notification to multiple recipients.
-    recipients is a list of tuples: (recipient_id, recipient_role)
+    recipients can be a list of tuples: (recipient_id, recipient_role) or dicts.
     """
     if not recipients:
         return
     _ensure_notification_schema(db)
     placeholder = get_placeholder()
-    
+
+    normalized_recipients = set()
+    for item in recipients:
+        if isinstance(item, dict):
+            rid = item.get("id") or item.get("recipient_id")
+            rrole = item.get("role") or item.get("recipient_role") or "all"
+            if rid is not None:
+                normalized_recipients.add((rid, rrole))
+        elif isinstance(item, (tuple, list)) and len(item) >= 2:
+            normalized_recipients.add((item[0], item[1]))
+
     try:
-        # Insert notification body
         cur = db.execute(
             f"INSERT INTO sys_notifications (title, message, type, priority, created_by) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})",
             (title, message, notif_type, priority, created_by)
@@ -9015,13 +9098,10 @@ def send_sys_notification(db, recipients, title, message, notif_type="general", 
         if hasattr(cur, "lastrowid") and cur.lastrowid:
             notif_id = cur.lastrowid
         else:
-            # Fallback for postgres without returning if lastrowid is unsupported
             row = db.execute(f"SELECT id FROM sys_notifications WHERE title = {placeholder} AND message = {placeholder} ORDER BY id DESC LIMIT 1", (title, message)).fetchone()
             notif_id = row_get(row, "id")
-            
-        # Insert recipients
-        for rec_id, rec_role in set(recipients):
-            # prevent duplicates
+
+        for rec_id, rec_role in normalized_recipients:
             db.execute(
                 f"INSERT INTO sys_notification_recipients (notification_id, recipient_id, recipient_role) VALUES ({placeholder}, {placeholder}, {placeholder})",
                 (notif_id, rec_id, rec_role)

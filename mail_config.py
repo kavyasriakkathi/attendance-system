@@ -121,18 +121,15 @@ def setup_mail_config(app):
     return report
 
 
-def is_mail_configured(app):
-    """Return True if we have enough information to send mail.
-
-    This prefers RESEND_API_KEY + MAIL_FROM if present; otherwise falls back
-    to SMTP credentials (MAIL_USERNAME, MAIL_PASSWORD, MAIL_FROM).
-    """
-    resend = app.config.get("RESEND_API_KEY")
-    mail_from = app.config.get("MAIL_FROM")
+def is_mail_configured(app=None):
+    """Return True if we have enough information to send mail."""
+    cfg = app.config if app and hasattr(app, "config") else {}
+    resend = cfg.get("RESEND_API_KEY") or os.environ.get("RESEND_API_KEY")
+    mail_from = cfg.get("MAIL_FROM") or os.environ.get("MAIL_FROM") or os.environ.get("MAIL_USERNAME")
     if resend and mail_from:
         return True
-    username = app.config.get("MAIL_USERNAME")
-    password = app.config.get("MAIL_PASSWORD")
+    username = cfg.get("MAIL_USERNAME") or os.environ.get("MAIL_USERNAME")
+    password = cfg.get("MAIL_PASSWORD") or os.environ.get("MAIL_PASSWORD")
     return bool(username and password and mail_from)
 
 
