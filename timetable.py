@@ -4146,12 +4146,15 @@ def derive_teacher_username(t_name: str) -> str:
     return sanitized
 
 
-def auto_setup_academic_from_slots(db, slots: List[Dict]) -> Dict[str, int]:
+def auto_setup_academic_from_slots(db, slots: List[Dict]) -> Dict[str, Any]:
     """Single-Source Academic Setup from Timetable Slots:
     1. Ensures Branch records exist in `branches`.
-    2. Automatically creates missing Subject records in `subjects` with codes and branch IDs.
-    3. Automatically creates missing Teacher user accounts in `teachers` with default passwords ("1234").
-    4. Automatically maps `Teacher -> Subject -> Branch -> Section -> Semester` in `teacher_subjects`, `teacher_branches`, and `teacher_subject_assignments`.
+    2. Ensures Section records exist in `sections`.
+    3. Automatically creates missing Subject records in `subjects` with codes and branch IDs.
+    4. Automatically creates missing Teacher user accounts in `teachers` with default passwords ("1234").
+    5. Automatically maps `Teacher -> Subject -> Branch -> Section -> Semester` in `teacher_subjects`, `teacher_branches`, and `teacher_subject_assignments`.
+    6. Does NOT create demo branches/sections/teachers/subjects.
+    7. Prints a summary of created entities.
     """
     is_pg = _is_postgres_db(db)
 
@@ -4164,8 +4167,21 @@ def auto_setup_academic_from_slots(db, slots: List[Dict]) -> Dict[str, int]:
     _ensure_column(db, "teachers", "branch_id", "INTEGER")
     _ensure_column(db, "teachers", "subject_id", "INTEGER")
 
+    try:
+        if is_pg:
+            _db_execute(db, "CREATE TABLE IF NOT EXISTS sections (id SERIAL PRIMARY KEY, branch_id INTEGER, name TEXT)")
+        else:
+            _db_execute(db, "CREATE TABLE IF NOT EXISTS sections (id INTEGER PRIMARY KEY AUTOINCREMENT, branch_id INTEGER, name TEXT)")
+        try:
+            db.commit()
+        except Exception:
+            pass
+    except Exception:
+        pass
+
     summary = {
         "branches_created": 0,
+        "sections_created": 0,
         "subjects_created": 0,
         "subjects_mapped": 0,
         "teachers_created": 0,
@@ -4173,7 +4189,14 @@ def auto_setup_academic_from_slots(db, slots: List[Dict]) -> Dict[str, int]:
         "assignments_created": 0,
     }
 
+    created_branches_list: List[str] = []
+    created_sections_list: List[str] = []
+    created_subjects_list: List[str] = []
+    created_teachers_list: List[str] = []
+    created_assignments_list: List[str] = []
+
     branch_cache: Dict[str, int] = {}
+    section_cache: Dict[tuple, int] = {}
     subject_cache: Dict[tuple, int] = {}
     teacher_cache: Dict[str, int] = {}
 
@@ -4202,9 +4225,44 @@ def auto_setup_academic_from_slots(db, slots: List[Dict]) -> Dict[str, int]:
                 bid = r2[0] if not hasattr(r2, "keys") else r2["id"]
                 branch_cache[norm_b] = int(bid)
                 summary["branches_created"] += 1
+                created_branches_list.append(clean_b)
                 return int(bid)
         except Exception as e:
             logger.exception("Failed to auto-create branch %s: %s", clean_b, e)
+            try: db.rollback()
+            except Exception: pass
+        return None
+
+    def get_or_create_section(sec_name: str, b_id: Optional[int]) -> Optional[int]:
+        clean_sec = _clean_text(sec_name)
+        if not clean_sec:
+            return None
+        norm_sec = clean_sec.upper()
+        sec_key = (norm_sec, b_id or 0)
+        if sec_key in section_cache:
+            return section_cache[sec_key]
+
+        row = _db_execute(db, "SELECT id FROM sections WHERE UPPER(TRIM(name)) = UPPER(TRIM(%s)) AND (branch_id = %s OR branch_id IS NULL) LIMIT 1", (clean_sec, b_id)).fetchone()
+        if row:
+            sid = row[0] if not hasattr(row, "keys") else row["id"]
+            section_cache[sec_key] = int(sid)
+            return int(sid)
+
+        try:
+            _db_execute(db, "INSERT INTO sections (name, branch_id) VALUES (%s, %s)", (clean_sec, b_id))
+            try:
+                db.commit()
+            except Exception:
+                pass
+            r2 = _db_execute(db, "SELECT id FROM sections WHERE UPPER(TRIM(name)) = UPPER(TRIM(%s)) AND (branch_id = %s OR branch_id IS NULL) ORDER BY id DESC LIMIT 1", (clean_sec, b_id)).fetchone()
+            if r2:
+                sid = r2[0] if not hasattr(r2, "keys") else r2["id"]
+                section_cache[sec_key] = int(sid)
+                summary["sections_created"] += 1
+                created_sections_list.append(clean_sec)
+                return int(sid)
+        except Exception as e:
+            logger.exception("Failed auto-creating section %s: %s", clean_sec, e)
             try: db.rollback()
             except Exception: pass
         return None
@@ -4250,6 +4308,7 @@ def auto_setup_academic_from_slots(db, slots: List[Dict]) -> Dict[str, int]:
                 sid = r2[0] if not hasattr(r2, "keys") else r2["id"]
                 subject_cache[key] = int(sid)
                 summary["subjects_created"] += 1
+                created_subjects_list.append(f"{display_name} ({code_val})")
                 return int(sid)
         except Exception as e:
             logger.exception("Failed auto-creating subject %s: %s", clean_s, e)
@@ -4305,6 +4364,7 @@ def auto_setup_academic_from_slots(db, slots: List[Dict]) -> Dict[str, int]:
                 tid = r2[0] if not hasattr(r2, "keys") else r2["id"]
                 teacher_cache[norm_t] = int(tid)
                 summary["teachers_created"] += 1
+                created_teachers_list.append(display_name)
                 return int(tid)
         except Exception as e:
             logger.exception("Failed auto-creating teacher %s: %s", clean_t, e)
@@ -4312,7 +4372,7 @@ def auto_setup_academic_from_slots(db, slots: List[Dict]) -> Dict[str, int]:
             except Exception: pass
         return None
 
-    def add_teacher_assignments(t_id: int, s_id: Optional[int], b_id: Optional[int], sec_str: str, sem_str: str):
+    def add_teacher_assignments(t_id: int, s_id: Optional[int], b_id: Optional[int], sec_str: str, sem_str: str, f_name: str, s_name: str):
         if not t_id:
             return
         if s_id:
@@ -4350,6 +4410,7 @@ def auto_setup_academic_from_slots(db, slots: List[Dict]) -> Dict[str, int]:
                         (t_id, s_id, b_id, sec_clean, sem_clean, "2025-2026"),
                     )
                     summary["assignments_created"] += 1
+                    created_assignments_list.append(f"{f_name} -> {s_name} ({sec_clean})")
             except Exception as e:
                 logger.exception("Failed creating teacher_subject_assignment: %s", e)
 
@@ -4360,13 +4421,18 @@ def auto_setup_academic_from_slots(db, slots: List[Dict]) -> Dict[str, int]:
         sec_name = slot.get("section")
         sem_val = slot.get("semester")
 
+        if not b_name and not s_name:
+            continue
+
         b_id = get_or_create_branch(b_name)
+        get_or_create_section(sec_name, b_id)
+
         s_code = slot.get("sub_code") or slot.get("subject_code")
         s_id = get_or_create_subject(s_name, b_id, s_code)
         t_id = get_or_create_teacher(f_name, default_branch_id=b_id, default_subject_id=s_id)
 
         if t_id:
-            add_teacher_assignments(t_id, s_id, b_id, sec_name, sem_val)
+            add_teacher_assignments(t_id, s_id, b_id, sec_name, sem_val, f_name, s_name)
 
         slot["branch_id"] = b_id
         slot["subject_id"] = s_id
@@ -4376,6 +4442,48 @@ def auto_setup_academic_from_slots(db, slots: List[Dict]) -> Dict[str, int]:
         db.commit()
     except Exception as e:
         logger.exception("Final DB commit after auto academic setup failed: %s", e)
+
+    # Print requested summary format
+    print("Branches Created:")
+    if created_branches_list:
+        for b in sorted(set(created_branches_list)):
+            print(f"* {b}")
+    else:
+        print("(None created - reused existing)")
+
+    print("\nSections Created:")
+    if created_sections_list:
+        for s in sorted(set(created_sections_list)):
+            print(f"* {s}")
+    else:
+        print("(None created - reused existing)")
+
+    print("\nSubjects Created:")
+    if created_subjects_list:
+        for sb in sorted(set(created_subjects_list)):
+            print(f"* {sb}")
+    else:
+        print("(None created - reused existing)")
+
+    print("\nTeachers Created:")
+    if created_teachers_list:
+        for t in sorted(set(created_teachers_list)):
+            print(f"* {t}")
+    else:
+        print("(None created - reused existing)")
+
+    print("\nAssignments Created:")
+    if created_assignments_list:
+        for a in sorted(set(created_assignments_list)):
+            print(f"* {a}")
+    else:
+        print("(None created - reused existing)")
+
+    summary["branches_list"] = sorted(set(created_branches_list))
+    summary["sections_list"] = sorted(set(created_sections_list))
+    summary["subjects_list"] = sorted(set(created_subjects_list))
+    summary["teachers_list"] = sorted(set(created_teachers_list))
+    summary["assignments_list"] = sorted(set(created_assignments_list))
 
     return summary
 
