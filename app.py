@@ -11245,22 +11245,64 @@ def admin_record_payment():
                 except: pass
 
     selected_assignment_id = _coerce_int(request.args.get("assignment_id"))
+    student_id_param = _coerce_int(request.args.get("student_id"))
+    search_q = request.args.get("q", "").strip()
+
+    if selected_assignment_id and not student_id_param:
+        st_row = db.execute(f"SELECT student_id FROM student_fee_assignments WHERE id = {placeholder}", (selected_assignment_id,)).fetchone()
+        if st_row:
+            student_id_param = row_get(st_row, "student_id")
+
     try:
-        assignments = db.execute("""
-        SELECT sfa.id AS assignment_id, s.name AS student_name, s.enrollment, fs.fee_name, fs.category,
-               sfa.custom_amount, sfa.discount_amount, fs.amount AS default_amount, sfa.status
+        sql = f"""
+        SELECT sfa.id AS assignment_id, s.id AS student_id, s.name AS student_name, s.enrollment,
+               fs.fee_name, fs.category, fs.academic_year, fs.semester,
+               sfa.custom_amount, sfa.discount_amount, fs.amount AS default_amount, sfa.status,
+               b.name AS branch_name, COALESCE(SUM(fp.amount_paid), 0) AS total_paid
         FROM student_fee_assignments sfa
         JOIN students s ON sfa.student_id = s.id
         JOIN fee_structures fs ON sfa.fee_structure_id = fs.id
-        WHERE sfa.status != 'Paid'
-        ORDER BY s.name ASC
-        """).fetchall()
+        LEFT JOIN branches b ON s.branch_id = b.id
+        LEFT JOIN fee_payments fp ON fp.assignment_id = sfa.id
+        WHERE (sfa.status IS NULL OR sfa.status != 'Paid')
+        """
+        params = []
+        if student_id_param:
+            sql += f" AND sfa.student_id = {placeholder}"
+            params.append(student_id_param)
+        elif search_q:
+            sql += f" AND (LOWER(s.name) LIKE {placeholder} OR LOWER(s.enrollment) LIKE {placeholder})"
+            params.extend([f"%{search_q.lower()}%", f"%{search_q.lower()}%"])
+
+        sql += """
+        GROUP BY sfa.id, s.id, s.name, s.enrollment, fs.fee_name, fs.category, fs.academic_year, fs.semester, sfa.custom_amount, sfa.discount_amount, fs.amount, sfa.status, b.name
+        ORDER BY s.name ASC, fs.fee_name ASC
+        """
+        raw_assignments = db.execute(sql, tuple(params)).fetchall()
+
+        processed_assignments = []
+        for r in raw_assignments:
+            row_dict = dict(r) if hasattr(r, "keys") else r
+            cust_amt = row_get(row_dict, "custom_amount")
+            def_amt = float(row_get(row_dict, "default_amount") or 0.0)
+            disc_amt = float(row_get(row_dict, "discount_amount") or 0.0)
+            tot_paid = float(row_get(row_dict, "total_paid") or 0.0)
+
+            gross = float(cust_amt) if cust_amt is not None else def_amt
+            net = max(0.0, gross - disc_amt)
+            pending = max(0.0, net - tot_paid)
+
+            row_dict["gross_amount"] = gross
+            row_dict["net_amount"] = net
+            row_dict["pending_amount"] = pending
+            processed_assignments.append(row_dict)
 
         return render_template(
             "admin_record_payment.html",
-            assignments=assignments,
+            assignments=processed_assignments,
             selected_assignment_id=selected_assignment_id,
             today_date=date.today().isoformat(),
+            search_q=search_q,
         )
     except Exception as e:
         print(f"[admin_record_payment GET ERROR]: {repr(e)}")
@@ -11603,28 +11645,61 @@ def accountant_record_payment():
                 except: pass
 
     selected_assignment_id = _coerce_int(request.args.get("assignment_id"))
+    student_id_param = _coerce_int(request.args.get("student_id"))
     search_q = request.args.get("q", "").strip()
+
+    if selected_assignment_id and not student_id_param:
+        st_row = db.execute(f"SELECT student_id FROM student_fee_assignments WHERE id = {placeholder}", (selected_assignment_id,)).fetchone()
+        if st_row:
+            student_id_param = row_get(st_row, "student_id")
+
     try:
-        sql = """
-        SELECT sfa.id AS assignment_id, s.name AS student_name, s.enrollment, fs.fee_name, fs.category,
+        sql = f"""
+        SELECT sfa.id AS assignment_id, s.id AS student_id, s.name AS student_name, s.enrollment,
+               fs.fee_name, fs.category, fs.academic_year, fs.semester,
                sfa.custom_amount, sfa.discount_amount, fs.amount AS default_amount, sfa.status,
-               b.name AS branch_name, fs.academic_year, fs.semester
+               b.name AS branch_name, COALESCE(SUM(fp.amount_paid), 0) AS total_paid
         FROM student_fee_assignments sfa
         JOIN students s ON sfa.student_id = s.id
         JOIN fee_structures fs ON sfa.fee_structure_id = fs.id
         LEFT JOIN branches b ON s.branch_id = b.id
-        WHERE sfa.status != 'Paid'
+        LEFT JOIN fee_payments fp ON fp.assignment_id = sfa.id
+        WHERE (sfa.status IS NULL OR sfa.status != 'Paid')
         """
         params = []
-        if search_q:
+        if student_id_param:
+            sql += f" AND sfa.student_id = {placeholder}"
+            params.append(student_id_param)
+        elif search_q:
             sql += f" AND (LOWER(s.name) LIKE {placeholder} OR LOWER(s.enrollment) LIKE {placeholder})"
             params.extend([f"%{search_q.lower()}%", f"%{search_q.lower()}%"])
-        sql += " ORDER BY s.name ASC"
-        assignments = db.execute(sql, tuple(params)).fetchall()
+
+        sql += """
+        GROUP BY sfa.id, s.id, s.name, s.enrollment, fs.fee_name, fs.category, fs.academic_year, fs.semester, sfa.custom_amount, sfa.discount_amount, fs.amount, sfa.status, b.name
+        ORDER BY s.name ASC, fs.fee_name ASC
+        """
+        raw_assignments = db.execute(sql, tuple(params)).fetchall()
+
+        processed_assignments = []
+        for r in raw_assignments:
+            row_dict = dict(r) if hasattr(r, "keys") else r
+            cust_amt = row_get(row_dict, "custom_amount")
+            def_amt = float(row_get(row_dict, "default_amount") or 0.0)
+            disc_amt = float(row_get(row_dict, "discount_amount") or 0.0)
+            tot_paid = float(row_get(row_dict, "total_paid") or 0.0)
+
+            gross = float(cust_amt) if cust_amt is not None else def_amt
+            net = max(0.0, gross - disc_amt)
+            pending = max(0.0, net - tot_paid)
+
+            row_dict["gross_amount"] = gross
+            row_dict["net_amount"] = net
+            row_dict["pending_amount"] = pending
+            processed_assignments.append(row_dict)
 
         return render_template(
             "accountant_record_payment.html",
-            assignments=assignments,
+            assignments=processed_assignments,
             selected_assignment_id=selected_assignment_id,
             today_date=date.today().isoformat(),
             search_q=search_q,

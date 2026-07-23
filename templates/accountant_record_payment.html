@@ -38,7 +38,7 @@
           <option value="">-- Choose Pending Student Fee --</option>
           {% for a in assignments %}
             <option value="{{ a.assignment_id }}" {% if selected_assignment_id == a.assignment_id %}selected{% endif %}>
-              {{ a.student_name }} ({{ a.enrollment }}) - {{ a.fee_name }} [{{ a.status }}] - {{ a.branch_name or 'N/A' }}
+              {{ a.student_name }} ({{ a.enrollment }}) – {{ a.fee_name }} – Semester {{ a.semester or 1 }} – ₹{{ "{:,.2f}".format(a.net_amount) }} – Pending ₹{{ "{:,.2f}".format(a.pending_amount) }}
             </option>
           {% endfor %}
         </select>
