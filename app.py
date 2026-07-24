@@ -12195,10 +12195,11 @@ def api_payment_verify():
     placeholder = get_placeholder()
 
     try:
+        is_testing = app.config.get("TESTING", False) or RAZORPAY_KEY_SECRET == "rzp_test_dummy_secret"
         is_mock_order = razorpay_order_id.startswith("order_mock_")
         is_valid_signature = False
 
-        if razorpay_signature and RAZORPAY_KEY_SECRET:
+        if razorpay_signature and RAZORPAY_KEY_SECRET and RAZORPAY_KEY_SECRET != "rzp_test_dummy_secret":
             generated_sig = hmac.new(
                 RAZORPAY_KEY_SECRET.encode('utf-8'),
                 f"{razorpay_order_id}|{razorpay_payment_id}".encode('utf-8'),
@@ -12215,8 +12216,9 @@ def api_payment_verify():
                     is_valid_signature = True
                 except Exception:
                     is_valid_signature = False
-        elif is_mock_order or RAZORPAY_KEY_SECRET == "rzp_test_dummy_secret":
+        elif is_testing and (is_mock_order or not razorpay_signature):
             is_valid_signature = True
+
 
 
         if not is_valid_signature:
