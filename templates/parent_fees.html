@@ -97,6 +97,16 @@
           {% else %}
             <span class="badge badge-unpaid"><i class="fa-solid fa-circle"></i> Unpaid</span>
           {% endif %}
+
+          {% if a.pending_amount > 0 %}
+            <button type="button" class="btn btn-primary btn-sm pay-online-btn" 
+                    data-assignment-id="{{ a.assignment_id }}" 
+                    data-fee-name="{{ a.fee_name }}" 
+                    data-pending="{{ a.pending_amount }}"
+                    style="margin-left:0.5rem; background:#2563eb; color:#ffffff; font-weight:700; border:none; padding:0.4rem 0.9rem; border-radius:6px; cursor:pointer;">
+              <i class="fa-solid fa-credit-card"></i> Pay Online (₹{{ "{:,.2f}".format(a.pending_amount) }})
+            </button>
+          {% endif %}
         </div>
       </div>
 
@@ -141,8 +151,11 @@
                 <td style="padding:0.4rem;">{{ p.payment_mode }}</td>
                 <td style="padding:0.4rem; font-weight:700; color:#059669;">₹{{ "{:,.2f}".format(p.amount_paid) }}</td>
                 <td style="padding:0.4rem; text-align:right;">
-                  <a href="{{ url_for('fee_receipt', payment_id=p.id) }}" target="_blank" style="color:#2563eb; text-decoration:none; font-weight:600;">
-                    <i class="fa-solid fa-print"></i> View Receipt
+                  <a href="{{ url_for('fee_receipt', payment_id=p.id) }}" target="_blank" style="color:#2563eb; text-decoration:none; font-weight:600; margin-right:0.5rem;">
+                    <i class="fa-solid fa-print"></i> HTML
+                  </a>
+                  <a href="{{ url_for('fee_receipt_pdf', payment_id=p.id) }}" target="_blank" style="color:#dc2626; text-decoration:none; font-weight:600;">
+                    <i class="fa-solid fa-file-pdf"></i> PDF
                   </a>
                 </td>
               </tr>
@@ -158,4 +171,110 @@
     {% endfor %}
   </div>
 </div>
+
+<!-- Razorpay Integration Scripts -->
+<script src="https://checkout.razorpay.com/v1/checkout.js"></script>
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+  const payButtons = document.querySelectorAll('.pay-online-btn');
+  payButtons.forEach(btn => {
+    btn.addEventListener('click', function(e) {
+      e.preventDefault();
+      const assignmentId = this.getAttribute('data-assignment-id');
+      const feeName = this.getAttribute('data-fee-name');
+      const pendingAmount = parseFloat(this.getAttribute('data-pending'));
+
+      if (!assignmentId || pendingAmount <= 0) return;
+
+      this.disabled = true;
+      const originalText = this.innerHTML;
+      this.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Initializing...';
+
+      fetch('/api/payment/create-order', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ assignment_id: assignmentId, amount: pendingAmount })
+      })
+      .then(res => res.json())
+      .then(data => {
+        btn.disabled = false;
+        btn.innerHTML = originalText;
+
+        if (data.status !== 'success') {
+          alert('Failed to initiate payment: ' + (data.message || 'Unknown error'));
+          return;
+        }
+
+        const options = {
+          "key": data.key,
+          "amount": data.amount,
+          "currency": data.currency,
+          "name": "College ERP Child Fee Payment",
+          "description": "Payment for " + data.fee_name,
+          "order_id": data.order_id,
+          "handler": function (response) {
+            btn.disabled = true;
+            btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Verifying...';
+
+            fetch('/api/payment/verify', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                razorpay_order_id: response.razorpay_order_id,
+                razorpay_payment_id: response.razorpay_payment_id,
+                razorpay_signature: response.razorpay_signature,
+                assignment_id: assignmentId
+              })
+            })
+            .then(vRes => vRes.json())
+            .then(vData => {
+              if (vData.status === 'success') {
+                alert('Payment Successful! Receipt #' + vData.receipt_number);
+                window.location.reload();
+              } else {
+                alert('Payment verification failed: ' + vData.message);
+                window.location.reload();
+              }
+            })
+            .catch(err => {
+              alert('Error verifying payment: ' + err);
+              window.location.reload();
+            });
+          },
+          "prefill": {
+            "name": data.student_name,
+            "email": data.student_email,
+            "contact": data.student_phone
+          },
+          "theme": {
+            "color": "#2563eb"
+          }
+        };
+
+        const rzp = new Razorpay(options);
+        rzp.on('payment.failed', function (response) {
+          fetch('/api/payment/failure', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              razorpay_order_id: data.order_id,
+              razorpay_payment_id: response.error.metadata ? response.error.metadata.payment_id : '',
+              error_code: response.error.code,
+              error_description: response.error.description
+            })
+          }).catch(() => {});
+          alert('Payment Failed: ' + response.error.description);
+        });
+        rzp.open();
+      })
+      .catch(err => {
+        btn.disabled = false;
+        btn.innerHTML = originalText;
+        alert('Network error initiating payment: ' + err);
+      });
+    });
+  });
+});
+</script>
 {% endblock %}
+

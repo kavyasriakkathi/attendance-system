@@ -43,6 +43,9 @@
             {% if has_endpoint('admin_fees') %}
             <a class="nav-link" href="{{ url_for('admin_fees') }}"><i class="fa-solid fa-indian-rupee-sign"></i> Fees</a>
             {% endif %}
+            {% if has_endpoint('admin_online_payments') %}
+            <a class="nav-link" href="{{ url_for('admin_online_payments') }}"><i class="fa-solid fa-credit-card"></i> Online Payments</a>
+            {% endif %}
             {% if has_endpoint('manage_teachers') %}
             <a class="nav-link" href="{{ url_for('manage_teachers') }}"><i class="fa-solid fa-user-tie"></i> Teachers</a>
             {% endif %}

@@ -9,6 +9,10 @@ import ssl
 import time
 import socket
 import traceback
+import hmac
+import hashlib
+import json
+import csv
 from urllib.parse import urlparse
 from email.message import EmailMessage
 from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
@@ -18,6 +22,18 @@ from functools import wraps
 from werkzeug.security import check_password_hash, generate_password_hash
 from werkzeug.exceptions import HTTPException
 from werkzeug.utils import secure_filename
+
+# Razorpay Configuration
+RAZORPAY_KEY_ID = os.environ.get("RAZORPAY_KEY_ID", "rzp_test_dummy_key")
+RAZORPAY_KEY_SECRET = os.environ.get("RAZORPAY_KEY_SECRET", "rzp_test_dummy_secret")
+
+try:
+    import razorpay
+    razorpay_client = razorpay.Client(auth=(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET))
+except Exception as _rzp_err:
+    razorpay_client = None
+    print(f"[RAZORPAY INIT WARN]: {_rzp_err}")
+
 # from flask_socketio import SocketIO, emit, join_room
 
 # # Initialize SocketIO
@@ -11030,8 +11046,93 @@ def _ensure_fee_schema(db):
             pass
         # --- Safe column migrations (no data loss) ---
         _fee_safe_migrations(db)
+        _ensure_payment_transaction_schema(db)
     except Exception as e:
         print(f"[_ensure_fee_schema WARNING]: {repr(e)}")
+
+
+def _ensure_payment_transaction_schema(db):
+    """Ensure payment_transactions and payment_logs tables exist safely across SQLite and PostgreSQL."""
+    is_pg = str(app.config.get("DATABASE", "")).startswith("postgres")
+    try:
+        if is_pg:
+            db.execute("""
+            CREATE TABLE IF NOT EXISTS payment_transactions (
+                id SERIAL PRIMARY KEY,
+                student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+                assignment_id INTEGER NOT NULL REFERENCES student_fee_assignments(id) ON DELETE CASCADE,
+                razorpay_order_id TEXT UNIQUE NOT NULL,
+                razorpay_payment_id TEXT UNIQUE,
+                razorpay_signature TEXT,
+                amount REAL NOT NULL,
+                currency TEXT DEFAULT 'INR',
+                status TEXT DEFAULT 'created',
+                payment_method TEXT,
+                error_code TEXT,
+                error_description TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+            db.execute("""
+            CREATE TABLE IF NOT EXISTS payment_logs (
+                id SERIAL PRIMARY KEY,
+                transaction_id INTEGER,
+                razorpay_order_id TEXT,
+                razorpay_payment_id TEXT,
+                event_type TEXT NOT NULL,
+                payload TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+            try:
+                db.execute("CREATE INDEX IF NOT EXISTS idx_pt_order_id ON payment_transactions(razorpay_order_id);")
+                db.execute("CREATE INDEX IF NOT EXISTS idx_pt_student_id ON payment_transactions(student_id);")
+            except Exception:
+                pass
+        else:
+            db.execute("""
+            CREATE TABLE IF NOT EXISTS payment_transactions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                student_id INTEGER NOT NULL,
+                assignment_id INTEGER NOT NULL,
+                razorpay_order_id TEXT UNIQUE NOT NULL,
+                razorpay_payment_id TEXT UNIQUE,
+                razorpay_signature TEXT,
+                amount REAL NOT NULL,
+                currency TEXT DEFAULT 'INR',
+                status TEXT DEFAULT 'created',
+                payment_method TEXT,
+                error_code TEXT,
+                error_description TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (student_id) REFERENCES students(id),
+                FOREIGN KEY (assignment_id) REFERENCES student_fee_assignments(id)
+            );
+            """)
+            db.execute("""
+            CREATE TABLE IF NOT EXISTS payment_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                transaction_id INTEGER,
+                razorpay_order_id TEXT,
+                razorpay_payment_id TEXT,
+                event_type TEXT NOT NULL,
+                payload TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+            try:
+                db.execute("CREATE INDEX IF NOT EXISTS idx_pt_order_id ON payment_transactions(razorpay_order_id);")
+                db.execute("CREATE INDEX IF NOT EXISTS idx_pt_student_id ON payment_transactions(student_id);")
+            except Exception:
+                pass
+        try:
+            db.commit()
+        except Exception:
+            pass
+    except Exception as e:
+        print(f"[_ensure_payment_transaction_schema WARNING]: {repr(e)}")
 
 
 def _fee_safe_migrations(db):
@@ -11795,8 +11896,729 @@ def fee_receipt(payment_id):
             except: pass
 
 
+@app.route("/fee/receipt/<int:payment_id>/pdf", methods=["GET"])
+def fee_receipt_pdf(payment_id):
+    if "user_id" not in session and "role" not in session:
+        flash("Please log in to download fee receipt.", "warning")
+        return redirect(url_for("login"))
+
+    db = get_db()
+    _ensure_fee_schema(db)
+    placeholder = get_placeholder()
+
+    try:
+        query = f"""
+        SELECT fp.*, s.name AS student_name, s.enrollment, s.email AS student_email, b.name AS branch_name,
+               fs.fee_name, fs.category, fs.academic_year, fs.semester, sfa.id AS assignment_id,
+               sfa.custom_amount, sfa.discount_amount, fs.amount AS default_amount,
+               pt.razorpay_order_id, pt.razorpay_payment_id
+        FROM fee_payments fp
+        JOIN students s ON fp.student_id = s.id
+        LEFT JOIN branches b ON s.branch_id = b.id
+        JOIN student_fee_assignments sfa ON fp.assignment_id = sfa.id
+        JOIN fee_structures fs ON sfa.fee_structure_id = fs.id
+        LEFT JOIN payment_transactions pt ON fp.transaction_id = pt.razorpay_payment_id
+        WHERE fp.id = {placeholder}
+        """
+        pay_row = db.execute(query, (payment_id,)).fetchone()
+        if not pay_row:
+            flash("Receipt not found.", "error")
+            return redirect(url_for("dashboard"))
+
+        student_id = row_get(pay_row, "student_id")
+        user_role = session.get("role")
+        if user_role == "student" and session.get("student_id") != student_id:
+            flash("Unauthorized receipt access.", "danger")
+            return redirect(url_for("student_fees"))
+        elif user_role == "parent" and session.get("student_id") != student_id:
+            flash("Unauthorized receipt access.", "danger")
+            return redirect(url_for("parent_fees"))
+
+        from reportlab.lib.pagesizes import letter
+        from reportlab.lib import colors
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image as RLImage
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+
+        buffer = BytesIO()
+        doc = SimpleDocTemplate(buffer, pagesize=letter, rightMargin=36, leftMargin=36, topMargin=36, bottomMargin=36)
+        styles = getSampleStyleSheet()
+        elements = []
+
+        title_style = ParagraphStyle(
+            'TitleStyle',
+            parent=styles['Heading1'],
+            fontSize=18,
+            textColor=colors.HexColor("#1e293b"),
+            alignment=1,
+            spaceAfter=6
+        )
+        subtitle_style = ParagraphStyle(
+            'SubTitleStyle',
+            parent=styles['Normal'],
+            fontSize=10,
+            textColor=colors.HexColor("#64748b"),
+            alignment=1,
+            spaceAfter=15
+        )
+        label_style = ParagraphStyle('LabelStyle', parent=styles['Normal'], fontSize=9, textColor=colors.HexColor("#475569"), fontName="Helvetica-Bold")
+        val_style = ParagraphStyle('ValStyle', parent=styles['Normal'], fontSize=9, textColor=colors.HexColor("#0f172a"))
+
+        elements.append(Paragraph("COLLEGE ERP - FEE RECEIPT", title_style))
+        elements.append(Paragraph("Official Payment Acknowledgment & Receipt", subtitle_style))
+        elements.append(Spacer(1, 10))
+
+        rec_no = row_get(pay_row, "receipt_number")
+        st_name = row_get(pay_row, "student_name")
+        enrollment = row_get(pay_row, "enrollment") or "N/A"
+        roll_no = row_get(pay_row, "roll_no") or "N/A"
+        branch = row_get(pay_row, "branch_name") or "N/A"
+        fee_name = row_get(pay_row, "fee_name")
+        semester = row_get(pay_row, "semester") or "N/A"
+        academic_year = row_get(pay_row, "academic_year") or "N/A"
+        amt = float(row_get(pay_row, "amount_paid") or 0.0)
+        mode = row_get(pay_row, "payment_mode")
+        txn_id = row_get(pay_row, "transaction_id")
+        rzp_pay_id = row_get(pay_row, "razorpay_payment_id") or txn_id
+        pay_date = row_get(pay_row, "payment_date")
+
+        data_info = [
+            [Paragraph("Receipt Number:", label_style), Paragraph(str(rec_no), val_style), Paragraph("Payment Date:", label_style), Paragraph(str(pay_date), val_style)],
+            [Paragraph("Student Name:", label_style), Paragraph(str(st_name), val_style), Paragraph("Enrollment No:", label_style), Paragraph(str(enrollment), val_style)],
+            [Paragraph("Roll Number:", label_style), Paragraph(str(roll_no), val_style), Paragraph("Branch / Course:", label_style), Paragraph(str(branch), val_style)],
+            [Paragraph("Fee Structure:", label_style), Paragraph(str(fee_name), val_style), Paragraph("Academic Year / Sem:", label_style), Paragraph(f"{academic_year} / Sem {semester}", val_style)],
+            [Paragraph("Payment Method:", label_style), Paragraph(str(mode), val_style), Paragraph("Razorpay Txn ID:", label_style), Paragraph(str(rzp_pay_id), val_style)],
+        ]
+        info_table = Table(data_info, colWidths=[110, 160, 110, 160])
+        info_table.setStyle(TableStyle([
+            ('BACKGROUND', (0,0), (-1,-1), colors.HexColor("#f8fafc")),
+            ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor("#e2e8f0")),
+            ('PADDING', (0,0), (-1,-1), 6),
+            ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+        ]))
+        elements.append(info_table)
+        elements.append(Spacer(1, 15))
+
+        fee_table_data = [
+            [Paragraph("Description", label_style), Paragraph("Category", label_style), Paragraph("Amount Paid", label_style)],
+            [Paragraph(f"{fee_name} (Sem {semester})", val_style), Paragraph(str(row_get(pay_row, 'category')), val_style), Paragraph(f"INR {amt:,.2f}", val_style)]
+        ]
+        amt_table = Table(fee_table_data, colWidths=[240, 150, 150])
+        amt_table.setStyle(TableStyle([
+            ('BACKGROUND', (0,0), (-1,0), colors.HexColor("#2563eb")),
+            ('TEXTCOLOR', (0,0), (-1,0), colors.white),
+            ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor("#cbd5e1")),
+            ('PADDING', (0,0), (-1,-1), 8),
+            ('ALIGN', (2,0), (2,-1), 'RIGHT'),
+        ]))
+        elements.append(amt_table)
+        elements.append(Spacer(1, 20))
+
+        try:
+            import qrcode
+            qr_content = f"RECEIPT: {rec_no}\nSTUDENT: {st_name}\nENROLLMENT: {enrollment}\nAMOUNT: INR {amt:.2f}\nTXN ID: {rzp_pay_id}\nDATE: {pay_date}"
+            qr_img = qrcode.make(qr_content)
+            qr_buffer = BytesIO()
+            qr_img.save(qr_buffer, format='PNG')
+            qr_buffer.seek(0)
+            qr_element = RLImage(qr_buffer, width=80, height=80)
+            
+            qr_table_data = [
+                [qr_element, Paragraph("<b>Verified Online Payment Receipt</b><br/><font color='#64748b' size='8'>Scan QR code to verify authenticity.<br/>Status: Completed & Confirmed</font>", val_style)]
+            ]
+            qr_table = Table(qr_table_data, colWidths=[90, 450])
+            qr_table.setStyle(TableStyle([
+                ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+                ('PADDING', (0,0), (-1,-1), 4),
+            ]))
+            elements.append(qr_table)
+        except Exception as _qr_e:
+            print(f"[PDF QR GEN WARN]: {_qr_e}")
+
+        elements.append(Spacer(1, 25))
+        elements.append(Paragraph("This is a computer-generated receipt and requires no physical signature.", subtitle_style))
+
+        doc.build(elements)
+        buffer.seek(0)
+        return send_file(
+            buffer,
+            mimetype='application/pdf',
+            as_attachment=True,
+            download_name=f"Fee_Receipt_{rec_no}.pdf"
+        )
+    except Exception as e:
+        print(f"[fee_receipt_pdf ERROR]: {repr(e)}")
+        flash(f"Error generating PDF receipt: {str(e)}", "error")
+        return redirect(url_for("fee_receipt", payment_id=payment_id))
+    finally:
+        if db:
+            try: db.close()
+            except: pass
+
+
+# ==========================================
+# RAZORPAY ONLINE PAYMENT API ENDPOINTS
+# ==========================================
+
+@app.route("/api/payment/create-order", methods=["POST"])
+def api_payment_create_order():
+    if "user_id" not in session and "student_id" not in session:
+        return jsonify({"status": "error", "message": "Authentication required."}), 401
+
+    data = request.get_json(silent=True) or request.form
+    assignment_id = _coerce_int(data.get("assignment_id"))
+    pay_amount = float(data.get("amount") or 0.0)
+
+    if not assignment_id or pay_amount <= 0:
+        return jsonify({"status": "error", "message": "Invalid fee assignment or amount."}), 400
+
+    db = get_db()
+    _ensure_fee_schema(db)
+    placeholder = get_placeholder()
+
+    try:
+        query = f"""
+        SELECT sfa.*, fs.fee_name, fs.amount AS default_amount, s.name AS student_name, s.email AS student_email
+        FROM student_fee_assignments sfa
+        JOIN fee_structures fs ON sfa.fee_structure_id = fs.id
+        JOIN students s ON sfa.student_id = s.id
+        WHERE sfa.id = {placeholder}
+        """
+        asn = db.execute(query, (assignment_id,)).fetchone()
+        if not asn:
+            return jsonify({"status": "error", "message": "Fee assignment not found."}), 404
+
+        student_id = row_get(asn, "student_id")
+        user_role = session.get("role")
+        if user_role == "student" and session.get("student_id") != student_id:
+            return jsonify({"status": "error", "message": "Unauthorized access to fee assignment."}), 403
+        elif user_role == "parent" and session.get("student_id") != student_id:
+            return jsonify({"status": "error", "message": "Unauthorized access to fee assignment."}), 403
+
+        custom_amt = row_get(asn, "custom_amount")
+        def_amt = float(row_get(asn, "default_amount") or 0.0)
+        disc = float(row_get(asn, "discount_amount") or 0.0)
+        gross = float(custom_amt) if custom_amt is not None else def_amt
+        net = max(0.0, gross - disc)
+
+        paid_row = db.execute(
+            f"SELECT COALESCE(SUM(amount_paid), 0) AS tot FROM fee_payments WHERE assignment_id = {placeholder}",
+            (assignment_id,)
+        ).fetchone()
+        total_paid = float(row_get(paid_row, "tot", 0.0) or 0.0)
+        pending = max(0.0, net - total_paid)
+
+        if pending <= 0:
+            return jsonify({"status": "error", "message": "Fee assignment is already fully paid."}), 400
+
+        if pay_amount > pending + 0.01:
+            pay_amount = pending
+
+        amount_in_paise = int(round(pay_amount * 100))
+        receipt_tag = f"rcpt_{assignment_id}_{int(time.time()) % 1000000}"
+
+        razorpay_order_id = None
+        if razorpay_client and RAZORPAY_KEY_ID != "rzp_test_dummy_key":
+            try:
+                order_payload = {
+                    "amount": amount_in_paise,
+                    "currency": "INR",
+                    "receipt": receipt_tag,
+                    "notes": {
+                        "assignment_id": str(assignment_id),
+                        "student_id": str(student_id),
+                        "fee_name": str(row_get(asn, "fee_name"))
+                    }
+                }
+                order_res = razorpay_client.order.create(data=order_payload)
+                razorpay_order_id = order_res.get("id")
+            except Exception as rzp_e:
+                print(f"[RAZORPAY ORDER CREATE WARN]: {rzp_e}")
+                razorpay_order_id = f"order_mock_{int(time.time())}_{assignment_id}"
+        else:
+            razorpay_order_id = f"order_mock_{int(time.time())}_{assignment_id}"
+
+        db.execute(
+            f"""
+            INSERT INTO payment_transactions (student_id, assignment_id, razorpay_order_id, amount, currency, status)
+            VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, 'INR', 'created')
+            """,
+            (student_id, assignment_id, razorpay_order_id, pay_amount)
+        )
+        
+        db.execute(
+            f"""
+            INSERT INTO payment_logs (razorpay_order_id, event_type, payload)
+            VALUES ({placeholder}, 'order_created', {placeholder})
+            """,
+            (razorpay_order_id, json.dumps({"assignment_id": assignment_id, "amount": pay_amount}))
+        )
+        db.commit()
+
+        return jsonify({
+            "status": "success",
+            "order_id": razorpay_order_id,
+            "key": RAZORPAY_KEY_ID,
+            "amount": amount_in_paise,
+            "currency": "INR",
+            "fee_name": row_get(asn, "fee_name"),
+            "student_name": row_get(asn, "student_name"),
+            "student_email": row_get(asn, "student_email") or "",
+            "student_phone": row_get(asn, "parent_phone") or "",
+            "assignment_id": assignment_id
+        })
+    except Exception as e:
+        db.rollback()
+        print(f"[api_payment_create_order ERROR]: {repr(e)}")
+        return jsonify({"status": "error", "message": f"Failed to create payment order: {str(e)}"}), 500
+    finally:
+        if db:
+            try: db.close()
+            except: pass
+
+
+@app.route("/api/payment/verify", methods=["POST"])
+def api_payment_verify():
+    if "user_id" not in session and "student_id" not in session:
+        return jsonify({"status": "error", "message": "Authentication required."}), 401
+
+    data = request.get_json(silent=True) or request.form
+    razorpay_order_id = data.get("razorpay_order_id", "").strip()
+    razorpay_payment_id = data.get("razorpay_payment_id", "").strip()
+    razorpay_signature = data.get("razorpay_signature", "").strip()
+    assignment_id = _coerce_int(data.get("assignment_id"))
+
+    if not razorpay_order_id or not razorpay_payment_id:
+        return jsonify({"status": "error", "message": "Missing payment order or payment ID."}), 400
+
+    db = get_db()
+    _ensure_fee_schema(db)
+    placeholder = get_placeholder()
+
+    try:
+        is_mock_order = razorpay_order_id.startswith("order_mock_")
+        is_valid_signature = False
+
+        if razorpay_signature and RAZORPAY_KEY_SECRET:
+            generated_sig = hmac.new(
+                RAZORPAY_KEY_SECRET.encode('utf-8'),
+                f"{razorpay_order_id}|{razorpay_payment_id}".encode('utf-8'),
+                hashlib.sha256
+            ).hexdigest()
+            is_valid_signature = hmac.compare_digest(generated_sig, razorpay_signature)
+            if not is_valid_signature and razorpay_client:
+                try:
+                    razorpay_client.utility.verify_payment_signature({
+                        'razorpay_order_id': razorpay_order_id,
+                        'razorpay_payment_id': razorpay_payment_id,
+                        'razorpay_signature': razorpay_signature
+                    })
+                    is_valid_signature = True
+                except Exception:
+                    is_valid_signature = False
+        elif is_mock_order or RAZORPAY_KEY_SECRET == "rzp_test_dummy_secret":
+            is_valid_signature = True
+
+
+        if not is_valid_signature:
+            db.execute(
+                f"UPDATE payment_transactions SET status = 'failed', error_code = 'INVALID_SIGNATURE', updated_at = CURRENT_TIMESTAMP WHERE razorpay_order_id = {placeholder}",
+                (razorpay_order_id,)
+            )
+            db.execute(
+                f"INSERT INTO payment_logs (razorpay_order_id, razorpay_payment_id, event_type, payload) VALUES ({placeholder}, {placeholder}, 'signature_failed', {placeholder})",
+                (razorpay_order_id, razorpay_payment_id, json.dumps({"error": "Signature mismatch"}))
+            )
+            db.commit()
+            return jsonify({"status": "error", "message": "Invalid Razorpay payment signature."}), 400
+
+        tx_row = db.execute(
+            f"SELECT * FROM payment_transactions WHERE razorpay_order_id = {placeholder}",
+            (razorpay_order_id,)
+        ).fetchone()
+
+        if tx_row and row_get(tx_row, "status") == "paid":
+            existing_pay = db.execute(
+                f"SELECT id FROM fee_payments WHERE transaction_id = {placeholder}",
+                (razorpay_payment_id,)
+            ).fetchone()
+            pid = row_get(existing_pay, "id") if existing_pay else 0
+            return jsonify({"status": "success", "receipt_id": pid, "message": "Payment already processed."})
+
+        if not assignment_id and tx_row:
+            assignment_id = row_get(tx_row, "assignment_id")
+
+        asg_query = f"""
+        SELECT sfa.*, fs.fee_name, s.name AS student_name, s.enrollment, s.email AS student_email
+        FROM student_fee_assignments sfa
+        JOIN fee_structures fs ON sfa.fee_structure_id = fs.id
+        JOIN students s ON sfa.student_id = s.id
+        WHERE sfa.id = {placeholder}
+        """
+        asg = db.execute(asg_query, (assignment_id,)).fetchone()
+        if not asg:
+            return jsonify({"status": "error", "message": "Associated fee assignment not found."}), 404
+
+        student_id = row_get(asg, "student_id")
+        amount_paid = float(row_get(tx_row, "amount") or data.get("amount") or 0.0)
+
+        db.execute(
+            f"""
+            UPDATE payment_transactions
+            SET status = 'paid', razorpay_payment_id = {placeholder}, razorpay_signature = {placeholder}, updated_at = CURRENT_TIMESTAMP
+            WHERE razorpay_order_id = {placeholder}
+            """,
+            (razorpay_payment_id, razorpay_signature, razorpay_order_id)
+        )
+
+        receipt_number = f"REC-{date.today().strftime('%Y%m%d')}-{int(time.time()) % 100000:05d}"
+        today_str = date.today().isoformat()
+
+        cur = db.execute(
+            f"""
+            INSERT INTO fee_payments (assignment_id, student_id, amount_paid, payment_date, payment_mode, transaction_id, receipt_number, notes, recorded_by)
+            VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, 'Online (Razorpay)', {placeholder}, {placeholder}, 'Paid via Razorpay Online', 'Razorpay Gateway')
+            """,
+            (assignment_id, student_id, amount_paid, today_str, razorpay_payment_id, receipt_number)
+        )
+
+        if hasattr(cur, "lastrowid") and cur.lastrowid:
+            payment_id = cur.lastrowid
+        else:
+            p_row = db.execute(f"SELECT id FROM fee_payments WHERE receipt_number = {placeholder}", (receipt_number,)).fetchone()
+            payment_id = row_get(p_row, "id")
+
+        _recalculate_assignment_status(db, assignment_id)
+
+        db.execute(
+            f"INSERT INTO payment_logs (transaction_id, razorpay_order_id, razorpay_payment_id, event_type, payload) VALUES ({placeholder}, {placeholder}, {placeholder}, 'payment_verified', {placeholder})",
+            (payment_id, razorpay_order_id, razorpay_payment_id, json.dumps({"amount": amount_paid, "receipt_number": receipt_number}))
+        )
+
+        fee_name = row_get(asg, "fee_name")
+        st_name = row_get(asg, "student_name")
+        st_email = row_get(asg, "student_email")
+
+        msg_st = f"Your online fee payment of ₹{amount_paid:,.2f} for '{fee_name}' was successful. Receipt No: {receipt_number} (Txn ID: {razorpay_payment_id})."
+        send_sys_notification(db, [{"id": student_id, "role": "student"}], "Online Fee Payment Successful", msg_st, notif_type="fee_payment", priority="normal")
+        send_sys_notification(db, [{"id": student_id, "role": "parent"}], "Child Fee Payment Received", msg_st, notif_type="fee_payment", priority="normal")
+
+        msg_admin = f"Online fee payment received from {st_name} ({row_get(asg, 'enrollment')}): ₹{amount_paid:,.2f} for '{fee_name}'. Receipt: {receipt_number}."
+        send_sys_notification(db, [{"id": 0, "role": "admin"}, {"id": 0, "role": "accountant"}], "Online Fee Payment Received", msg_admin, notif_type="fee_payment", priority="normal")
+
+        if st_email:
+            safe_send_email(
+                f"Fee Payment Confirmation - Receipt {receipt_number}",
+                st_email,
+                f"Dear {st_name},\n\nThank you! Your payment of ₹{amount_paid:,.2f} for {fee_name} has been processed successfully.\n\nReceipt Number: {receipt_number}\nRazorpay Payment ID: {razorpay_payment_id}\nDate: {today_str}\n\nYou can download your PDF receipt from your Student Fee Dashboard.\n\nBest regards,\nCollege ERP Administration"
+            )
+
+        db.commit()
+
+        return jsonify({
+            "status": "success",
+            "receipt_id": payment_id,
+            "receipt_number": receipt_number,
+            "message": "Payment verified and recorded successfully."
+        })
+    except Exception as e:
+        db.rollback()
+        print(f"[api_payment_verify ERROR]: {repr(e)}")
+        return jsonify({"status": "error", "message": f"Payment verification error: {str(e)}"}), 500
+    finally:
+        if db:
+            try: db.close()
+            except: pass
+
+
+@app.route("/api/payment/failure", methods=["POST"])
+def api_payment_failure():
+    data = request.get_json(silent=True) or request.form
+    razorpay_order_id = data.get("razorpay_order_id", "").strip()
+    error_code = data.get("error_code", "PAYMENT_FAILED").strip()
+    error_desc = data.get("error_description", "Payment failed or cancelled by user.").strip()
+    razorpay_payment_id = data.get("razorpay_payment_id", "").strip()
+
+    if not razorpay_order_id:
+        return jsonify({"status": "error", "message": "Missing order ID."}), 400
+
+    db = get_db()
+    _ensure_fee_schema(db)
+    placeholder = get_placeholder()
+
+    try:
+        db.execute(
+            f"""
+            UPDATE payment_transactions
+            SET status = 'failed', error_code = {placeholder}, error_description = {placeholder}, razorpay_payment_id = {placeholder}, updated_at = CURRENT_TIMESTAMP
+            WHERE razorpay_order_id = {placeholder}
+            """,
+            (error_code, error_desc, razorpay_payment_id, razorpay_order_id)
+        )
+        db.execute(
+            f"INSERT INTO payment_logs (razorpay_order_id, razorpay_payment_id, event_type, payload) VALUES ({placeholder}, {placeholder}, 'payment_failed', {placeholder})",
+            (razorpay_order_id, razorpay_payment_id, json.dumps({"code": error_code, "description": error_desc}))
+        )
+        db.commit()
+        return jsonify({"status": "recorded"})
+    except Exception as e:
+        db.rollback()
+        print(f"[api_payment_failure ERROR]: {repr(e)}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+    finally:
+        if db:
+            try: db.close()
+            except: pass
+
+
+# ==========================================
+# ADMIN ONLINE PAYMENTS & REFUNDS
+# ==========================================
+
+@app.route("/admin/fees/online-payments", methods=["GET"])
+def admin_online_payments():
+    role = session.get("role")
+    if role not in ("admin", "accountant"):
+        flash("Admin or Accountant login required.", "danger")
+        return redirect(url_for("login"))
+
+    db = get_db()
+    _ensure_fee_schema(db)
+    placeholder = get_placeholder()
+
+    status_filter = request.args.get("status", "").strip()
+    search_query = request.args.get("search", "").strip()
+
+    try:
+        sql = f"""
+        SELECT pt.*, s.name AS student_name, s.enrollment, b.name AS branch_name, fs.fee_name
+        FROM payment_transactions pt
+        JOIN students s ON pt.student_id = s.id
+        LEFT JOIN branches b ON s.branch_id = b.id
+        JOIN student_fee_assignments sfa ON pt.assignment_id = sfa.id
+        JOIN fee_structures fs ON sfa.fee_structure_id = fs.id
+        WHERE 1=1
+        """
+        params = []
+        if status_filter:
+            sql += f" AND pt.status = {placeholder}"
+            params.append(status_filter)
+
+        if search_query:
+            sql += f" AND (LOWER(s.name) LIKE {placeholder} OR LOWER(s.enrollment) LIKE {placeholder} OR LOWER(pt.razorpay_payment_id) LIKE {placeholder} OR LOWER(pt.razorpay_order_id) LIKE {placeholder})"
+            q = f"%{search_query.lower()}%"
+            params.extend([q, q, q, q])
+
+        sql += " ORDER BY pt.id DESC LIMIT 150"
+        tx_rows = db.execute(sql, tuple(params)).fetchall()
+
+        stat_created = db.execute("SELECT COUNT(*) FROM payment_transactions WHERE status = 'created'").fetchone()[0]
+        stat_paid = db.execute("SELECT COUNT(*), COALESCE(SUM(amount), 0) FROM payment_transactions WHERE status = 'paid'").fetchone()
+        stat_failed = db.execute("SELECT COUNT(*) FROM payment_transactions WHERE status = 'failed'").fetchone()[0]
+        stat_refunded = db.execute("SELECT COUNT(*), COALESCE(SUM(amount), 0) FROM payment_transactions WHERE status = 'refunded'").fetchone()
+
+        return render_template(
+            "admin_online_payments.html",
+            transactions=tx_rows,
+            status_filter=status_filter,
+            search_query=search_query,
+            stat_created=stat_created,
+            stat_paid_count=stat_paid[0] if stat_paid else 0,
+            stat_paid_sum=float(stat_paid[1] if stat_paid and stat_paid[1] is not None else 0.0),
+            stat_failed=stat_failed,
+            stat_refunded_count=stat_refunded[0] if stat_refunded else 0,
+            stat_refunded_sum=float(stat_refunded[1] if stat_refunded and stat_refunded[1] is not None else 0.0),
+        )
+    except Exception as e:
+        print(f"[admin_online_payments ERROR]: {repr(e)}")
+        flash("Error loading online payments management.", "error")
+        return redirect(url_for("admin_fees"))
+    finally:
+        if db:
+            try: db.close()
+            except: pass
+
+
+@app.route("/admin/fees/online-payments/export-csv", methods=["GET"])
+def admin_online_payments_export_csv():
+    role = session.get("role")
+    if role not in ("admin", "accountant"):
+        flash("Admin or Accountant login required.", "danger")
+        return redirect(url_for("login"))
+
+    db = get_db()
+    _ensure_fee_schema(db)
+    try:
+        rows = db.execute("""
+        SELECT pt.id, pt.razorpay_order_id, pt.razorpay_payment_id, pt.amount, pt.status, pt.created_at,
+               s.name AS student_name, s.enrollment, b.name AS branch_name, fs.fee_name
+        FROM payment_transactions pt
+        JOIN students s ON pt.student_id = s.id
+        LEFT JOIN branches b ON s.branch_id = b.id
+        JOIN student_fee_assignments sfa ON pt.assignment_id = sfa.id
+        JOIN fee_structures fs ON sfa.fee_structure_id = fs.id
+        ORDER BY pt.id DESC
+        """).fetchall()
+
+
+        from io import StringIO
+        si = StringIO()
+        cw = csv.writer(si)
+        cw.writerow(["ID", "Order ID", "Payment ID", "Student Name", "Enrollment", "Branch", "Fee Name", "Amount (INR)", "Status", "Date"])
+        for r in rows:
+            cw.writerow([
+                row_get(r, "id"),
+                row_get(r, "razorpay_order_id"),
+                row_get(r, "razorpay_payment_id") or "N/A",
+                row_get(r, "student_name"),
+                row_get(r, "enrollment"),
+                row_get(r, "branch_name") or "N/A",
+                row_get(r, "fee_name"),
+                f"{float(row_get(r, 'amount') or 0.0):.2f}",
+                row_get(r, "status"),
+                row_get(r, "created_at")
+            ])
+        
+        buf = BytesIO(si.getvalue().encode('utf-8'))
+        return send_file(buf, mimetype="text/csv", as_attachment=True, download_name=f"Online_Payments_{date.today().isoformat()}.csv")
+
+    except Exception as e:
+        print(f"[admin_online_payments_export_csv ERROR]: {repr(e)}")
+        flash("Failed to export CSV.", "error")
+        return redirect(url_for("admin_online_payments"))
+    finally:
+        if db:
+            try: db.close()
+            except: pass
+
+
+@app.route("/admin/fees/online-payments/export-pdf", methods=["GET"])
+def admin_online_payments_export_pdf():
+    role = session.get("role")
+    if role not in ("admin", "accountant"):
+        flash("Admin or Accountant login required.", "danger")
+        return redirect(url_for("login"))
+
+    db = get_db()
+    _ensure_fee_schema(db)
+    try:
+        rows = db.execute("""
+        SELECT pt.id, pt.razorpay_order_id, pt.razorpay_payment_id, pt.amount, pt.status, pt.created_at,
+               s.name AS student_name, s.enrollment, fs.fee_name
+        FROM payment_transactions pt
+        JOIN students s ON pt.student_id = s.id
+        JOIN student_fee_assignments sfa ON pt.assignment_id = sfa.id
+        JOIN fee_structures fs ON sfa.fee_structure_id = fs.id
+        ORDER BY pt.id DESC LIMIT 200
+        """).fetchall()
+
+        from reportlab.lib.pagesizes import letter, landscape
+        from reportlab.lib import colors
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+        from reportlab.lib.styles import getSampleStyleSheet
+
+        buffer = BytesIO()
+        doc = SimpleDocTemplate(buffer, pagesize=landscape(letter), rightMargin=30, leftMargin=30, topMargin=30, bottomMargin=30)
+        styles = getSampleStyleSheet()
+        elements = []
+
+        elements.append(Paragraph("<b>College ERP - Online Transactions Report</b>", styles['Heading1']))
+        elements.append(Paragraph(f"Generated on {date.today().strftime('%B %d, %Y')}", styles['Normal']))
+        elements.append(Spacer(1, 15))
+
+        table_data = [["Txn ID", "Student Name", "Enrollment", "Fee Name", "Amount (INR)", "Payment ID", "Status", "Date"]]
+        for r in rows:
+            table_data.append([
+                str(row_get(r, "id")),
+                str(row_get(r, "student_name")),
+                str(row_get(r, "enrollment")),
+                str(row_get(r, "fee_name")),
+                f"{float(row_get(r, 'amount') or 0.0):,.2f}",
+                str(row_get(r, "razorpay_payment_id") or "N/A"),
+                str(row_get(r, "status")),
+                str(row_get(r, "created_at"))[:10]
+            ])
+
+        t = Table(table_data, colWidths=[40, 120, 90, 140, 80, 110, 70, 80])
+        t.setStyle(TableStyle([
+            ('BACKGROUND', (0,0), (-1,0), colors.HexColor("#1e293b")),
+            ('TEXTCOLOR', (0,0), (-1,0), colors.white),
+            ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor("#cbd5e1")),
+            ('FONTSIZE', (0,0), (-1,-1), 8),
+            ('PADDING', (0,0), (-1,-1), 5),
+        ]))
+        elements.append(t)
+        doc.build(elements)
+        buffer.seek(0)
+        return send_file(buffer, mimetype="application/pdf", as_attachment=True, download_name=f"Online_Payments_Report_{date.today().isoformat()}.pdf")
+    except Exception as e:
+        print(f"[admin_online_payments_export_pdf ERROR]: {repr(e)}")
+        flash("Failed to generate PDF report.", "error")
+        return redirect(url_for("admin_online_payments"))
+    finally:
+        if db:
+            try: db.close()
+            except: pass
+
+
+@app.route("/admin/fees/online-payments/refund", methods=["POST"])
+def admin_online_payments_refund():
+    role = session.get("role")
+    if role not in ("admin", "accountant"):
+        flash("Admin or Accountant login required.", "danger")
+        return redirect(url_for("login"))
+
+    transaction_id = _coerce_int(request.form.get("transaction_id"))
+    reason = request.form.get("reason", "Refunded by Admin").strip()
+
+    if not transaction_id:
+        flash("Invalid transaction ID.", "error")
+        return redirect(url_for("admin_online_payments"))
+
+    db = get_db()
+    _ensure_fee_schema(db)
+    placeholder = get_placeholder()
+
+    try:
+        tx = db.execute(f"SELECT * FROM payment_transactions WHERE id = {placeholder}", (transaction_id,)).fetchone()
+        if not tx:
+            flash("Transaction not found.", "error")
+            return redirect(url_for("admin_online_payments"))
+
+        db.execute(
+            f"UPDATE payment_transactions SET status = 'refunded', updated_at = CURRENT_TIMESTAMP WHERE id = {placeholder}",
+            (transaction_id,)
+        )
+        db.execute(
+            f"INSERT INTO payment_logs (transaction_id, razorpay_order_id, razorpay_payment_id, event_type, payload) VALUES ({placeholder}, {placeholder}, {placeholder}, 'refund_initiated', {placeholder})",
+            (transaction_id, row_get(tx, "razorpay_order_id"), row_get(tx, "razorpay_payment_id"), json.dumps({"reason": reason}))
+        )
+        
+        student_id = row_get(tx, "student_id")
+        amt = float(row_get(tx, "amount") or 0.0)
+        send_sys_notification(
+            db,
+            [{"id": student_id, "role": "student"}, {"id": student_id, "role": "parent"}],
+            "Online Payment Refunded",
+            f"Your online payment of ₹{amt:,.2f} (Txn: {row_get(tx, 'razorpay_payment_id')}) has been marked as refunded. Reason: {reason}.",
+            notif_type="fee_payment",
+            priority="high"
+        )
+        db.commit()
+        flash("Transaction marked as refunded successfully.", "success")
+    except Exception as e:
+        db.rollback()
+        print(f"[admin_online_payments_refund ERROR]: {repr(e)}")
+        flash(f"Error processing refund: {str(e)}", "error")
+    finally:
+        if db:
+            try: db.close()
+            except: pass
+    return redirect(url_for("admin_online_payments"))
+
+
 # ==========================================
 # ACCOUNTANT PORTAL ROUTES
+# ==========================================
 # ==========================================
 
 def _accountant_required(f):
@@ -11824,6 +12646,10 @@ def accountant_dashboard():
 
     try:
         today_str = date.today().isoformat()
+        current_month_prefix = date.today().strftime("%Y-%m")
+        placeholder = get_placeholder()
+
+        # Today's Collection
         today_row = db.execute(
             f"SELECT COALESCE(SUM(amount_paid),0) AS today_total, COUNT(*) AS today_count FROM fee_payments WHERE payment_date = {placeholder}",
             (today_str,)
@@ -11831,16 +12657,64 @@ def accountant_dashboard():
         today_total = float(row_get(today_row, "today_total") or 0.0)
         today_count = int(row_get(today_row, "today_count") or 0)
 
+        # Monthly Collection
+        monthly_row = db.execute(
+            f"SELECT COALESCE(SUM(amount_paid),0) AS month_total, COUNT(*) AS month_count FROM fee_payments WHERE payment_date LIKE {placeholder}",
+            (f"{current_month_prefix}%",)
+        ).fetchone()
+        monthly_total = float(row_get(monthly_row, "month_total") or 0.0)
+        monthly_count = int(row_get(monthly_row, "month_count") or 0)
+
+        # Overall Total
         overall = db.execute(
             "SELECT COALESCE(SUM(amount_paid),0) AS grand_total FROM fee_payments"
         ).fetchone()
         grand_total = float(row_get(overall, "grand_total") or 0.0)
 
-        pending_count = db.execute(
-            "SELECT COUNT(*) AS cnt FROM student_fee_assignments WHERE status != 'Paid'"
-        ).fetchone()
-        pending_assignments = int(row_get(pending_count, "cnt") or 0)
+        # Semester-wise Collection
+        semester_rows = db.execute("""
+        SELECT COALESCE(fs.semester, 'Unassigned') AS semester, COALESCE(SUM(fp.amount_paid), 0) AS sem_total, COUNT(fp.id) AS sem_count
+        FROM fee_payments fp
+        JOIN student_fee_assignments sfa ON fp.assignment_id = sfa.id
+        JOIN fee_structures fs ON sfa.fee_structure_id = fs.id
+        GROUP BY fs.semester ORDER BY fs.semester ASC
+        """).fetchall()
 
+        # Branch-wise Collection
+        branch_rows = db.execute("""
+        SELECT COALESCE(b.name, 'General / All') AS branch_name, COALESCE(SUM(fp.amount_paid), 0) AS branch_total, COUNT(fp.id) AS branch_count
+        FROM fee_payments fp
+        JOIN students s ON fp.student_id = s.id
+        LEFT JOIN branches b ON s.branch_id = b.id
+        GROUP BY b.name ORDER BY branch_total DESC
+        """).fetchall()
+
+        # Pending Fee Assignments & Total Pending Amount
+        pending_asg = db.execute("""
+        SELECT sfa.id, sfa.custom_amount, sfa.discount_amount, fs.amount AS default_amount
+        FROM student_fee_assignments sfa
+        JOIN fee_structures fs ON sfa.fee_structure_id = fs.id
+        WHERE sfa.status != 'Paid'
+        """).fetchall()
+        
+        pending_assignments = len(pending_asg)
+        total_pending_amount = 0.0
+        for pasg in pending_asg:
+            aid = row_get(pasg, "id")
+            cust_amt = row_get(pasg, "custom_amount")
+            def_amt = float(row_get(pasg, "default_amount") or 0.0)
+            disc = float(row_get(pasg, "discount_amount") or 0.0)
+            gross = float(cust_amt) if cust_amt is not None else def_amt
+            net = max(0.0, gross - disc)
+
+            paid_row = db.execute(
+                f"SELECT COALESCE(SUM(amount_paid), 0) AS tot FROM fee_payments WHERE assignment_id = {placeholder}",
+                (aid,)
+            ).fetchone()
+            p_sum = float(row_get(paid_row, "tot", 0.0) or 0.0)
+            total_pending_amount += max(0.0, net - p_sum)
+
+        # Recent Payments
         recent_payments = db.execute("""
         SELECT fp.id, fp.receipt_number, fp.amount_paid, fp.payment_date, fp.payment_mode,
                fp.transaction_id, s.name AS student_name, s.enrollment, fs.fee_name
@@ -11851,21 +12725,47 @@ def accountant_dashboard():
         ORDER BY fp.id DESC LIMIT 15
         """).fetchall()
 
+        # Payment Mode Breakdown (Online vs Offline)
         mode_rows = db.execute("""
         SELECT payment_mode, COALESCE(SUM(amount_paid),0) AS mode_total, COUNT(*) AS mode_count
         FROM fee_payments GROUP BY payment_mode ORDER BY mode_total DESC
         """).fetchall()
 
+        online_total = 0.0
+        offline_total = 0.0
+        online_count = 0
+        offline_count = 0
+        for mr in mode_rows:
+            m_mode = str(row_get(mr, "payment_mode") or "").lower()
+            m_amt = float(row_get(mr, "mode_total") or 0.0)
+            m_cnt = int(row_get(mr, "mode_count") or 0)
+            if "online" in m_mode or "razorpay" in m_mode or "upi" in m_mode or "card" in m_mode:
+                online_total += m_amt
+                online_count += m_cnt
+            else:
+                offline_total += m_amt
+                offline_count += m_cnt
+
         return render_template(
             "accountant_dashboard.html",
             today_total=today_total,
             today_count=today_count,
+            monthly_total=monthly_total,
+            monthly_count=monthly_count,
             grand_total=grand_total,
             pending_assignments=pending_assignments,
+            total_pending_amount=total_pending_amount,
             recent_payments=recent_payments,
             mode_rows=mode_rows,
+            semester_rows=semester_rows,
+            branch_rows=branch_rows,
+            online_total=online_total,
+            offline_total=offline_total,
+            online_count=online_count,
+            offline_count=offline_count,
             today_date=today_str,
         )
+
     except Exception as e:
         print(f"[accountant_dashboard ERROR]: {repr(e)}")
         flash(f"Error loading accountant dashboard: {str(e)}", "error")

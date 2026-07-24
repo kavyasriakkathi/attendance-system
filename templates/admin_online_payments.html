@@ -1,0 +1,184 @@
+{% extends "layout.html" %}
+{% block head %}
+<title>Online Payments - Admin Management</title>
+<style>
+  .stats-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 1rem;
+    margin-bottom: 1.5rem;
+  }
+  .stat-card {
+    background: #ffffff;
+    border-radius: 10px;
+    padding: 1.25rem;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.05);
+    border-left: 4px solid #2563eb;
+  }
+  .stat-card.green { border-left-color: #10b981; }
+  .stat-card.red { border-left-color: #ef4444; }
+  .stat-card.amber { border-left-color: #f59e0b; }
+  .stat-card.purple { border-left-color: #8b5cf6; }
+
+  .stat-val { font-size: 1.5rem; font-weight: 800; color: #1e293b; margin-top: 0.25rem; }
+  .stat-lbl { font-size: 0.8rem; color: #64748b; font-weight: 700; text-transform: uppercase; }
+
+  .card-box {
+    background: #ffffff;
+    border-radius: 12px;
+    padding: 1.5rem;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.05);
+    margin-bottom: 2rem;
+  }
+
+  .badge-status {
+    padding: 0.35rem 0.75rem;
+    border-radius: 20px;
+    font-size: 0.78rem;
+    font-weight: 700;
+  }
+  .badge-paid { background: #d1fae5; color: #065f46; }
+  .badge-created { background: #e0f2fe; color: #0369a1; }
+  .badge-failed { background: #fee2e2; color: #991b1b; }
+  .badge-refunded { background: #f3e8ff; color: #6b21a8; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="container-fluid" style="max-width: 1300px; margin: 0 auto; padding: 1.5rem 1rem;">
+  <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:1rem; margin-bottom:1.5rem;">
+    <div>
+      <h2 style="margin:0; color:#0f172a; font-weight:800;"><i class="fa-solid fa-credit-card" style="color:#2563eb;"></i> Online Fee Payments</h2>
+      <p style="margin:0.25rem 0 0 0; color:#64748b; font-size:0.95rem;">Monitor Razorpay online transactions, search student payments, handle refunds, and export financial audit logs.</p>
+    </div>
+    <div style="display:flex; gap:0.5rem;">
+      <a href="{{ url_for('admin_online_payments_export_csv') }}" class="btn btn-outline-success" style="padding:0.45rem 1rem; border-radius:6px; font-weight:600; text-decoration:none; border:1px solid #10b981; color:#10b981;">
+        <i class="fa-solid fa-file-csv"></i> Download CSV
+      </a>
+      <a href="{{ url_for('admin_online_payments_export_pdf') }}" class="btn btn-outline-danger" style="padding:0.45rem 1rem; border-radius:6px; font-weight:600; text-decoration:none; border:1px solid #ef4444; color:#ef4444;">
+        <i class="fa-solid fa-file-pdf"></i> Download PDF
+      </a>
+    </div>
+  </div>
+
+  <!-- Summary Cards -->
+  <div class="stats-grid">
+    <div class="stat-card green">
+      <div class="stat-lbl">Successful Payments</div>
+      <div class="stat-val" style="color:#059669;">₹{{ "{:,.2f}".format(stat_paid_sum) }}</div>
+      <span style="font-size:0.8rem; color:#64748b;">Count: {{ stat_paid_count }} transactions</span>
+    </div>
+    <div class="stat-card amber">
+      <div class="stat-lbl">Created Orders</div>
+      <div class="stat-val">{{ stat_created }}</div>
+      <span style="font-size:0.8rem; color:#64748b;">Pending student checkout</span>
+    </div>
+    <div class="stat-card red">
+      <div class="stat-lbl">Failed Payments</div>
+      <div class="stat-val" style="color:#dc2626;">{{ stat_failed }}</div>
+      <span style="font-size:0.8rem; color:#64748b;">Signature / Bank failures</span>
+    </div>
+    <div class="stat-card purple">
+      <div class="stat-lbl">Refunded Transactions</div>
+      <div class="stat-val" style="color:#7c3aed;">₹{{ "{:,.2f}".format(stat_refunded_sum) }}</div>
+      <span style="font-size:0.8rem; color:#64748b;">Count: {{ stat_refunded_count }} refunded</span>
+    </div>
+  </div>
+
+  <!-- Search & Filter Bar -->
+  <div class="card-box" style="padding:1rem 1.25rem;">
+    <form method="GET" action="{{ url_for('admin_online_payments') }}" style="display:flex; flex-wrap:wrap; gap:1rem; align-items:center;">
+      <div style="flex:1; min-width:250px;">
+        <input type="text" name="search" value="{{ search_query }}" placeholder="Search by Student Name, Enrollment, Txn ID, Order ID..." style="width:100%; padding:0.5rem 0.8rem; border-radius:6px; border:1px solid #cbd5e1;">
+      </div>
+      <div>
+        <select name="status" style="padding:0.5rem 0.8rem; border-radius:6px; border:1px solid #cbd5e1;">
+          <option value="">-- All Statuses --</option>
+          <option value="paid" {% if status_filter == 'paid' %}selected{% endif %}>Paid / Success</option>
+          <option value="created" {% if status_filter == 'created' %}selected{% endif %}>Created</option>
+          <option value="failed" {% if status_filter == 'failed' %}selected{% endif %}>Failed</option>
+          <option value="refunded" {% if status_filter == 'refunded' %}selected{% endif %}>Refunded</option>
+        </select>
+      </div>
+      <div>
+        <button type="submit" style="background:#2563eb; color:#ffffff; font-weight:700; border:none; padding:0.5rem 1.25rem; border-radius:6px; cursor:pointer;">
+          <i class="fa-solid fa-magnifying-glass"></i> Filter
+        </button>
+        {% if search_query or status_filter %}
+          <a href="{{ url_for('admin_online_payments') }}" style="color:#64748b; text-decoration:none; margin-left:0.5rem; font-size:0.9rem;">Reset</a>
+        {% endif %}
+      </div>
+    </form>
+  </div>
+
+  <!-- Transactions Table -->
+  <div class="card-box">
+    <h3 style="margin-top:0; color:#1e293b; font-size:1.1rem; font-weight:700; margin-bottom:1rem;">
+      <i class="fa-solid fa-list" style="color:#2563eb;"></i> Payment Transactions Log
+    </h3>
+    <div style="overflow-x:auto;">
+      <table style="width:100%; border-collapse:collapse; text-align:left; font-size:0.88rem;">
+        <thead>
+          <tr style="border-bottom:2px solid #e2e8f0; color:#64748b; background:#f8fafc;">
+            <th style="padding:0.6rem 0.75rem;">ID</th>
+            <th style="padding:0.6rem 0.75rem;">Student Details</th>
+            <th style="padding:0.6rem 0.75rem;">Fee Structure</th>
+            <th style="padding:0.6rem 0.75rem;">Order ID</th>
+            <th style="padding:0.6rem 0.75rem;">Payment ID</th>
+            <th style="padding:0.6rem 0.75rem;">Amount</th>
+            <th style="padding:0.6rem 0.75rem;">Status</th>
+            <th style="padding:0.6rem 0.75rem;">Date & Time</th>
+            <th style="padding:0.6rem 0.75rem; text-align:right;">Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for t in transactions %}
+          <tr style="border-bottom:1px solid #f1f5f9;">
+            <td style="padding:0.6rem 0.75rem; font-weight:600; color:#64748b;">#{{ t.id }}</td>
+            <td style="padding:0.6rem 0.75rem;">
+              <strong style="color:#0f172a; display:block;">{{ t.student_name }}</strong>
+              <span style="font-size:0.78rem; color:#64748b;">Enrollment: {{ t.enrollment }} | Branch: {{ t.branch_name or 'N/A' }}</span>
+            </td>
+            <td style="padding:0.6rem 0.75rem; color:#334155; font-weight:600;">{{ t.fee_name }}</td>
+            <td style="padding:0.6rem 0.75rem; font-family:monospace; color:#475569; font-size:0.8rem;">{{ t.razorpay_order_id }}</td>
+            <td style="padding:0.6rem 0.75rem; font-family:monospace; color:#2563eb; font-size:0.8rem;">{{ t.razorpay_payment_id or 'N/A' }}</td>
+            <td style="padding:0.6rem 0.75rem; font-weight:800; color:#059669;">₹{{ "{:,.2f}".format(t.amount) }}</td>
+            <td style="padding:0.6rem 0.75rem;">
+              {% if t.status == 'paid' %}
+                <span class="badge-status badge-paid"><i class="fa-solid fa-check"></i> Paid</span>
+              {% elif t.status == 'created' %}
+                <span class="badge-status badge-created"><i class="fa-solid fa-hourglass-start"></i> Created</span>
+              {% elif t.status == 'failed' %}
+                <span class="badge-status badge-failed" title="{{ t.error_description or 'Failed' }}"><i class="fa-solid fa-xmark"></i> Failed</span>
+              {% elif t.status == 'refunded' %}
+                <span class="badge-status badge-refunded"><i class="fa-solid fa-rotate-left"></i> Refunded</span>
+              {% else %}
+                <span class="badge-status badge-created">{{ t.status }}</span>
+              {% endif %}
+            </td>
+            <td style="padding:0.6rem 0.75rem; color:#64748b; font-size:0.8rem;">{{ t.created_at }}</td>
+            <td style="padding:0.6rem 0.75rem; text-align:right;">
+              {% if t.status == 'paid' %}
+                <form method="POST" action="{{ url_for('admin_online_payments_refund') }}" style="display:inline;" onsubmit="return confirm('Are you sure you want to mark transaction #{{ t.id }} as refunded?');">
+                  <input type="hidden" name="transaction_id" value="{{ t.id }}">
+                  <input type="hidden" name="reason" value="Refunded by Admin">
+                  <button type="submit" style="background:#f3e8ff; color:#6b21a8; border:1px solid #d8b4fe; font-size:0.78rem; font-weight:700; padding:0.25rem 0.6rem; border-radius:4px; cursor:pointer;">
+                    <i class="fa-solid fa-rotate-left"></i> Refund
+                  </button>
+                </form>
+              {% else %}
+                <span style="color:#94a3b8; font-size:0.8rem;">-</span>
+              {% endif %}
+            </td>
+          </tr>
+          {% else %}
+          <tr>
+            <td colspan="9" style="text-align:center; padding:2rem; color:#94a3b8;">No online transactions recorded matching your search.</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+{% endblock %}
