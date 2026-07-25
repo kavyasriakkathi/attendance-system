@@ -4189,22 +4189,36 @@ def student_login():
                     flash(f"Account locked due to too many failed attempts. Try again after {locked_until_str}.", "warning")
                 return render_template("student_login.html", next=next_url)
 
-            # ── Primary lookup: exact username match ───────────────────────
+            # ── Primary lookup: case-insensitive & trimmed username match ───────
             user = db.execute(
-                f"SELECT id, username, password, role, student_id FROM users WHERE username = {placeholder}",
+                f"""
+                SELECT id, username, password, role, student_id
+                FROM users
+                WHERE LOWER(TRIM(username)) = LOWER(TRIM({placeholder})) AND role = 'student'
+                """,
                 (username,),
             ).fetchone()
 
-            # ── Fallback: some old CSV imports stored enrollment as "12345.0"
-            #    (pandas float → str). Try matching via students.enrollment so
-            #    students who type their clean enrollment can still log in.
+            # ── Fallback lookup: via students table (case-insensitive & float trim) ──
             if not user:
+                clean_uname = username.strip()
+                if clean_uname.endswith(".0"):
+                    clean_uname = clean_uname[:-2]
+
                 student_row = db.execute(
-                    f"SELECT id FROM students WHERE enrollment = {placeholder}",
-                    (username,),
+                    f"""
+                    SELECT id, enrollment
+                    FROM students
+                    WHERE LOWER(TRIM(enrollment)) = LOWER(TRIM({placeholder}))
+                       OR LOWER(TRIM(enrollment)) = LOWER(TRIM({placeholder}))
+                    """,
+                    (username, clean_uname),
                 ).fetchone()
+
                 if student_row:
                     student_id_fb = row_get(student_row, "id")
+                    st_enrollment = row_get(student_row, "enrollment")
+
                     user = db.execute(
                         f"""
                         SELECT u.id, u.username, u.password, u.role, u.student_id
@@ -4215,26 +4229,110 @@ def student_login():
                         (student_id_fb,),
                     ).fetchone()
 
-            if user and row_get(user, "role") == "student" and check_password_hash(row_get(user, "password"), password):
-                # ── Successful login ──────────────────────────────────────────
-                _track_login_attempt(db, username, success=True)
-                _log_audit(db, "LOGIN_SUCCESS", entity="users",
-                           entity_id=row_get(user, "id"),
-                           detail=f"Role: {row_get(user, 'role')}")
+                    # Auto-provision user record if student exists in students table but has no user account
+                    if not user and st_enrollment:
+                        def_pass = st_enrollment[-4:] if len(st_enrollment) >= 4 else st_enrollment
+                        pass_hash = _fast_student_hash(def_pass)
+                        try:
+                            if str(app.config.get("DATABASE", "")).startswith("postgres"):
+                                cur = db.execute(
+                                    f"""
+                                    INSERT INTO users (username, password, role, student_id)
+                                    VALUES ({placeholder}, {placeholder}, 'student', {placeholder})
+                                    RETURNING id, username, password, role, student_id
+                                    """,
+                                    (st_enrollment, pass_hash, student_id_fb),
+                                )
+                                user = cur.fetchone()
+                            else:
+                                cur = db.execute(
+                                    f"""
+                                    INSERT INTO users (username, password, role, student_id)
+                                    VALUES ({placeholder}, {placeholder}, 'student', {placeholder})
+                                    """,
+                                    (st_enrollment, pass_hash, student_id_fb),
+                                )
+                                new_u_id = cur.lastrowid
+                                user = db.execute(
+                                    f"SELECT id, username, password, role, student_id FROM users WHERE id = {placeholder}",
+                                    (new_u_id,),
+                                ).fetchone()
+                            db.commit()
+                        except Exception as create_u_err:
+                            db.rollback()
+                            print(f"[student_login] Auto-create student user error: {repr(create_u_err)}")
 
-                session.clear()
-                session["user_id"] = row_get(user, "id")
-                session["username"] = row_get(user, "username")
-                session["role"] = row_get(user, "role")
-                session["student_id"] = row_get(user, "student_id")
-                session["_login_at"] = int(time.time())
-                if next_url:
-                    return redirect(next_url)
-                return redirect(url_for("student_dashboard"))
+            # ── Verify password with hash, plain-text fallback, and default PIN match ──
+            if user and row_get(user, "role") == "student":
+                db_password = row_get(user, "password") or ""
+                st_id = row_get(user, "student_id")
+
+                if not st_id:
+                    st_row = db.execute(
+                        f"SELECT id FROM students WHERE LOWER(TRIM(enrollment)) = LOWER(TRIM({placeholder}))",
+                        (row_get(user, "username"),),
+                    ).fetchone()
+                    if st_row:
+                        st_id = row_get(st_row, "id")
+                        try:
+                            db.execute(
+                                f"UPDATE users SET student_id = {placeholder} WHERE id = {placeholder}",
+                                (st_id, row_get(user, "id")),
+                            )
+                            db.commit()
+                        except Exception:
+                            db.rollback()
+
+                pwd_valid = False
+                try:
+                    if check_password_hash(db_password, password):
+                        pwd_valid = True
+                except Exception:
+                    pass
+
+                if not pwd_valid and db_password == password:
+                    pwd_valid = True
+                    try:
+                        db.execute(
+                            f"UPDATE users SET password = {placeholder} WHERE id = {placeholder}",
+                            (_fast_student_hash(password), row_get(user, "id")),
+                        )
+                        db.commit()
+                    except Exception:
+                        db.rollback()
+
+                if not pwd_valid and username:
+                    clean_u = username.strip()
+                    default_pin = clean_u[-4:] if len(clean_u) >= 4 else clean_u
+                    if password == default_pin:
+                        try:
+                            if check_password_hash(db_password, default_pin) or db_password == default_pin:
+                                pwd_valid = True
+                        except Exception:
+                            if db_password == default_pin:
+                                pwd_valid = True
+
+                if pwd_valid:
+                    # ── Successful login ──────────────────────────────────────────
+                    _track_login_attempt(db, username, success=True)
+                    _log_audit(db, "LOGIN_SUCCESS", entity="users",
+                               entity_id=row_get(user, "id"),
+                               detail=f"Role: {row_get(user, 'role')}")
+
+                    session.clear()
+                    session["user_id"] = row_get(user, "id")
+                    session["username"] = row_get(user, "username")
+                    session["role"] = row_get(user, "role")
+                    session["student_id"] = st_id
+                    session["_login_at"] = int(time.time())
+                    if next_url:
+                        return redirect(next_url)
+                    return redirect(url_for("student_dashboard"))
 
             # ── Failed login ──────────────────────────────────────────────────
             _track_login_attempt(db, username, success=False)
             flash("Invalid student login credentials.", "error")
+
 
         except Exception as e:
             print(f"[student_login] ERROR: {repr(e)}")
@@ -5206,12 +5304,15 @@ def teacher_attendance_records():
 
 
 @app.route("/student_dashboard")
-@login_required
 def student_dashboard():
+    if "user_id" not in session or session.get("role") != "student":
+        flash("Please login to access student dashboard.", "warning")
+        return redirect(url_for("student_login"))
     student_id = session.get("student_id")
     if not student_id:
         flash("Student record not found.", "error")
         return redirect(url_for("student_login"))
+
 
     db = None
     try:
