@@ -11320,9 +11320,80 @@ def _recalculate_assignment_status(db, assignment_id):
         return "Unpaid"
 
 
+def _auto_assign_matching_fees_for_student(db, student_id=None):
+    """Safely auto-assign missing fee structures matching the student's branch/semester/year.
+    Never overwrites existing assignments or paid fee records. Safe & idempotent across SQLite and PostgreSQL."""
+    placeholder = get_placeholder()
+    is_pg = str(app.config.get("DATABASE", "")).startswith("postgres")
+    try:
+        if student_id:
+            students = db.execute(
+                f"SELECT * FROM students WHERE id = {placeholder}",
+                (student_id,)
+            ).fetchall()
+        else:
+            students = db.execute("SELECT * FROM students").fetchall()
+
+
+        if not students:
+            return
+
+        structures = db.execute("SELECT id, branch_id, semester, academic_year FROM fee_structures").fetchall()
+        if not structures:
+            return
+
+        for st in students:
+            sid = row_get(st, "id")
+            st_branch = row_get(st, "branch_id")
+            st_sem = (row_get(st, "semester") or "").strip()
+            st_year = (row_get(st, "academic_year") or "").strip()
+
+            for fs in structures:
+                fs_id = row_get(fs, "id")
+                fs_branch = row_get(fs, "branch_id")
+                fs_sem = (row_get(fs, "semester") or "").strip()
+                fs_year = (row_get(fs, "academic_year") or "").strip()
+
+                # Branch match: NULL/0 matches all branches, or exact branch_id match
+                branch_match = (fs_branch is None or fs_branch == 0 or (st_branch and fs_branch == st_branch))
+                # Semester match: NULL/empty matches all semesters, or exact match
+                sem_match = (not fs_sem or not st_sem or fs_sem.lower() == st_sem.lower())
+                # Year match: NULL/empty matches all years, or exact match
+                year_match = (not fs_year or not st_year or fs_year.lower() == st_year.lower())
+
+                if branch_match and sem_match and year_match:
+                    try:
+                        if is_pg:
+                            db.execute(
+                                f"""
+                                INSERT INTO student_fee_assignments (student_id, fee_structure_id, status)
+                                VALUES ({placeholder}, {placeholder}, 'Unpaid')
+                                ON CONFLICT (student_id, fee_structure_id) DO NOTHING
+                                """,
+                                (sid, fs_id)
+                            )
+                        else:
+                            db.execute(
+                                f"""
+                                INSERT OR IGNORE INTO student_fee_assignments (student_id, fee_structure_id, status)
+                                VALUES ({placeholder}, {placeholder}, 'Unpaid')
+                                """,
+                                (sid, fs_id)
+                            )
+                    except Exception:
+                        pass
+        db.commit()
+    except Exception as e:
+        try: db.rollback()
+        except Exception: pass
+        print(f"[_auto_assign_matching_fees_for_student ERROR]: {repr(e)}")
+
+
 def _get_student_fee_summary(db, student_id):
     placeholder = get_placeholder()
     _ensure_fee_schema(db)
+    _auto_assign_matching_fees_for_student(db, student_id)
+
     
     query = f"""
     SELECT sfa.id AS assignment_id, sfa.student_id, sfa.fee_structure_id, sfa.custom_amount,
@@ -11502,7 +11573,9 @@ def admin_fee_structures():
                 (fee_name, category, amount, academic_year, semester, branch_id, due_date, description)
             )
             db.commit()
+            _auto_assign_matching_fees_for_student(db)
             flash(f"Fee structure '{fee_name}' created successfully!", "success")
+
         except Exception as e:
             print(f"[admin_fee_structures insert ERROR]: {repr(e)}")
             flash(f"Failed to create fee structure: {str(e)}", "error")
